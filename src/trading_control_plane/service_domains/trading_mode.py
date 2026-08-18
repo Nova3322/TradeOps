@@ -1,24 +1,27 @@
 from __future__ import annotations
 
-from typing import ClassVar
+from datetime import datetime
+from typing import Any, ClassVar
+from uuid import UUID, uuid4
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from trading_control_plane import authorization_policy, domain, models, rejections
+from trading_control_plane import execution_scope as scope_rules
 from trading_control_plane.service_component import ServiceComponent
-
-# The domain implementation intentionally consumes the explicit service_core export surface.
-# ruff: noqa: F403, F405
-from trading_control_plane.service_core import *
 
 
 class TradingModeService(ServiceComponent):
     """Own the single team execution mode boundary: TESTNET or LIVE."""
 
     _CONFIRMATIONS: ClassVar[dict[str, str]] = {
-        TeamExecutionMode.TESTNET.value: "SWITCH_TO_TESTNET",
-        TeamExecutionMode.LIVE.value: "I_CONFIRM_LIVE_PRODUCTION_MONEY",
+        domain.TeamExecutionMode.TESTNET.value: "SWITCH_TO_TESTNET",
+        domain.TeamExecutionMode.LIVE.value: "I_CONFIRM_LIVE_PRODUCTION_MONEY",
     }
 
     @staticmethod
-    def _account_environment_valid(account: ExchangeAccount) -> bool:
+    def _account_environment_valid(account: models.ExchangeAccount) -> bool:
         metadata = account.credential_metadata or {}
         return metadata.get("environment") == account.environment
 
@@ -27,12 +30,14 @@ class TradingModeService(ServiceComponent):
         blockers: list[dict[str, Any]] = []
         active_intents = int(
             session.scalar(
-                select(func.count(OrderIntent.intent_id))
-                .join(Campaign, Campaign.campaign_id == OrderIntent.campaign_id)
+                select(func.count(models.OrderIntent.intent_id))
+                .join(
+                    models.Campaign, models.Campaign.campaign_id == models.OrderIntent.campaign_id
+                )
                 .where(
-                    Campaign.team_id == team_id,
-                    Campaign.environment == environment,
-                    OrderIntent.status.in_(ACTIVE_INTENT_STATUSES),
+                    models.Campaign.team_id == team_id,
+                    models.Campaign.environment == environment,
+                    models.OrderIntent.status.in_(scope_rules.ACTIVE_INTENT_STATUSES),
                 )
             )
             or 0
@@ -42,14 +47,14 @@ class TradingModeService(ServiceComponent):
 
         open_orders = int(
             session.scalar(
-                select(func.count(VenueOrder.venue_order_fact_id)).where(
-                    VenueOrder.team_id == team_id,
-                    VenueOrder.environment == environment,
-                    VenueOrder.status.in_(
+                select(func.count(models.VenueOrder.venue_order_fact_id)).where(
+                    models.VenueOrder.team_id == team_id,
+                    models.VenueOrder.environment == environment,
+                    models.VenueOrder.status.in_(
                         (
-                            VenueOrderStatus.SENT.value,
-                            VenueOrderStatus.PARTIALLY_FILLED.value,
-                            VenueOrderStatus.UNKNOWN.value,
+                            domain.VenueOrderStatus.SENT.value,
+                            domain.VenueOrderStatus.PARTIALLY_FILLED.value,
+                            domain.VenueOrderStatus.UNKNOWN.value,
                         )
                     ),
                 )
@@ -61,10 +66,11 @@ class TradingModeService(ServiceComponent):
 
         open_positions = int(
             session.scalar(
-                select(func.count(Position.position_id)).where(
-                    Position.team_id == team_id,
-                    Position.environment == environment,
-                    (Position.quantity != 0) | (Position.fact_status == FactStatus.UNKNOWN.value),
+                select(func.count(models.Position.position_id)).where(
+                    models.Position.team_id == team_id,
+                    models.Position.environment == environment,
+                    (models.Position.quantity != 0)
+                    | (models.Position.fact_status == domain.FactStatus.UNKNOWN.value),
                 )
             )
             or 0
@@ -73,21 +79,23 @@ class TradingModeService(ServiceComponent):
             blockers.append({"code": "SOURCE_POSITIONS_OPEN_OR_UNKNOWN", "count": open_positions})
         return blockers
 
-    def _target_readiness(self, session: Session, team: Team, environment: str) -> dict[str, Any]:
+    def _target_readiness(
+        self, session: Session, team: models.Team, environment: str
+    ) -> dict[str, Any]:
         accounts = session.scalars(
-            select(ExchangeAccount)
+            select(models.ExchangeAccount)
             .where(
-                ExchangeAccount.team_id == team.team_id,
-                ExchangeAccount.environment == environment,
-                ExchangeAccount.active,
+                models.ExchangeAccount.team_id == team.team_id,
+                models.ExchangeAccount.environment == environment,
+                models.ExchangeAccount.active,
             )
-            .order_by(ExchangeAccount.venue, ExchangeAccount.label)
+            .order_by(models.ExchangeAccount.venue, models.ExchangeAccount.label)
         ).all()
         ready_accounts: list[dict[str, Any]] = []
         rejected_accounts: list[dict[str, Any]] = []
         for account in accounts:
             reasons: list[str] = []
-            if environment == ExecutionEnvironment.TESTNET.value and account.venue not in {
+            if environment == domain.ExecutionEnvironment.TESTNET.value and account.venue not in {
                 "BINANCE",
                 "HYPERLIQUID",
             }:
@@ -126,15 +134,17 @@ class TradingModeService(ServiceComponent):
         elif not ready_accounts:
             advisories.append({"code": "TARGET_ACCOUNT_NOT_READY", "count": len(accounts)})
         risk_policy = session.scalar(
-            select(RiskPolicy).where(RiskPolicy.team_id == team.team_id, RiskPolicy.active)
+            select(models.RiskPolicy).where(
+                models.RiskPolicy.team_id == team.team_id, models.RiskPolicy.active
+            )
         )
         if risk_policy is None:
             blockers.append({"code": "RISK_POLICY_MISSING", "count": 1})
         if (
             team.execution_mode
             in {
-                TeamExecutionMode.TESTNET.value,
-                TeamExecutionMode.LIVE.value,
+                domain.TeamExecutionMode.TESTNET.value,
+                domain.TeamExecutionMode.LIVE.value,
             }
             and team.execution_mode != environment
         ):
@@ -155,20 +165,20 @@ class TradingModeService(ServiceComponent):
 
     def trading_mode_status(self, *, actor_id: UUID, now: datetime) -> dict[str, Any]:
         with self.database.session_factory() as session:
-            team = self.transactions._require_role(
+            team = self.transactions.require_role(
                 session, actor_id, "venue.view", allow_setup=True
             )
-            actor = session.get(User, actor_id)
+            actor = session.get(models.User, actor_id)
             updated_by = (
                 None
                 if team.execution_mode_updated_by is None
-                else session.get(User, team.execution_mode_updated_by)
+                else session.get(models.User, team.execution_mode_updated_by)
             )
             gates = {
                 row.capability_key: row.status
                 for row in session.scalars(
-                    select(CapabilityGate).where(
-                        CapabilityGate.capability_key.in_(
+                    select(models.CapabilityGate).where(
+                        models.CapabilityGate.capability_key.in_(
                             ("LIVE_ORDER_SEND", "CAPITAL_TRANSFER", "AUTO_ADD")
                         )
                     )
@@ -177,8 +187,8 @@ class TradingModeService(ServiceComponent):
             readiness = {
                 environment: self._target_readiness(session, team, environment)
                 for environment in (
-                    ExecutionEnvironment.TESTNET.value,
-                    ExecutionEnvironment.LIVE.value,
+                    domain.ExecutionEnvironment.TESTNET.value,
+                    domain.ExecutionEnvironment.LIVE.value,
                 )
             }
             return {
@@ -218,15 +228,15 @@ class TradingModeService(ServiceComponent):
         idempotency_key: str,
         now: datetime,
     ) -> dict[str, Any]:
-        _require_human_web_session(
+        authorization_policy.require_human_web_session(
             "execution mode changes require an interactive human web session"
         )
         normalized_mode = mode.strip().upper()
         if normalized_mode not in self._CONFIRMATIONS:
-            _reject("TEAM_MODE_INVALID", "execution mode must be TESTNET or LIVE")
+            rejections.reject("TEAM_MODE_INVALID", "execution mode must be TESTNET or LIVE")
         expected_confirmation = self._CONFIRMATIONS[normalized_mode]
         if confirmation != expected_confirmation:
-            _reject(
+            rejections.reject(
                 "SECOND_CONFIRMATION_REQUIRED",
                 f"confirmation must exactly equal {expected_confirmation}",
             )
@@ -234,7 +244,7 @@ class TradingModeService(ServiceComponent):
         blocked: list[dict[str, Any]] | None = None
         result: dict[str, Any] | None = None
         with self.database.session_factory.begin() as session:
-            team = self.transactions._require_role(
+            authorized_team = self.transactions.require_role(
                 session,
                 actor_id,
                 "team.manage",
@@ -242,7 +252,9 @@ class TradingModeService(ServiceComponent):
                 allow_setup=True,
             )
             team = session.scalar(
-                select(Team).where(Team.team_id == team.team_id).with_for_update()
+                select(models.Team)
+                .where(models.Team.team_id == authorized_team.team_id)
+                .with_for_update()
             )
             assert team is not None
             operation = f"team.execution-mode:{team.team_id}"
@@ -251,7 +263,7 @@ class TradingModeService(ServiceComponent):
                 "confirmation": confirmation,
                 "expected_version": expected_version,
             }
-            digest, replay = self.transactions._idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -261,7 +273,7 @@ class TradingModeService(ServiceComponent):
             if replay is not None:
                 return replay
             if team.version != expected_version:
-                _reject("VERSION_CONFLICT", "team version changed before mode switch")
+                rejections.reject("VERSION_CONFLICT", "team version changed before mode switch")
             correlation_id = uuid4()
             if team.execution_mode == normalized_mode:
                 result = {
@@ -279,7 +291,7 @@ class TradingModeService(ServiceComponent):
                 readiness = self._target_readiness(session, team, normalized_mode)
                 blocked = readiness["blockers"] or None
                 if blocked:
-                    self.transactions._audit(
+                    self.transactions.audit(
                         session,
                         actor_id=str(actor_id),
                         event_type="TEAM_EXECUTION_MODE_BLOCKED",
@@ -300,20 +312,20 @@ class TradingModeService(ServiceComponent):
                     invalidated_authorizations = 0
                     invalidated_intents = 0
                     if previous_mode in {
-                        TeamExecutionMode.TESTNET.value,
-                        TeamExecutionMode.LIVE.value,
+                        domain.TeamExecutionMode.TESTNET.value,
+                        domain.TeamExecutionMode.LIVE.value,
                     }:
                         authorizations = session.scalars(
-                            select(TradingAuthorization).where(
-                                TradingAuthorization.team_id == team.team_id,
-                                TradingAuthorization.environment == previous_mode,
-                                TradingAuthorization.active,
+                            select(models.TradingAuthorization).where(
+                                models.TradingAuthorization.team_id == team.team_id,
+                                models.TradingAuthorization.environment == previous_mode,
+                                models.TradingAuthorization.active,
                             )
                         ).all()
                         for authorization in authorizations:
                             authorization.active = False
                             invalidated_authorizations += 1
-                            self.transactions._audit(
+                            self.transactions.audit(
                                 session,
                                 actor_id=str(actor_id),
                                 event_type="TRADING_AUTHORIZATION_INVALIDATED_BY_MODE_SWITCH",
@@ -329,20 +341,23 @@ class TradingModeService(ServiceComponent):
                                 now=now,
                             )
                         intents = session.scalars(
-                            select(OrderIntent)
-                            .join(Campaign, Campaign.campaign_id == OrderIntent.campaign_id)
+                            select(models.OrderIntent)
+                            .join(
+                                models.Campaign,
+                                models.Campaign.campaign_id == models.OrderIntent.campaign_id,
+                            )
                             .where(
-                                Campaign.team_id == team.team_id,
-                                Campaign.environment == previous_mode,
-                                OrderIntent.status.in_(("PENDING", "RESERVED", "READY")),
+                                models.Campaign.team_id == team.team_id,
+                                models.Campaign.environment == previous_mode,
+                                models.OrderIntent.status.in_(("PENDING", "RESERVED", "READY")),
                             )
                         ).all()
                         for intent in intents:
-                            intent.status = OrderIntentStatus.CANCELLED.value
+                            intent.status = domain.OrderIntentStatus.CANCELLED.value
                             intent.version += 1
                             intent.updated_at = now
                             invalidated_intents += 1
-                            self.transactions._audit(
+                            self.transactions.audit(
                                 session,
                                 actor_id=str(actor_id),
                                 event_type="ORDER_INTENT_INVALIDATED_BY_MODE_SWITCH",
@@ -375,7 +390,7 @@ class TradingModeService(ServiceComponent):
                         "invalidated_order_intents": invalidated_intents,
                         "dangerous_capabilities_changed": False,
                     }
-                    self.transactions._audit(
+                    self.transactions.audit(
                         session,
                         actor_id=str(actor_id),
                         event_type="TEAM_EXECUTION_MODE_CHANGED",
@@ -399,7 +414,7 @@ class TradingModeService(ServiceComponent):
                         now=now,
                     )
             if result is not None:
-                self.transactions._save_receipt(
+                self.transactions.save_receipt(
                     session,
                     caller_id=f"{actor_id}:{team.team_id}",
                     operation=operation,
@@ -410,6 +425,6 @@ class TradingModeService(ServiceComponent):
                 )
         if blocked:
             detail = ", ".join(f"{item['code']}({item['count']})" for item in blocked)
-            _reject("TEAM_MODE_SWITCH_BLOCKED", detail)
+            rejections.reject("TEAM_MODE_SWITCH_BLOCKED", detail)
         assert result is not None
         return result

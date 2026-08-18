@@ -1,30 +1,30 @@
 from __future__ import annotations
 
-from trading_control_plane.query_component import QueryComponent
-from trading_control_plane.query_core import (
-    ROLE_ACTIONS,
-    UUID,
+from datetime import datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import select
+
+from trading_control_plane.authorization_policy import ROLE_ACTIONS
+from trading_control_plane.domain import DomainRejected, Role
+from trading_control_plane.models import (
     AccountEquity,
-    Any,
-    Decimal,
-    DomainRejected,
     ExchangeAccount,
     FundingPayment,
     Instrument,
     Position,
     ProtectionOrder,
     ReconciliationRun,
-    Role,
     RoleAssignment,
     RuntimeSourceHealth,
     VenueFill,
     VenueOrder,
-    _iso,
-    current_api_client_context,
-    datetime,
-    select,
-    timedelta,
 )
+from trading_control_plane.query_component import QueryComponent
+from trading_control_plane.query_component import iso_datetime as _iso
+from trading_control_plane.request_context import current_api_client_context
 
 
 class AccountQueries(QueryComponent):
@@ -35,7 +35,7 @@ class AccountQueries(QueryComponent):
     ) -> tuple[Decimal, datetime] | None:
         """Read the active team's newest persisted USD perpetual mark for an asset."""
 
-        _workspace_id, team_id = self._active_scope_ids(actor_id)
+        _workspace_id, team_id = self.active_scope_ids(actor_id)
         normalized = asset.upper()
         symbols = (
             f"{normalized}USDT",
@@ -64,7 +64,7 @@ class AccountQueries(QueryComponent):
         execution; deployment-wide venue defaults are not account identities.
         """
 
-        _workspace_id, team_id = self._active_scope_ids(actor_id)
+        _workspace_id, team_id = self.active_scope_ids(actor_id)
         with self.database.session_factory() as session:
             rows = session.execute(
                 select(
@@ -91,7 +91,7 @@ class AccountQueries(QueryComponent):
     ) -> dict[str, str]:
         """Resolve one capital account without depending on venue-listing RBAC."""
 
-        workspace_id, team_id = self._active_scope_ids(actor_id)
+        workspace_id, team_id = self.active_scope_ids(actor_id)
         if not self.service.can_user(actor_id, "capital.view", account_id, venue):
             raise DomainRejected(
                 "RBAC_DENIED",
@@ -131,7 +131,7 @@ class AccountQueries(QueryComponent):
         actor_id: UUID,
         exchange_account_id: UUID,
     ) -> tuple[UUID, UUID, str, str, str]:
-        workspace_id, team_id = self._active_scope_ids(actor_id)
+        workspace_id, team_id = self.active_scope_ids(actor_id)
         with self.database.session_factory() as session:
             account = session.scalar(
                 select(ExchangeAccount).where(
@@ -165,8 +165,8 @@ class AccountQueries(QueryComponent):
         actor_id: UUID,
         exchange_account_id: UUID,
     ) -> dict[str, Any]:
-        _workspace_id, _team_id, account_id, venue, environment = (
-            self._exchange_account_scope(actor_id, exchange_account_id)
+        _workspace_id, _team_id, account_id, venue, environment = self._exchange_account_scope(
+            actor_id, exchange_account_id
         )
         return self.venue_facts(actor_id, account_id, venue, environment)
 
@@ -178,8 +178,8 @@ class AccountQueries(QueryComponent):
         stale_after_seconds: int,
         now: datetime,
     ) -> dict[str, Any]:
-        workspace_id, team_id, account_id, venue, environment = (
-            self._exchange_account_scope(actor_id, exchange_account_id)
+        workspace_id, team_id, account_id, venue, environment = self._exchange_account_scope(
+            actor_id, exchange_account_id
         )
         with self.database.session_factory() as session:
             source = session.scalar(
@@ -215,7 +215,7 @@ class AccountQueries(QueryComponent):
         }
 
     def current_positions(self, actor_id: UUID, environment: str) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(actor_id)
+        workspace_id, team_id = self.active_scope_ids(actor_id)
         with self.database.session_factory() as session:
             accounts = session.scalars(
                 select(ExchangeAccount)
@@ -236,9 +236,7 @@ class AccountQueries(QueryComponent):
                     item.venue,
                 )
             ]
-            account_by_scope = {
-                (item.account_id, item.venue): item for item in visible_accounts
-            }
+            account_by_scope = {(item.account_id, item.venue): item for item in visible_accounts}
             positions = session.scalars(
                 select(Position)
                 .where(
@@ -249,9 +247,7 @@ class AccountQueries(QueryComponent):
                 .order_by(Position.venue, Position.account_id, Position.observed_at.desc())
             ).all()
             visible_positions = [
-                item
-                for item in positions
-                if (item.account_id, item.venue) in account_by_scope
+                item for item in positions if (item.account_id, item.venue) in account_by_scope
             ]
             instrument_ids = {item.instrument_id for item in visible_positions}
             instruments = (
@@ -291,9 +287,7 @@ class AccountQueries(QueryComponent):
                         "signed_quantity": str(item.quantity),
                         "average_entry_price": str(item.average_entry_price),
                         "mark_price": str(item.mark_price),
-                        "unrealized_pnl": (
-                            None if unrealized_pnl is None else str(unrealized_pnl)
-                        ),
+                        "unrealized_pnl": (None if unrealized_pnl is None else str(unrealized_pnl)),
                         "fact_status": item.fact_status,
                         "observed_at": _iso(item.observed_at),
                     }
@@ -321,14 +315,12 @@ class AccountQueries(QueryComponent):
                     ),
                     "long_count": sum(item["direction"] == "LONG" for item in projected),
                     "short_count": sum(item["direction"] == "SHORT" for item in projected),
-                    "unknown_count": sum(
-                        item["fact_status"] != "KNOWN" for item in projected
-                    ),
+                    "unknown_count": sum(item["fact_status"] != "KNOWN" for item in projected),
                 },
             }
 
     def exchange_accounts(self, actor_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(actor_id)
+        workspace_id, team_id = self.active_scope_ids(actor_id)
         with self.database.session_factory() as session:
             assignments = session.scalars(
                 select(RoleAssignment).where(
@@ -531,7 +523,7 @@ class AccountQueries(QueryComponent):
     ) -> dict[str, Any]:
         if not self.service.can_user(user_id, "view", account_id, venue):
             raise DomainRejected("RBAC_DENIED", "venue facts are outside the current scope")
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
             account = session.scalar(
                 select(ExchangeAccount.exchange_account_id).where(

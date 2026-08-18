@@ -1,33 +1,128 @@
 from __future__ import annotations
 
-from trading_control_plane.service_component import ServiceComponent
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import UUID, uuid4
 
-# The domain implementation intentionally consumes the explicit service_core export surface.
-# ruff: noqa: F403, F405
-from trading_control_plane.service_core import *
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
+
+from trading_control_plane import domain, models, rejections, request_context, runtime_contracts
+from trading_control_plane import execution_scope as scope_rules
+from trading_control_plane.service_component import ServiceComponent
+from trading_control_plane.service_domains.accounts import (
+    ensure_exchange_account_reference,
+    lock_perptape_runtime_binding,
+)
+from trading_control_plane.service_domains.notifications import enqueue_proposal_review_notification
+
+
+def manual_execution_key(
+    *,
+    environment: str,
+    account_id: str,
+    venue: str,
+    instrument_id: UUID,
+    direction: str,
+    risk_tier: str,
+    quantity: Decimal,
+    max_risk: Decimal,
+    expires_in_minutes: int,
+    details: dict[str, Any],
+) -> tuple[Any, ...]:
+    """Compare frozen trade instructions while leaving human commentary out of the key."""
+
+    def decimal_detail(name: str, fallback: Decimal | None = None) -> Decimal | None:
+        value = details.get(name)
+        return fallback if value is None else Decimal(str(value))
+
+    return (
+        environment,
+        account_id,
+        venue,
+        instrument_id,
+        direction,
+        risk_tier,
+        quantity,
+        max_risk,
+        expires_in_minutes,
+        decimal_detail("trigger_price"),
+        decimal_detail("limit_price"),
+        decimal_detail("invalidation_price"),
+        decimal_detail("initial_quantity", quantity),
+        bool(details.get("allow_auto_add", False)),
+        int(details.get("requested_adds", 0)),
+        decimal_detail("add_trigger_price"),
+    )
+
+
+def proposal_manual_execution_key(proposal: models.Proposal) -> tuple[Any, ...]:
+    return manual_execution_key(
+        environment=proposal.environment,
+        account_id=proposal.account_id,
+        venue=proposal.venue,
+        instrument_id=proposal.instrument_id,
+        direction=proposal.direction,
+        risk_tier=proposal.risk_tier,
+        quantity=proposal.quantity,
+        max_risk=proposal.max_risk,
+        expires_in_minutes=round((proposal.expires_at - proposal.created_at).total_seconds() / 60),
+        details=dict(proposal.frozen_payload.get("details") or {}),
+    )
+
+
+def system_proposal_strategy_family(strategy_id: str) -> tuple[str, tuple[str, ...]]:
+    """Treat one-click and automatic Perptape proposal entry points as one signal family."""
+
+    if strategy_id in {"perptape", "perptape-resonance"}:
+        return "perptape", ("perptape", "perptape-resonance")
+    return strategy_id, (strategy_id,)
+
+
+def is_manual_proposal_originator(
+    session: Session,
+    proposal: models.Proposal,
+    user_id: UUID,
+) -> bool:
+    if proposal.proposer_id == user_id:
+        return True
+    return (
+        session.scalar(
+            select(models.AuditEvent.audit_event_id)
+            .where(
+                models.AuditEvent.event_type == "PROPOSAL_DUPLICATE_REUSED",
+                models.AuditEvent.object_type == "Proposal",
+                models.AuditEvent.object_id == str(proposal.proposal_id),
+                models.AuditEvent.actor_id == str(user_id),
+            )
+            .limit(1)
+        )
+        is not None
+    )
 
 
 class ProposalService(ServiceComponent):
     def proposal_default_config(self, actor_id: UUID) -> dict[str, Any] | None:
         with self.database.session_factory() as session:
-            team = self.transactions._require_action_assignment(
+            team = self.transactions.require_action_assignment(
                 session, actor_id, "proposal.create"
             )
             config = session.scalar(
-                select(ProposalDefaultConfig).where(
-                    ProposalDefaultConfig.team_id == team.team_id,
-                    ProposalDefaultConfig.active,
+                select(models.ProposalDefaultConfig).where(
+                    models.ProposalDefaultConfig.team_id == team.team_id,
+                    models.ProposalDefaultConfig.active,
                 )
             )
             if config is None:
                 return None
-            updater = session.get(User, config.updated_by)
+            updater = session.get(models.User, config.updated_by)
             return self._proposal_default_payload(config, updater, team.workspace_id)
 
     @staticmethod
     def _proposal_default_payload(
-        config: ProposalDefaultConfig,
-        updater: User | None,
+        config: models.ProposalDefaultConfig,
+        updater: models.User | None,
         workspace_id: UUID,
     ) -> dict[str, Any]:
         return {
@@ -53,17 +148,17 @@ class ProposalService(ServiceComponent):
     def proposal_automation_config(self, actor_id: UUID) -> dict[str, Any] | None:
         """Return the active admin policy to the internal feed worker only."""
         with self.database.session_factory() as session:
-            actor = session.get(User, actor_id)
+            actor = session.get(models.User, actor_id)
             if (
                 actor is None
                 or not actor.active
-                or actor.principal_type != PrincipalType.SERVICE.value
+                or actor.principal_type != domain.PrincipalType.SERVICE.value
             ):
-                _reject(
+                rejections.reject(
                     "PROPOSAL_AUTOMATION_SERVICE_REQUIRED",
                     "automatic proposal policy is restricted to an active service principal",
                 )
-            team = self.transactions._require_action_assignment(
+            team = self.transactions.require_action_assignment(
                 session,
                 actor_id,
                 "proposal.create",
@@ -72,32 +167,35 @@ class ProposalService(ServiceComponent):
             # Feed synchronization remains read-only while setup is incomplete.
             # Never expose the automatic proposal policy until the Team has
             # explicitly entered TESTNET or LIVE and passed its operational gates.
-            if not team.trading_enabled or team.execution_mode == TeamExecutionMode.SETUP.value:
+            if (
+                not team.trading_enabled
+                or team.execution_mode == domain.TeamExecutionMode.SETUP.value
+            ):
                 return None
             source = session.scalar(
-                select(TeamSignalSource).where(
-                    TeamSignalSource.team_id == team.team_id,
-                    TeamSignalSource.mode == SignalSourceMode.PERPTAPE.value,
-                    TeamSignalSource.deleted_at.is_(None),
+                select(models.TeamSignalSource).where(
+                    models.TeamSignalSource.team_id == team.team_id,
+                    models.TeamSignalSource.mode == domain.SignalSourceMode.PERPTAPE.value,
+                    models.TeamSignalSource.deleted_at.is_(None),
                 )
             )
             if (
                 source is None
                 or not source.enabled
-                or source.mode != SignalSourceMode.PERPTAPE.value
+                or source.mode != domain.SignalSourceMode.PERPTAPE.value
             ):
                 return None
             config = session.scalar(
-                select(ProposalDefaultConfig).where(
-                    ProposalDefaultConfig.team_id == team.team_id,
-                    ProposalDefaultConfig.active,
+                select(models.ProposalDefaultConfig).where(
+                    models.ProposalDefaultConfig.team_id == team.team_id,
+                    models.ProposalDefaultConfig.active,
                 )
             )
             if config is None:
                 return None
             return self._proposal_default_payload(
                 config,
-                session.get(User, config.updated_by),
+                session.get(models.User, config.updated_by),
                 team.workspace_id,
             )
 
@@ -107,7 +205,7 @@ class ProposalService(ServiceComponent):
         idempotency_key: str,
         *,
         account_id: str,
-        risk_tier: RiskTier,
+        risk_tier: domain.RiskTier,
         notional: Decimal,
         max_risk: Decimal,
         invalidation_bps: int,
@@ -119,7 +217,7 @@ class ProposalService(ServiceComponent):
     ) -> UUID:
         operation = "proposal.defaults.manage"
         payload = {
-            "environment": ExecutionEnvironment.LIVE.value,
+            "environment": domain.ExecutionEnvironment.LIVE.value,
             "account_id": account_id,
             "risk_tier": risk_tier.value,
             "notional": str(notional),
@@ -131,47 +229,51 @@ class ProposalService(ServiceComponent):
             "auto_proposal_min_timeframes": auto_proposal_min_timeframes,
         }
         if not account_id.strip() or account_id != account_id.strip():
-            _reject("PROPOSAL_DEFAULT_INVALID", "default account ID must be non-empty and exact")
+            rejections.reject(
+                "PROPOSAL_DEFAULT_INVALID", "default account ID must be non-empty and exact"
+            )
         if notional <= 0 or max_risk <= 0:
-            _reject("PROPOSAL_DEFAULT_INVALID", "default amounts must be positive")
+            rejections.reject("PROPOSAL_DEFAULT_INVALID", "default amounts must be positive")
         if not 1 <= invalidation_bps <= 5_000 or not 480 <= expires_in_minutes <= 1_440:
-            _reject("PROPOSAL_DEFAULT_INVALID", "default price distance or expiry is invalid")
+            rejections.reject(
+                "PROPOSAL_DEFAULT_INVALID", "default price distance or expiry is invalid"
+            )
         if auto_proposal_min_timeframes not in {3, 4}:
-            _reject(
+            rejections.reject(
                 "PROPOSAL_DEFAULT_INVALID",
                 "automatic proposal threshold must be three or four timeframes",
             )
         with self.database.session_factory.begin() as session:
-            team = self.transactions._require_role(session, actor_id, operation)
-            self.transactions._require_team_environment(team, ExecutionEnvironment.LIVE)
+            team = self.transactions.require_role(session, actor_id, operation)
+            self.transactions.require_team_environment(team, domain.ExecutionEnvironment.LIVE)
             assignments = session.scalars(
-                select(RoleAssignment).where(
-                    RoleAssignment.user_id == actor_id,
-                    RoleAssignment.team_id == team.team_id,
+                select(models.RoleAssignment).where(
+                    models.RoleAssignment.user_id == actor_id,
+                    models.RoleAssignment.team_id == team.team_id,
                 )
             ).all()
-            if not any(item.role == Role.SYSTEM_ADMIN.value for item in assignments):
-                _reject(
+            if not any(item.role == domain.Role.SYSTEM_ADMIN.value for item in assignments):
+                rejections.reject(
                     "PROPOSAL_DEFAULT_ADMIN_REQUIRED",
                     "only a team SYSTEM_ADMIN can change team proposal defaults",
                 )
             source = session.scalar(
-                select(TeamSignalSource).where(
-                    TeamSignalSource.team_id == team.team_id,
-                    TeamSignalSource.mode == SignalSourceMode.PERPTAPE.value,
-                    TeamSignalSource.deleted_at.is_(None),
+                select(models.TeamSignalSource).where(
+                    models.TeamSignalSource.team_id == team.team_id,
+                    models.TeamSignalSource.mode == domain.SignalSourceMode.PERPTAPE.value,
+                    models.TeamSignalSource.deleted_at.is_(None),
                 )
             )
             if auto_proposal_enabled and (
                 source is None
                 or not source.enabled
-                or source.mode != SignalSourceMode.PERPTAPE.value
+                or source.mode != domain.SignalSourceMode.PERPTAPE.value
             ):
-                _reject(
+                rejections.reject(
                     "AUTO_PROPOSAL_SOURCE_INVALID",
                     "automatic proposals require the active team Perptape source",
                 )
-            digest, response = self.transactions._idempotency(
+            digest, response = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -179,22 +281,22 @@ class ProposalService(ServiceComponent):
                 payload={**payload, "team_id": str(team.team_id)},
             )
             if response is not None:
-                return _as_uuid(str(response["config_id"]))
+                return UUID(str(response["config_id"]))
             current = session.scalar(
-                select(ProposalDefaultConfig)
+                select(models.ProposalDefaultConfig)
                 .where(
-                    ProposalDefaultConfig.team_id == team.team_id,
-                    ProposalDefaultConfig.active,
+                    models.ProposalDefaultConfig.team_id == team.team_id,
+                    models.ProposalDefaultConfig.active,
                 )
                 .with_for_update()
             )
             next_version = 1 if current is None else current.version + 1
             if current is not None:
                 current.active = False
-            config = ProposalDefaultConfig(
+            config = models.ProposalDefaultConfig(
                 team_id=team.team_id,
                 version=next_version,
-                environment=ExecutionEnvironment.LIVE.value,
+                environment=domain.ExecutionEnvironment.LIVE.value,
                 account_id=account_id,
                 risk_tier=risk_tier.value,
                 notional=notional,
@@ -211,7 +313,7 @@ class ProposalService(ServiceComponent):
             session.add(config)
             session.flush()
             result = {"config_id": str(config.config_id), "version": config.version}
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -220,7 +322,7 @@ class ProposalService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="PROPOSAL_DEFAULTS_UPDATED",
@@ -238,19 +340,19 @@ class ProposalService(ServiceComponent):
         self,
         *,
         actor_id: UUID,
-        source: ProposalSource,
-        risk_tier: RiskTier,
+        source: domain.ProposalSource,
+        risk_tier: domain.RiskTier,
         account_id: str,
         venue: str,
         instrument_id: UUID,
-        direction: Direction,
+        direction: domain.Direction,
         quantity: Decimal,
         max_risk: Decimal,
         expires_at: datetime,
         idempotency_key: str,
         strategy_id: str | None = None,
         strategy_version: str | None = None,
-        environment: ExecutionEnvironment | None = None,
+        environment: domain.ExecutionEnvironment | None = None,
         source_candidate_id: str | None = None,
         source_link: str | None = None,
         source_observed_at: datetime | None = None,
@@ -261,7 +363,7 @@ class ProposalService(ServiceComponent):
         deduplicate_active_manual_semantics: bool = False,
         deduplicate_active_system_scope: bool = False,
         submit_for_review: bool = False,
-        perptape_runtime_binding: PreparedPerptapeRuntimeBinding | None = None,
+        perptape_runtime_binding: runtime_contracts.PreparedPerptapeRuntimeBinding | None = None,
         now: datetime,
     ) -> UUID:
         payload = {
@@ -292,31 +394,31 @@ class ProposalService(ServiceComponent):
         operation = "proposal.create"
         with self.database.session_factory.begin() as session:
             if perptape_runtime_binding is not None:
-                if source is not ProposalSource.SYSTEM or signal_event_id is not None:
-                    _reject(
+                if source is not domain.ProposalSource.SYSTEM or signal_event_id is not None:
+                    rejections.reject(
                         "SIGNAL_RUNTIME_BINDING_INVALID",
                         "Perptape runtime bindings only create system signal proposals",
                     )
-                self._lock_perptape_runtime_binding(session, perptape_runtime_binding)
-            team = self.transactions._require_role(session, actor_id, operation, account_id, venue)
+                lock_perptape_runtime_binding(session, perptape_runtime_binding)
+            team = self.transactions.require_role(session, actor_id, operation, account_id, venue)
             if team.execution_mode not in {
-                TeamExecutionMode.TESTNET.value,
-                TeamExecutionMode.LIVE.value,
+                domain.TeamExecutionMode.TESTNET.value,
+                domain.TeamExecutionMode.LIVE.value,
             }:
-                _reject(
+                rejections.reject(
                     "TEAM_SETUP_INCOMPLETE",
                     "team must select TESTNET or LIVE before creating proposals",
                 )
-            actual_environment = ExecutionEnvironment(team.execution_mode)
+            actual_environment = domain.ExecutionEnvironment(team.execution_mode)
             if environment is not None and environment is not actual_environment:
-                _reject(
+                rejections.reject(
                     "PROPOSAL_ENVIRONMENT_MISMATCH",
                     "proposal environment must match the server-owned team current mode",
                 )
             environment = actual_environment
             payload["environment"] = environment.value
             if submit_for_review:
-                self.transactions._require_role(
+                self.transactions.require_role(
                     session,
                     actor_id,
                     "proposal.submit",
@@ -329,7 +431,7 @@ class ProposalService(ServiceComponent):
                 "workspace_id": str(team.workspace_id),
                 "team_id": str(team.team_id),
             }
-            digest, response = self.transactions._idempotency(
+            digest, response = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -337,70 +439,73 @@ class ProposalService(ServiceComponent):
                 payload=scoped_payload,
             )
             if response is not None:
-                return _as_uuid(str(response["proposal_id"]))
-            principal = session.get(User, actor_id)
+                return UUID(str(response["proposal_id"]))
+            principal = session.get(models.User, actor_id)
             if principal is None:
-                _reject("USER_NOT_AUTHORIZED", "proposal principal does not exist")
-            signal_event: SignalEvent | None = None
-            if source is ProposalSource.MANUAL:
-                if principal.principal_type != PrincipalType.HUMAN.value:
-                    _reject("PROPOSAL_SOURCE_INVALID", "MANUAL proposals require a human")
+                rejections.reject("USER_NOT_AUTHORIZED", "proposal principal does not exist")
+            signal_event: models.SignalEvent | None = None
+            if source is domain.ProposalSource.MANUAL:
+                if principal.principal_type != domain.PrincipalType.HUMAN.value:
+                    rejections.reject("PROPOSAL_SOURCE_INVALID", "MANUAL proposals require a human")
                 if strategy_id is not None or strategy_version is not None:
-                    _reject("PROPOSAL_STRATEGY_INVALID", "MANUAL proposals do not bind a strategy")
+                    rejections.reject(
+                        "PROPOSAL_STRATEGY_INVALID", "MANUAL proposals do not bind a strategy"
+                    )
                 if source_candidate_id is not None:
-                    _reject(
+                    rejections.reject(
                         "PROPOSAL_SOURCE_INVALID",
                         "MANUAL proposals cannot bind a source candidate",
                     )
                 if signal_event_id is not None:
                     signal_event = session.scalar(
-                        select(SignalEvent)
+                        select(models.SignalEvent)
                         .where(
-                            SignalEvent.signal_event_id == signal_event_id,
-                            SignalEvent.team_id == team.team_id,
+                            models.SignalEvent.signal_event_id == signal_event_id,
+                            models.SignalEvent.team_id == team.team_id,
                         )
                         .with_for_update()
                     )
                     if signal_event is None:
-                        _reject(
+                        rejections.reject(
                             "SIGNAL_EVENT_NOT_FOUND",
                             "signal event is outside the active team or does not exist",
                         )
-                    if signal_event.status != SignalEventStatus.RECEIVED.value:
-                        _reject(
+                    if signal_event.status != domain.SignalEventStatus.RECEIVED.value:
+                        rejections.reject(
                             "SIGNAL_ALREADY_CONSUMED",
                             "signal event already created a proposal",
                         )
                     signal_source = session.scalar(
-                        select(TeamSignalSource).where(
-                            TeamSignalSource.signal_source_id == signal_event.signal_source_id,
-                            TeamSignalSource.team_id == team.team_id,
-                            TeamSignalSource.deleted_at.is_(None),
+                        select(models.TeamSignalSource).where(
+                            models.TeamSignalSource.signal_source_id
+                            == signal_event.signal_source_id,
+                            models.TeamSignalSource.team_id == team.team_id,
+                            models.TeamSignalSource.deleted_at.is_(None),
                         )
                     )
                     if (
                         signal_source is None
                         or not signal_source.enabled
-                        or signal_source.mode != SignalSourceMode.WEBHOOK.value
+                        or signal_source.mode != domain.SignalSourceMode.WEBHOOK.value
                     ):
-                        _reject(
+                        rejections.reject(
                             "SIGNAL_SOURCE_DISABLED",
                             "the Webhook signal source is no longer enabled",
                         )
                     if signal_event.occurred_at < now.astimezone(UTC) - timedelta(
                         seconds=signal_source.webhook_max_age_seconds
                     ):
-                        _reject(
+                        rejections.reject(
                             "SIGNAL_STALE",
                             "the Webhook signal is outside its source freshness window",
                         )
             elif (
                 (
-                    principal.principal_type != PrincipalType.SERVICE.value
+                    principal.principal_type != domain.PrincipalType.SERVICE.value
                     and not (
-                        (api_context := current_api_client_context()) is not None
+                        (api_context := request_context.current_api_client_context()) is not None
                         and api_context.owner_user_id == actor_id
-                        and principal.principal_type == PrincipalType.HUMAN.value
+                        and principal.principal_type == domain.PrincipalType.HUMAN.value
                     )
                 )
                 or not strategy_id
@@ -409,24 +514,26 @@ class ProposalService(ServiceComponent):
                 or source_observed_at is None
                 or signal_event_id is not None
             ):
-                _reject(
+                rejections.reject(
                     "PROPOSAL_SOURCE_INVALID",
                     "SYSTEM proposals require a service or user-owned API Key, strategy "
                     "version and candidate",
                 )
-            instrument = session.get(Instrument, instrument_id)
+            instrument = session.get(models.Instrument, instrument_id)
             if instrument is None or not instrument.active or instrument.venue != venue:
-                _reject("INSTRUMENT_UNAVAILABLE", "instrument is inactive or outside venue scope")
+                rejections.reject(
+                    "INSTRUMENT_UNAVAILABLE", "instrument is inactive or outside venue scope"
+                )
             if signal_event is not None and (
                 signal_event.venue != venue
                 or signal_event.symbol != instrument.symbol
                 or signal_event.direction != direction.value
             ):
-                _reject(
+                rejections.reject(
                     "SIGNAL_PROPOSAL_MISMATCH",
                     "proposal instrument, venue and direction must match the frozen signal",
                 )
-            self._ensure_exchange_account_reference(
+            ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
@@ -436,10 +543,12 @@ class ProposalService(ServiceComponent):
                 now=now,
             )
             if expires_at <= now:
-                _reject("PROPOSAL_EXPIRY_INVALID", "proposal expiry must be in the future")
+                rejections.reject(
+                    "PROPOSAL_EXPIRY_INVALID", "proposal expiry must be in the future"
+                )
             if deduplicate_active_manual_semantics:
-                if source is not ProposalSource.MANUAL:
-                    _reject(
+                if source is not domain.ProposalSource.MANUAL:
+                    rejections.reject(
                         "PROPOSAL_DEDUPLICATION_SCOPE_INVALID",
                         "manual semantic deduplication is restricted to MANUAL proposals",
                     )
@@ -456,14 +565,14 @@ class ProposalService(ServiceComponent):
                 session.execute(
                     text("SELECT pg_advisory_xact_lock(:key)"),
                     {
-                        "key": _advisory_lock_key(
+                        "key": scope_rules.advisory_lock_key(
                             "proposal.active-manual-semantics",
                             "shared",
                             active_scope,
                         )
                     },
                 )
-                requested_key = _manual_execution_key(
+                requested_key = manual_execution_key(
                     environment=environment.value,
                     account_id=account_id,
                     venue=venue,
@@ -476,34 +585,37 @@ class ProposalService(ServiceComponent):
                     details=details or {},
                 )
                 active_manual = session.scalars(
-                    select(Proposal)
+                    select(models.Proposal)
                     .where(
-                        Proposal.source == ProposalSource.MANUAL.value,
-                        Proposal.team_id == team.team_id,
-                        Proposal.environment == environment.value,
-                        Proposal.account_id == account_id,
-                        Proposal.venue == venue,
-                        Proposal.instrument_id == instrument_id,
-                        Proposal.direction == direction.value,
-                        Proposal.status.in_(
-                            [ProposalStatus.DRAFT.value, ProposalStatus.PENDING_REVIEW.value]
+                        models.Proposal.source == domain.ProposalSource.MANUAL.value,
+                        models.Proposal.team_id == team.team_id,
+                        models.Proposal.environment == environment.value,
+                        models.Proposal.account_id == account_id,
+                        models.Proposal.venue == venue,
+                        models.Proposal.instrument_id == instrument_id,
+                        models.Proposal.direction == direction.value,
+                        models.Proposal.status.in_(
+                            [
+                                domain.ProposalStatus.DRAFT.value,
+                                domain.ProposalStatus.PENDING_REVIEW.value,
+                            ]
                         ),
-                        Proposal.expires_at > now,
+                        models.Proposal.expires_at > now,
                     )
-                    .order_by(Proposal.created_at, Proposal.proposal_id)
+                    .order_by(models.Proposal.created_at, models.Proposal.proposal_id)
                     .with_for_update()
                 ).all()
                 existing = next(
                     (
                         proposal
                         for proposal in active_manual
-                        if _proposal_manual_execution_key(proposal) == requested_key
+                        if proposal_manual_execution_key(proposal) == requested_key
                     ),
                     None,
                 )
                 if existing is not None:
                     result = {"proposal_id": str(existing.proposal_id)}
-                    self.transactions._save_receipt(
+                    self.transactions.save_receipt(
                         session,
                         caller_id=f"{actor_id}:{team.team_id}",
                         operation=operation,
@@ -512,7 +624,7 @@ class ProposalService(ServiceComponent):
                         response=result,
                         now=now,
                     )
-                    self.transactions._audit(
+                    self.transactions.audit(
                         session,
                         actor_id=str(actor_id),
                         event_type="PROPOSAL_DUPLICATE_REUSED",
@@ -526,12 +638,12 @@ class ProposalService(ServiceComponent):
                     )
                     return existing.proposal_id
             if deduplicate_active_system_scope:
-                if source is not ProposalSource.SYSTEM or not strategy_id:
-                    _reject(
+                if source is not domain.ProposalSource.SYSTEM or not strategy_id:
+                    rejections.reject(
                         "PROPOSAL_DEDUPLICATION_SCOPE_INVALID",
                         "active-scope deduplication is restricted to identified SYSTEM strategies",
                     )
-                strategy_family, strategy_ids = _system_proposal_strategy_family(strategy_id)
+                strategy_family, strategy_ids = system_proposal_strategy_family(strategy_id)
                 active_scope = ":".join(
                     [
                         str(team.team_id),
@@ -546,7 +658,7 @@ class ProposalService(ServiceComponent):
                 session.execute(
                     text("SELECT pg_advisory_xact_lock(:key)"),
                     {
-                        "key": _advisory_lock_key(
+                        "key": scope_rules.advisory_lock_key(
                             "proposal.active-system-scope",
                             strategy_family,
                             active_scope,
@@ -554,30 +666,30 @@ class ProposalService(ServiceComponent):
                     },
                 )
                 existing = session.scalar(
-                    select(Proposal)
+                    select(models.Proposal)
                     .where(
-                        Proposal.source == ProposalSource.SYSTEM.value,
-                        Proposal.team_id == team.team_id,
-                        Proposal.proposer_id == actor_id,
-                        Proposal.strategy_id.in_(strategy_ids),
-                        Proposal.environment == environment.value,
-                        Proposal.account_id == account_id,
-                        Proposal.venue == venue,
-                        Proposal.instrument_id == instrument_id,
-                        Proposal.direction == direction.value,
-                        Proposal.status.in_(
+                        models.Proposal.source == domain.ProposalSource.SYSTEM.value,
+                        models.Proposal.team_id == team.team_id,
+                        models.Proposal.proposer_id == actor_id,
+                        models.Proposal.strategy_id.in_(strategy_ids),
+                        models.Proposal.environment == environment.value,
+                        models.Proposal.account_id == account_id,
+                        models.Proposal.venue == venue,
+                        models.Proposal.instrument_id == instrument_id,
+                        models.Proposal.direction == direction.value,
+                        models.Proposal.status.in_(
                             [
-                                ProposalStatus.DRAFT.value,
-                                ProposalStatus.PENDING_REVIEW.value,
+                                domain.ProposalStatus.DRAFT.value,
+                                domain.ProposalStatus.PENDING_REVIEW.value,
                             ]
                         ),
-                        Proposal.expires_at > now,
+                        models.Proposal.expires_at > now,
                     )
-                    .order_by(Proposal.created_at, Proposal.proposal_id)
+                    .order_by(models.Proposal.created_at, models.Proposal.proposal_id)
                     .limit(1)
                 )
                 if existing is not None:
-                    self.transactions._audit(
+                    self.transactions.audit(
                         session,
                         actor_id=str(actor_id),
                         event_type="PROPOSAL_DUPLICATE_REUSED",
@@ -591,7 +703,7 @@ class ProposalService(ServiceComponent):
                     )
                     return existing.proposal_id
             correlation_id = uuid4()
-            proposal = Proposal(
+            proposal = models.Proposal(
                 team_id=team.team_id,
                 source=source.value,
                 environment=environment.value,
@@ -603,7 +715,7 @@ class ProposalService(ServiceComponent):
                 source_observed_at=source_observed_at,
                 source_readiness=source_readiness,
                 signal_event_id=signal_event_id,
-                status=ProposalStatus.DRAFT.value,
+                status=domain.ProposalStatus.DRAFT.value,
                 version=1,
                 risk_tier=risk_tier.value,
                 account_id=account_id,
@@ -631,8 +743,8 @@ class ProposalService(ServiceComponent):
             session.add(proposal)
             session.flush()
             if signal_event is not None:
-                signal_event.status = SignalEventStatus.PROPOSAL_CREATED.value
-                self.transactions._audit(
+                signal_event.status = domain.SignalEventStatus.PROPOSAL_CREATED.value
+                self.transactions.audit(
                     session,
                     actor_id=str(actor_id),
                     event_type="SIGNAL_PROPOSAL_CREATED",
@@ -648,7 +760,7 @@ class ProposalService(ServiceComponent):
                     now=now,
                 )
             result = {"proposal_id": str(proposal.proposal_id)}
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -657,7 +769,7 @@ class ProposalService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="PROPOSAL_CREATED",
@@ -670,10 +782,10 @@ class ProposalService(ServiceComponent):
                 now=now,
             )
             if submit_for_review:
-                proposal.status = ProposalStatus.PENDING_REVIEW.value
+                proposal.status = domain.ProposalStatus.PENDING_REVIEW.value
                 proposal.frozen_at = now
                 proposal.version = 2
-                self.transactions._audit(
+                self.transactions.audit(
                     session,
                     actor_id=str(actor_id),
                     event_type="PROPOSAL_SUBMITTED",
@@ -688,7 +800,8 @@ class ProposalService(ServiceComponent):
                     account_id=account_id,
                     now=now,
                 )
-                self.transactions._enqueue_proposal_review_notification(
+                enqueue_proposal_review_notification(
+                    self.transactions,
                     session,
                     actor_id=actor_id,
                     team=team,
@@ -707,11 +820,11 @@ class ProposalService(ServiceComponent):
         """Keep one active proposal per exact frozen manual trade and audit the surplus."""
 
         with self.database.session_factory.begin() as session:
-            team = self.transactions._require_role(session, actor_id, "user.manage")
+            team = self.transactions.require_role(session, actor_id, "user.manage")
             session.execute(
                 text("SELECT pg_advisory_xact_lock(:key)"),
                 {
-                    "key": _advisory_lock_key(
+                    "key": scope_rules.advisory_lock_key(
                         "proposal.active-manual-semantics",
                         str(team.team_id),
                         "all",
@@ -719,28 +832,31 @@ class ProposalService(ServiceComponent):
                 },
             )
             proposals = session.scalars(
-                select(Proposal)
+                select(models.Proposal)
                 .where(
-                    Proposal.source == ProposalSource.MANUAL.value,
-                    Proposal.team_id == team.team_id,
-                    Proposal.status.in_(
-                        [ProposalStatus.DRAFT.value, ProposalStatus.PENDING_REVIEW.value]
+                    models.Proposal.source == domain.ProposalSource.MANUAL.value,
+                    models.Proposal.team_id == team.team_id,
+                    models.Proposal.status.in_(
+                        [
+                            domain.ProposalStatus.DRAFT.value,
+                            domain.ProposalStatus.PENDING_REVIEW.value,
+                        ]
                     ),
-                    Proposal.expires_at > now,
+                    models.Proposal.expires_at > now,
                 )
-                .order_by(Proposal.created_at, Proposal.proposal_id)
+                .order_by(models.Proposal.created_at, models.Proposal.proposal_id)
                 .with_for_update()
             ).all()
             approved_ids = set(
                 session.scalars(
-                    select(Approval.proposal_id).where(
-                        Approval.proposal_id.in_([item.proposal_id for item in proposals])
+                    select(models.Approval.proposal_id).where(
+                        models.Approval.proposal_id.in_([item.proposal_id for item in proposals])
                     )
                 ).all()
             )
-            grouped: dict[tuple[Any, ...], list[Proposal]] = {}
+            grouped: dict[tuple[Any, ...], list[models.Proposal]] = {}
             for proposal in proposals:
-                grouped.setdefault(_proposal_manual_execution_key(proposal), []).append(proposal)
+                grouped.setdefault(proposal_manual_execution_key(proposal), []).append(proposal)
 
             expired = 0
             for matching in grouped.values():
@@ -755,7 +871,7 @@ class ProposalService(ServiceComponent):
                 )
                 canonical = matching[0]
                 for duplicate in matching[1:]:
-                    self.transactions._audit(
+                    self.transactions.audit(
                         session,
                         actor_id=str(duplicate.proposer_id),
                         event_type="PROPOSAL_DUPLICATE_REUSED",
@@ -766,10 +882,10 @@ class ProposalService(ServiceComponent):
                         object_version=canonical.version,
                         now=now,
                     )
-                    duplicate.status = ProposalStatus.EXPIRED.value
+                    duplicate.status = domain.ProposalStatus.EXPIRED.value
                     duplicate.updated_at = now
                     duplicate.version += 1
-                    self.transactions._audit(
+                    self.transactions.audit(
                         session,
                         actor_id=str(actor_id),
                         event_type="PROPOSAL_DUPLICATE_EXPIRED",
@@ -796,25 +912,27 @@ class ProposalService(ServiceComponent):
         """Keep one frozen active proposal per strategy-family scope and audit the surplus."""
 
         if not strategy_id:
-            _reject("PROPOSAL_STRATEGY_INVALID", "duplicate cleanup requires a strategy ID")
+            rejections.reject(
+                "PROPOSAL_STRATEGY_INVALID", "duplicate cleanup requires a strategy ID"
+            )
         with self.database.session_factory.begin() as session:
-            actor = session.get(User, actor_id)
+            actor = session.get(models.User, actor_id)
             if (
                 actor is None
                 or not actor.active
-                or actor.principal_type != PrincipalType.SERVICE.value
+                or actor.principal_type != domain.PrincipalType.SERVICE.value
             ):
-                _reject(
+                rejections.reject(
                     "PROPOSAL_AUTOMATION_SERVICE_REQUIRED",
                     "duplicate cleanup is restricted to an active service principal",
                 )
-            _actor, _workspace, team = self.transactions._active_scope(session, actor_id)
+            _actor, _workspace, team = self.transactions.active_scope(session, actor_id)
             assert team is not None
-            strategy_family, strategy_ids = _system_proposal_strategy_family(strategy_id)
+            strategy_family, strategy_ids = system_proposal_strategy_family(strategy_id)
             session.execute(
                 text("SELECT pg_advisory_xact_lock(:key)"),
                 {
-                    "key": _advisory_lock_key(
+                    "key": scope_rules.advisory_lock_key(
                         str(actor_id),
                         "proposal.active-system-deduplication",
                         f"{team.team_id}:{strategy_family}",
@@ -822,31 +940,31 @@ class ProposalService(ServiceComponent):
                 },
             )
             proposals = session.scalars(
-                select(Proposal)
+                select(models.Proposal)
                 .where(
-                    Proposal.source == ProposalSource.SYSTEM.value,
-                    Proposal.team_id == team.team_id,
-                    Proposal.proposer_id == actor_id,
-                    Proposal.strategy_id.in_(strategy_ids),
-                    Proposal.status.in_(
+                    models.Proposal.source == domain.ProposalSource.SYSTEM.value,
+                    models.Proposal.team_id == team.team_id,
+                    models.Proposal.proposer_id == actor_id,
+                    models.Proposal.strategy_id.in_(strategy_ids),
+                    models.Proposal.status.in_(
                         [
-                            ProposalStatus.DRAFT.value,
-                            ProposalStatus.PENDING_REVIEW.value,
+                            domain.ProposalStatus.DRAFT.value,
+                            domain.ProposalStatus.PENDING_REVIEW.value,
                         ]
                     ),
-                    Proposal.expires_at > now,
+                    models.Proposal.expires_at > now,
                 )
-                .order_by(Proposal.created_at, Proposal.proposal_id)
+                .order_by(models.Proposal.created_at, models.Proposal.proposal_id)
                 .with_for_update()
             ).all()
             approved_proposal_ids = set(
                 session.scalars(
-                    select(Approval.proposal_id).where(
-                        Approval.proposal_id.in_([item.proposal_id for item in proposals])
+                    select(models.Approval.proposal_id).where(
+                        models.Approval.proposal_id.in_([item.proposal_id for item in proposals])
                     )
                 ).all()
             )
-            grouped: dict[tuple[str, str, str, UUID, str], list[Proposal]] = {}
+            grouped: dict[tuple[str, str, str, UUID, str], list[models.Proposal]] = {}
             for proposal in proposals:
                 scope = (
                     proposal.environment,
@@ -869,10 +987,10 @@ class ProposalService(ServiceComponent):
                 )
                 canonical = scoped[0]
                 for duplicate in scoped[1:]:
-                    duplicate.status = ProposalStatus.EXPIRED.value
+                    duplicate.status = domain.ProposalStatus.EXPIRED.value
                     duplicate.updated_at = now
                     duplicate.version += 1
-                    self.transactions._audit(
+                    self.transactions.audit(
                         session,
                         actor_id=str(actor_id),
                         event_type="PROPOSAL_DUPLICATE_EXPIRED",
@@ -893,17 +1011,17 @@ class ProposalService(ServiceComponent):
         proposal_id: UUID,
         actor_id: UUID,
         *,
-        perptape_runtime_binding: PreparedPerptapeRuntimeBinding | None = None,
+        perptape_runtime_binding: runtime_contracts.PreparedPerptapeRuntimeBinding | None = None,
         now: datetime,
     ) -> None:
         expired = False
         with self.database.session_factory.begin() as session:
             if perptape_runtime_binding is not None:
-                self._lock_perptape_runtime_binding(session, perptape_runtime_binding)
-            proposal = session.get(Proposal, proposal_id, with_for_update=True)
+                lock_perptape_runtime_binding(session, perptape_runtime_binding)
+            proposal = session.get(models.Proposal, proposal_id, with_for_update=True)
             if proposal is None:
-                _reject("PROPOSAL_NOT_FOUND", "proposal does not exist")
-            self.transactions._require_role(
+                rejections.reject("PROPOSAL_NOT_FOUND", "proposal does not exist")
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "proposal.submit",
@@ -912,12 +1030,14 @@ class ProposalService(ServiceComponent):
                 team_id=proposal.team_id,
             )
             if proposal.proposer_id != actor_id:
-                _reject("PROPOSAL_OWNER_REQUIRED", "only the proposer may submit the draft")
+                rejections.reject(
+                    "PROPOSAL_OWNER_REQUIRED", "only the proposer may submit the draft"
+                )
             if proposal.expires_at <= now:
-                proposal.status = ProposalStatus.EXPIRED.value
+                proposal.status = domain.ProposalStatus.EXPIRED.value
                 proposal.updated_at = now
                 proposal.version += 1
-                self.transactions._audit(
+                self.transactions.audit(
                     session,
                     actor_id=str(actor_id),
                     event_type="PROPOSAL_EXPIRED",
@@ -929,14 +1049,14 @@ class ProposalService(ServiceComponent):
                     now=now,
                 )
                 expired = True
-            elif proposal.status != ProposalStatus.DRAFT.value:
-                _reject("PROPOSAL_NOT_DRAFT", "only a draft can be submitted")
+            elif proposal.status != domain.ProposalStatus.DRAFT.value:
+                rejections.reject("PROPOSAL_NOT_DRAFT", "only a draft can be submitted")
             else:
-                proposal.status = ProposalStatus.PENDING_REVIEW.value
+                proposal.status = domain.ProposalStatus.PENDING_REVIEW.value
                 proposal.frozen_at = now
                 proposal.updated_at = now
                 proposal.version += 1
-                self.transactions._audit(
+                self.transactions.audit(
                     session,
                     actor_id=str(actor_id),
                     event_type="PROPOSAL_SUBMITTED",
@@ -947,9 +1067,10 @@ class ProposalService(ServiceComponent):
                     object_version=proposal.version,
                     now=now,
                 )
-                team = session.get(Team, proposal.team_id)
+                team = session.get(models.Team, proposal.team_id)
                 assert team is not None
-                self.transactions._enqueue_proposal_review_notification(
+                enqueue_proposal_review_notification(
+                    self.transactions,
                     session,
                     actor_id=actor_id,
                     team=team,
@@ -958,28 +1079,30 @@ class ProposalService(ServiceComponent):
                     now=now,
                 )
         if expired:
-            _reject("PROPOSAL_EXPIRED", "proposal expired before submission")
+            rejections.reject("PROPOSAL_EXPIRED", "proposal expired before submission")
 
     def review_proposal(
         self,
         proposal_id: UUID,
         reviewer_id: UUID,
-        decision: ReviewDecision,
+        decision: domain.ReviewDecision,
         reason: str,
         expected_version: int | None = None,
         *,
         idempotency_key: str | None = None,
         now: datetime,
-    ) -> ProposalStatus:
+    ) -> domain.ProposalStatus:
         expired = False
-        result: ProposalStatus | None = None
+        result: domain.ProposalStatus | None = None
         with self.database.session_factory.begin() as session:
-            proposal = session.get(Proposal, proposal_id, with_for_update=True)
+            proposal = session.get(models.Proposal, proposal_id, with_for_update=True)
             if proposal is None:
-                _reject("PROPOSAL_NOT_FOUND", "proposal does not exist")
-            if _is_manual_proposal_originator(session, proposal, reviewer_id):
-                _reject("SELF_REVIEW_FORBIDDEN", "a proposer cannot review the same proposal")
-            self.transactions._require_role(
+                rejections.reject("PROPOSAL_NOT_FOUND", "proposal does not exist")
+            if is_manual_proposal_originator(session, proposal, reviewer_id):
+                rejections.reject(
+                    "SELF_REVIEW_FORBIDDEN", "a proposer cannot review the same proposal"
+                )
+            self.transactions.require_role(
                 session,
                 reviewer_id,
                 "proposal.review",
@@ -990,7 +1113,7 @@ class ProposalService(ServiceComponent):
             digest: str | None = None
             operation = f"proposal.review:{proposal_id}"
             if idempotency_key is not None:
-                digest, replay = self.transactions._idempotency(
+                digest, replay = self.transactions.idempotency(
                     session,
                     caller_id=f"{reviewer_id}:{proposal.team_id}",
                     operation=operation,
@@ -1003,14 +1126,16 @@ class ProposalService(ServiceComponent):
                     },
                 )
                 if replay is not None:
-                    return ProposalStatus(str(replay["status"]))
+                    return domain.ProposalStatus(str(replay["status"]))
             if expected_version is not None and proposal.version != expected_version:
-                _reject("VERSION_CONFLICT", "proposal version changed; refresh before reviewing")
+                rejections.reject(
+                    "VERSION_CONFLICT", "proposal version changed; refresh before reviewing"
+                )
             if proposal.expires_at <= now:
-                proposal.status = ProposalStatus.EXPIRED.value
+                proposal.status = domain.ProposalStatus.EXPIRED.value
                 proposal.updated_at = now
                 proposal.version += 1
-                self.transactions._audit(
+                self.transactions.audit(
                     session,
                     actor_id=str(reviewer_id),
                     event_type="PROPOSAL_EXPIRED",
@@ -1023,18 +1148,18 @@ class ProposalService(ServiceComponent):
                 )
                 expired = True
             else:
-                if proposal.status != ProposalStatus.PENDING_REVIEW.value:
-                    _reject("PROPOSAL_NOT_REVIEWABLE", "proposal is not pending review")
+                if proposal.status != domain.ProposalStatus.PENDING_REVIEW.value:
+                    rejections.reject("PROPOSAL_NOT_REVIEWABLE", "proposal is not pending review")
                 duplicate = session.scalar(
-                    select(Approval).where(
-                        Approval.proposal_id == proposal_id,
-                        Approval.reviewer_id == reviewer_id,
+                    select(models.Approval).where(
+                        models.Approval.proposal_id == proposal_id,
+                        models.Approval.reviewer_id == reviewer_id,
                     )
                 )
                 if duplicate is not None:
-                    _reject("REVIEW_ALREADY_RECORDED", "reviewer already voted")
+                    rejections.reject("REVIEW_ALREADY_RECORDED", "reviewer already voted")
                 session.add(
-                    Approval(
+                    models.Approval(
                         proposal_id=proposal_id,
                         reviewer_id=reviewer_id,
                         decision=decision.value,
@@ -1043,23 +1168,23 @@ class ProposalService(ServiceComponent):
                     )
                 )
                 session.flush()
-                if decision is ReviewDecision.REJECT:
-                    proposal.status = ProposalStatus.REJECTED.value
+                if decision is domain.ReviewDecision.REJECT:
+                    proposal.status = domain.ProposalStatus.REJECTED.value
                 else:
                     approvals = session.execute(
                         select(func.count())
-                        .select_from(Approval)
+                        .select_from(models.Approval)
                         .where(
-                            Approval.proposal_id == proposal_id,
-                            Approval.decision == ReviewDecision.APPROVE.value,
+                            models.Approval.proposal_id == proposal_id,
+                            models.Approval.decision == domain.ReviewDecision.APPROVE.value,
                         )
                     ).scalar_one()
-                    required = 2 if proposal.risk_tier == RiskTier.HIGH.value else 1
+                    required = 2 if proposal.risk_tier == domain.RiskTier.HIGH.value else 1
                     if approvals >= required:
-                        proposal.status = ProposalStatus.APPROVED.value
+                        proposal.status = domain.ProposalStatus.APPROVED.value
                 proposal.updated_at = now
                 proposal.version += 1
-                self.transactions._audit(
+                self.transactions.audit(
                     session,
                     actor_id=str(reviewer_id),
                     event_type="PROPOSAL_REVIEWED",
@@ -1070,10 +1195,10 @@ class ProposalService(ServiceComponent):
                     object_version=proposal.version,
                     now=now,
                 )
-                result = ProposalStatus(proposal.status)
+                result = domain.ProposalStatus(proposal.status)
                 if idempotency_key is not None:
                     assert digest is not None
-                    self.transactions._save_receipt(
+                    self.transactions.save_receipt(
                         session,
                         caller_id=f"{reviewer_id}:{proposal.team_id}",
                         operation=operation,
@@ -1083,7 +1208,7 @@ class ProposalService(ServiceComponent):
                         now=now,
                     )
         if expired:
-            _reject("PROPOSAL_EXPIRED", "proposal expired before review")
+            rejections.reject("PROPOSAL_EXPIRED", "proposal expired before review")
         if result is None:
             raise RuntimeError("proposal review completed without a result")
         return result

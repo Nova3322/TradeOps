@@ -1,73 +1,51 @@
 from __future__ import annotations
 
-from trading_control_plane.service_component import ServiceComponent
-from trading_control_plane.service_core import (
-    CONNECTION_ERROR_CODE_PATTERN,
-    INTENT_TRANSITIONS,
-    SUPPORTED_EXCHANGE_VENUES,
-    UTC,
-    UUID,
-    Any,
-    Campaign,
-    CapabilityGate,
-    CapabilityStatus,
+import json
+import re
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session
+
+from trading_control_plane import credentials, domain, execution_scope, metrics, models, rejections
+from trading_control_plane import freqtrade_contracts as freqtrade
+from trading_control_plane.runtime_contracts import (
     ConnectionProbeResult,
-    DomainRejected,
-    ExchangeAccount,
-    ExecutionEnvironment,
-    FreqtradeEntryCommand,
-    FreqtradeExitCommand,
-    OrderIntent,
-    OrderIntentStatus,
     PreparedExchangeConnectionVerification,
     PreparedFreqtradeDispatch,
     PreparedFreqtradeWorkerBinding,
     PreparedPerptapeRuntimeBinding,
     PreparedRuntimeAccountBinding,
-    PrincipalType,
-    Role,
-    RoleAssignment,
-    ServicePrincipalKind,
-    Session,
-    SignalSourceMode,
-    Team,
-    TeamExecutionMode,
-    TeamMembership,
-    TeamSignalSource,
-    User,
-    WorkspaceMembership,
-    WorkspaceRole,
-    _advisory_lock_key,
-    _reject,
-    _scope_key,
-    _scope_parts,
-    datetime,
-    json,
-    parse_hip3_dexes,
-    re,
-    select,
-    text,
-    uuid4,
-    validate_worker_url,
 )
+from trading_control_plane.service_component import ServiceComponent
 from trading_control_plane.service_domains.account_registry import (
     delete_exchange_account,
     exchange_account_definition,
     set_exchange_account_state,
+    set_internal_principal_active,
     update_exchange_account,
 )
+from trading_control_plane.service_domains.notifications import enqueue_notification_event
+
+CONNECTION_ERROR_CODE_PATTERN = re.compile(r"^[A-Z0-9_]{1,120}$")
+_advisory_lock_key = execution_scope.advisory_lock_key
+_reject = rejections.reject
+_scope_key = execution_scope.scope_key
+_scope_parts = execution_scope.scope_parts
 
 
 def ensure_exchange_account_reference(
     session: Session,
     *,
-    team: Team,
+    team: models.Team,
     actor_id: UUID,
     account_id: str,
     venue: str,
     environment: str = "LIVE",
     now: datetime,
-) -> ExchangeAccount:
+) -> models.ExchangeAccount:
     del actor_id, now
     normalized_account_id, normalized_venue, _label = exchange_account_definition(
         account_id, venue, account_id
@@ -86,11 +64,11 @@ def ensure_exchange_account_reference(
         },
     )
     account = session.scalar(
-        select(ExchangeAccount).where(
-            ExchangeAccount.team_id == team.team_id,
-            ExchangeAccount.environment == normalized_environment,
-            ExchangeAccount.account_id == normalized_account_id,
-            ExchangeAccount.venue == normalized_venue,
+        select(models.ExchangeAccount).where(
+            models.ExchangeAccount.team_id == team.team_id,
+            models.ExchangeAccount.environment == normalized_environment,
+            models.ExchangeAccount.account_id == normalized_account_id,
+            models.ExchangeAccount.venue == normalized_venue,
         )
     )
     if account is not None:
@@ -109,27 +87,29 @@ def require_exact_runtime_principal(
     session: Session,
     *,
     principal_id: UUID,
-    team: Team,
-    role: Role,
+    team: models.Team,
+    role: domain.Role,
     account_id: str | None,
     venue: str | None,
     error_code: str,
     error_message: str,
     lock: bool = False,
     allow_inactive: bool = False,
-) -> User:
-    principal_statement = select(User).where(User.user_id == principal_id)
-    workspace_membership_statement = select(WorkspaceMembership).where(
-        WorkspaceMembership.workspace_id == team.workspace_id,
-        WorkspaceMembership.user_id == principal_id,
-        WorkspaceMembership.active,
+) -> models.User:
+    principal_statement = select(models.User).where(models.User.user_id == principal_id)
+    workspace_membership_statement = select(models.WorkspaceMembership).where(
+        models.WorkspaceMembership.workspace_id == team.workspace_id,
+        models.WorkspaceMembership.user_id == principal_id,
+        models.WorkspaceMembership.active,
     )
-    team_membership_statement = select(TeamMembership).where(
-        TeamMembership.team_id == team.team_id,
-        TeamMembership.user_id == principal_id,
-        TeamMembership.active,
+    team_membership_statement = select(models.TeamMembership).where(
+        models.TeamMembership.team_id == team.team_id,
+        models.TeamMembership.user_id == principal_id,
+        models.TeamMembership.active,
     )
-    assignments_statement = select(RoleAssignment).where(RoleAssignment.user_id == principal_id)
+    assignments_statement = select(models.RoleAssignment).where(
+        models.RoleAssignment.user_id == principal_id
+    )
     if lock:
         principal_statement = principal_statement.with_for_update()
         workspace_membership_statement = workspace_membership_statement.with_for_update()
@@ -148,8 +128,8 @@ def require_exact_runtime_principal(
     )
     if (
         principal is None
-        or principal.principal_type != PrincipalType.SERVICE.value
-        or principal.service_kind != ServicePrincipalKind.INTERNAL.value
+        or principal.principal_type != domain.PrincipalType.SERVICE.value
+        or principal.service_kind != domain.ServicePrincipalKind.INTERNAL.value
         or (not principal.active and not allow_inactive)
         or principal.active_workspace_id != team.workspace_id
         or principal.active_team_id != team.team_id
@@ -167,13 +147,13 @@ def require_exchange_account_live_ready(
     team_id: UUID,
     account_id: str,
     venue: str,
-) -> ExchangeAccount:
+) -> models.ExchangeAccount:
     account = session.scalar(
-        select(ExchangeAccount).where(
-            ExchangeAccount.team_id == team_id,
-            ExchangeAccount.environment == "LIVE",
-            ExchangeAccount.account_id == account_id,
-            ExchangeAccount.venue == venue,
+        select(models.ExchangeAccount).where(
+            models.ExchangeAccount.team_id == team_id,
+            models.ExchangeAccount.environment == "LIVE",
+            models.ExchangeAccount.account_id == account_id,
+            models.ExchangeAccount.venue == venue,
         )
     )
     if account is None or not account.active or account.trading_status != "ELIGIBLE":
@@ -192,11 +172,11 @@ def require_exchange_account_live_ready(
             "EXCHANGE_ACCOUNT_TRADING_NOT_READY",
             "LIVE venue action requires current account connection and runtime binding",
         )
-    team = session.get(Team, team_id)
+    team = session.get(models.Team, team_id)
     if (
         team is None
         or not team.trading_enabled
-        or team.execution_mode != TeamExecutionMode.LIVE.value
+        or team.execution_mode != domain.TeamExecutionMode.LIVE.value
     ):
         _reject(
             "TEAM_LIVE_MODE_REQUIRED",
@@ -207,7 +187,7 @@ def require_exchange_account_live_ready(
         session,
         principal_id=account.runtime_service_principal_id,
         team=team,
-        role=Role.OPERATOR,
+        role=domain.Role.OPERATOR,
         account_id=account.account_id,
         venue=account.venue,
         error_code="EXCHANGE_ACCOUNT_TRADING_NOT_READY",
@@ -219,10 +199,10 @@ def require_exchange_account_live_ready(
 def lock_runtime_account_binding(
     session: Session,
     binding: PreparedRuntimeAccountBinding,
-) -> ExchangeAccount:
+) -> models.ExchangeAccount:
     account = session.scalar(
-        select(ExchangeAccount)
-        .where(ExchangeAccount.exchange_account_id == binding.exchange_account_id)
+        select(models.ExchangeAccount)
+        .where(models.ExchangeAccount.exchange_account_id == binding.exchange_account_id)
         .with_for_update()
     )
     if (
@@ -240,7 +220,7 @@ def lock_runtime_account_binding(
             "RUNTIME_BINDING_CHANGED",
             "the database-bound runtime account changed during synchronization",
         )
-    team = session.get(Team, binding.team_id)
+    team = session.get(models.Team, binding.team_id)
     if team is None or not team.active:
         _reject(
             "RUNTIME_BINDING_CHANGED",
@@ -250,7 +230,7 @@ def lock_runtime_account_binding(
         session,
         principal_id=binding.service_principal_id,
         team=team,
-        role=Role.OPERATOR,
+        role=domain.Role.OPERATOR,
         account_id=binding.account_id,
         venue=binding.venue,
         error_code="RUNTIME_BINDING_CHANGED",
@@ -260,12 +240,50 @@ def lock_runtime_account_binding(
     return account
 
 
+def lock_perptape_runtime_binding(
+    session: Session,
+    binding: PreparedPerptapeRuntimeBinding,
+) -> models.TeamSignalSource:
+    source = session.scalar(
+        select(models.TeamSignalSource)
+        .where(models.TeamSignalSource.signal_source_id == binding.signal_source_id)
+        .with_for_update()
+    )
+    if (
+        source is None
+        or source.team_id != binding.team_id
+        or not source.enabled
+        or source.deleted_at is not None
+        or source.mode != domain.SignalSourceMode.PERPTAPE.value
+        or source.service_principal_id != binding.service_principal_id
+        or source.version != binding.source_version
+        or source.credential_version != binding.credential_version
+    ):
+        _reject(
+            "SIGNAL_RUNTIME_BINDING_CHANGED",
+            "the team Perptape binding changed during synchronization",
+        )
+    team = session.get(models.Team, binding.team_id)
+    if team is None or not team.active:
+        _reject(
+            "SIGNAL_RUNTIME_BINDING_CHANGED",
+            "the team Perptape binding changed during synchronization",
+        )
+    require_exact_runtime_principal(
+        session,
+        principal_id=binding.service_principal_id,
+        team=team,
+        role=domain.Role.PROPOSER,
+        account_id=None,
+        venue=None,
+        error_code="SIGNAL_RUNTIME_BINDING_CHANGED",
+        error_message="the team Perptape binding changed during synchronization",
+        lock=True,
+    )
+    return source
+
+
 class AccountService(ServiceComponent):
-    _exchange_account_definition = staticmethod(exchange_account_definition)
-    _ensure_exchange_account_reference = staticmethod(ensure_exchange_account_reference)
-    _require_exact_runtime_principal = staticmethod(require_exact_runtime_principal)
-    _require_exchange_account_live_ready = staticmethod(require_exchange_account_live_ready)
-    _lock_runtime_account_binding = staticmethod(lock_runtime_account_binding)
     delete_exchange_account = delete_exchange_account
     update_exchange_account = update_exchange_account
     set_exchange_account_state = set_exchange_account_state
@@ -283,8 +301,8 @@ class AccountService(ServiceComponent):
         idempotency_key: str,
         now: datetime,
     ) -> UUID:
-        normalized_account_id, normalized_venue, normalized_label = (
-            self._exchange_account_definition(account_id, venue, label)
+        normalized_account_id, normalized_venue, normalized_label = exchange_account_definition(
+            account_id, venue, label
         )
         normalized_environment = environment.strip().upper()
         normalized_account_mode = account_mode.strip().upper()
@@ -311,7 +329,7 @@ class AccountService(ServiceComponent):
                 "exchange API credentials are required for TESTNET and LIVE accounts",
             )
         with self.database.session_factory.begin() as session:
-            team = self.transactions._require_role(
+            team = self.transactions.require_role(
                 session,
                 actor_id,
                 "account.manage",
@@ -336,7 +354,7 @@ class AccountService(ServiceComponent):
                 "label": normalized_label,
                 "credential_semantics": credential_semantics,
             }
-            digest, replay = self.transactions._idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=caller,
                 operation="exchange-account.create",
@@ -346,11 +364,11 @@ class AccountService(ServiceComponent):
             if replay is not None:
                 return UUID(str(replay["exchange_account_id"]))
             existing = session.scalar(
-                select(ExchangeAccount).where(
-                    ExchangeAccount.team_id == team.team_id,
-                    ExchangeAccount.environment == normalized_environment,
-                    ExchangeAccount.account_id == normalized_account_id,
-                    ExchangeAccount.venue == normalized_venue,
+                select(models.ExchangeAccount).where(
+                    models.ExchangeAccount.team_id == team.team_id,
+                    models.ExchangeAccount.environment == normalized_environment,
+                    models.ExchangeAccount.account_id == normalized_account_id,
+                    models.ExchangeAccount.venue == normalized_venue,
                 )
             )
             if existing is not None and existing.active:
@@ -367,7 +385,7 @@ class AccountService(ServiceComponent):
                 credential_version=1,
             )
             if existing is None:
-                account = ExchangeAccount(
+                account = models.ExchangeAccount(
                     exchange_account_id=exchange_account_id,
                     team_id=team.team_id,
                     account_id=normalized_account_id,
@@ -421,7 +439,7 @@ class AccountService(ServiceComponent):
             account.updated_by = actor_id
             account.updated_at = now
             response = {"exchange_account_id": str(exchange_account_id)}
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=caller,
                 operation="exchange-account.create",
@@ -430,7 +448,7 @@ class AccountService(ServiceComponent):
                 response=response,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type=event_type,
@@ -462,13 +480,13 @@ class AccountService(ServiceComponent):
         now: datetime,
     ) -> int:
         with self.database.session_factory.begin() as session:
-            _actor, _workspace, active_team = self.transactions._active_scope(session, actor_id)
+            _actor, _workspace, active_team = self.transactions.active_scope(session, actor_id)
             assert active_team is not None
             account = session.scalar(
-                select(ExchangeAccount)
+                select(models.ExchangeAccount)
                 .where(
-                    ExchangeAccount.exchange_account_id == exchange_account_id,
-                    ExchangeAccount.team_id == active_team.team_id,
+                    models.ExchangeAccount.exchange_account_id == exchange_account_id,
+                    models.ExchangeAccount.team_id == active_team.team_id,
                 )
                 .with_for_update()
             )
@@ -477,7 +495,7 @@ class AccountService(ServiceComponent):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self.transactions._require_role(
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "account.credentials.manage",
@@ -496,7 +514,7 @@ class AccountService(ServiceComponent):
                 "expected_version": expected_version,
                 "credential_semantics": credential_semantics,
             }
-            digest, replay = self.transactions._idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=caller,
                 operation="exchange-account.credentials.rotate",
@@ -532,7 +550,7 @@ class AccountService(ServiceComponent):
             account.last_connection_check_at = None
             account.last_verified_at = None
             account.runtime_sync_enabled = False
-            self._set_internal_principal_active(
+            set_internal_principal_active(
                 session,
                 account.runtime_service_principal_id,
                 False,
@@ -542,7 +560,7 @@ class AccountService(ServiceComponent):
             account.updated_by = actor_id
             account.updated_at = now
             response = {"version": account.version}
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=caller,
                 operation="exchange-account.credentials.rotate",
@@ -551,7 +569,7 @@ class AccountService(ServiceComponent):
                 response=response,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="EXCHANGE_ACCOUNT_CREDENTIALS_ROTATED",
@@ -572,42 +590,21 @@ class AccountService(ServiceComponent):
             return account.version
 
     @staticmethod
-    def _set_internal_principal_active(
-        session: Session,
-        principal_id: UUID | None,
-        active: bool,
-    ) -> None:
-        if principal_id is None:
-            return
-        principal = session.scalar(
-            select(User).where(User.user_id == principal_id).with_for_update()
-        )
-        if (
-            principal is None
-            or principal.principal_type != PrincipalType.SERVICE.value
-            or principal.service_kind != ServicePrincipalKind.INTERNAL.value
-        ):
-            return
-        if principal.active != active:
-            principal.active = active
-            principal.auth_version += 1
-
-    @staticmethod
     def _ensure_account_runtime_service_principal(
         session: Session,
         *,
-        team: Team,
-        account: ExchangeAccount,
+        team: models.Team,
+        account: models.ExchangeAccount,
         actor_id: UUID,
         now: datetime,
-    ) -> User:
+    ) -> models.User:
         username = f"runtime-{team.team_id.hex}-{account.exchange_account_id.hex}"
-        principal = session.scalar(select(User).where(User.username == username))
+        principal = session.scalar(select(models.User).where(models.User.username == username))
         if principal is None:
-            principal = User(
+            principal = models.User(
                 username=username,
-                principal_type=PrincipalType.SERVICE.value,
-                service_kind=ServicePrincipalKind.INTERNAL.value,
+                principal_type=domain.PrincipalType.SERVICE.value,
+                service_kind=domain.ServicePrincipalKind.INTERNAL.value,
                 active_workspace_id=team.workspace_id,
                 active_team_id=team.team_id,
                 active=True,
@@ -617,16 +614,16 @@ class AccountService(ServiceComponent):
             session.flush()
             session.add_all(
                 [
-                    WorkspaceMembership(
+                    models.WorkspaceMembership(
                         workspace_id=team.workspace_id,
                         user_id=principal.user_id,
-                        role=WorkspaceRole.MEMBER.value,
+                        role=domain.WorkspaceRole.MEMBER.value,
                         active=True,
                         invited_by=actor_id,
                         created_at=now,
                         updated_at=now,
                     ),
-                    TeamMembership(
+                    models.TeamMembership(
                         team_id=team.team_id,
                         user_id=principal.user_id,
                         active=True,
@@ -634,21 +631,21 @@ class AccountService(ServiceComponent):
                         created_at=now,
                         updated_at=now,
                     ),
-                    RoleAssignment(
+                    models.RoleAssignment(
                         user_id=principal.user_id,
                         team_id=team.team_id,
-                        role=Role.OPERATOR.value,
+                        role=domain.Role.OPERATOR.value,
                         account_scope=account.account_id,
                         venue_scope=account.venue,
                         created_at=now,
                     ),
                 ]
             )
-        principal = AccountService._require_exact_runtime_principal(
+        principal = require_exact_runtime_principal(
             session,
             principal_id=principal.user_id,
             team=team,
-            role=Role.OPERATOR,
+            role=domain.Role.OPERATOR,
             account_id=account.account_id,
             venue=account.venue,
             error_code="RUNTIME_SERVICE_PRINCIPAL_INVALID",
@@ -657,7 +654,7 @@ class AccountService(ServiceComponent):
             ),
             allow_inactive=True,
         )
-        AccountService._set_internal_principal_active(session, principal.user_id, True)
+        set_internal_principal_active(session, principal.user_id, True)
         return principal
 
     def configure_exchange_account_runtime_sync(
@@ -672,13 +669,13 @@ class AccountService(ServiceComponent):
     ) -> dict[str, Any]:
         operation = "exchange-account.runtime-sync.configure"
         with self.database.session_factory.begin() as session:
-            _actor, _workspace, team = self.transactions._active_scope(session, actor_id)
+            _actor, _workspace, team = self.transactions.active_scope(session, actor_id)
             assert team is not None
             account = session.scalar(
-                select(ExchangeAccount)
+                select(models.ExchangeAccount)
                 .where(
-                    ExchangeAccount.exchange_account_id == exchange_account_id,
-                    ExchangeAccount.team_id == team.team_id,
+                    models.ExchangeAccount.exchange_account_id == exchange_account_id,
+                    models.ExchangeAccount.team_id == team.team_id,
                 )
                 .with_for_update()
             )
@@ -687,7 +684,7 @@ class AccountService(ServiceComponent):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self.transactions._require_role(
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "account.credentials.manage",
@@ -700,7 +697,7 @@ class AccountService(ServiceComponent):
                 "enabled": enabled,
                 "expected_version": expected_version,
             }
-            digest, replay = self.transactions._idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -731,7 +728,7 @@ class AccountService(ServiceComponent):
                 )
                 account.runtime_service_principal_id = principal.user_id
             else:
-                self._set_internal_principal_active(
+                set_internal_principal_active(
                     session,
                     account.runtime_service_principal_id,
                     False,
@@ -747,7 +744,7 @@ class AccountService(ServiceComponent):
                 "runtime_sync_enabled": account.runtime_sync_enabled,
                 "version": account.version,
             }
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -756,7 +753,7 @@ class AccountService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="EXCHANGE_ACCOUNT_RUNTIME_SYNC_CONFIGURED",
@@ -789,13 +786,13 @@ class AccountService(ServiceComponent):
         """Configure exact-account eligibility without opening global LIVE gates."""
         operation = "exchange-account.trading.configure"
         with self.database.session_factory.begin() as session:
-            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
+            _actor, workspace, team = self.transactions.active_scope(session, actor_id)
             assert team is not None
             account = session.scalar(
-                select(ExchangeAccount)
+                select(models.ExchangeAccount)
                 .where(
-                    ExchangeAccount.exchange_account_id == exchange_account_id,
-                    ExchangeAccount.team_id == team.team_id,
+                    models.ExchangeAccount.exchange_account_id == exchange_account_id,
+                    models.ExchangeAccount.team_id == team.team_id,
                 )
                 .with_for_update()
             )
@@ -804,7 +801,7 @@ class AccountService(ServiceComponent):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self.transactions._require_role(
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "account.manage",
@@ -818,7 +815,7 @@ class AccountService(ServiceComponent):
                 "expected_version": expected_version,
             }
             caller = f"{actor_id}:{team.team_id}"
-            digest, replay = self.transactions._idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=caller,
                 operation=operation,
@@ -831,7 +828,7 @@ class AccountService(ServiceComponent):
                 _reject("VERSION_CONFLICT", "exchange account version changed")
             if enabled:
                 if team.execution_mode not in {
-                    TeamExecutionMode.SETUP.value,
+                    domain.TeamExecutionMode.SETUP.value,
                     account.environment,
                 }:
                     _reject(
@@ -840,8 +837,8 @@ class AccountService(ServiceComponent):
                         "the team is in SETUP",
                     )
                 if (
-                    account.environment == TeamExecutionMode.LIVE.value
-                    and team.execution_mode == TeamExecutionMode.LIVE.value
+                    account.environment == domain.TeamExecutionMode.LIVE.value
+                    and team.execution_mode == domain.TeamExecutionMode.LIVE.value
                     and not team.trading_enabled
                 ):
                     _reject(
@@ -861,11 +858,11 @@ class AccountService(ServiceComponent):
                         "verified encrypted credentials and continuous read-only sync are required",
                     )
                 assert account.runtime_service_principal_id is not None
-                self._require_exact_runtime_principal(
+                require_exact_runtime_principal(
                     session,
                     principal_id=account.runtime_service_principal_id,
                     team=team,
-                    role=Role.OPERATOR,
+                    role=domain.Role.OPERATOR,
                     account_id=account.account_id,
                     venue=account.venue,
                     error_code="RUNTIME_SERVICE_PRINCIPAL_INVALID",
@@ -883,7 +880,7 @@ class AccountService(ServiceComponent):
                 "trading_enabled": account.trading_status == "ELIGIBLE",
                 "version": account.version,
             }
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=caller,
                 operation=operation,
@@ -892,7 +889,7 @@ class AccountService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type=(
@@ -960,13 +957,14 @@ class AccountService(ServiceComponent):
         try:
             decoded = json.loads(payload)
         except json.JSONDecodeError as exc:
-            raise DomainRejected(
+            raise domain.DomainRejected(
                 "FREQTRADE_WORKER_AUTH_INVALID",
                 "Freqtrade worker authentication envelope is invalid",
             ) from exc
         if (
             not isinstance(decoded, dict)
-            or set(decoded) not in (
+            or set(decoded)
+            not in (
                 {"username", "password"},
                 {"username", "password", "ws_token"},
             )
@@ -1009,10 +1007,7 @@ class AccountService(ServiceComponent):
         normalized_hip3: tuple[str, ...] = ()
         if normalized_mode == "UNCONFIGURED":
             if (
-                any(
-                    value is not None
-                    for value in (name, base_url, username, password, ws_token)
-                )
+                any(value is not None for value in (name, base_url, username, password, ws_token))
                 or hip3_dexes
             ):
                 _reject(
@@ -1032,9 +1027,9 @@ class AccountService(ServiceComponent):
                     "Freqtrade worker name must be a stable identifier",
                 )
             try:
-                normalized_url = validate_worker_url("" if base_url is None else base_url)
+                normalized_url = freqtrade.validate_worker_url("" if base_url is None else base_url)
             except ValueError as exc:
-                raise DomainRejected("FREQTRADE_WORKER_URL_INVALID", str(exc)) from exc
+                raise domain.DomainRejected("FREQTRADE_WORKER_URL_INVALID", str(exc)) from exc
             if username is None or password is None:
                 _reject(
                     "FREQTRADE_WORKER_AUTH_INVALID",
@@ -1047,18 +1042,18 @@ class AccountService(ServiceComponent):
                 )
             auth_payload = self._freqtrade_auth_payload(username, password, ws_token)
             try:
-                normalized_hip3 = parse_hip3_dexes(",".join(hip3_dexes))
+                normalized_hip3 = freqtrade.parse_hip3_dexes(",".join(hip3_dexes))
             except ValueError as exc:
-                raise DomainRejected("FREQTRADE_HIP3_SCOPE_INVALID", str(exc)) from exc
+                raise domain.DomainRejected("FREQTRADE_HIP3_SCOPE_INVALID", str(exc)) from exc
         operation = "exchange-account.freqtrade-worker.configure"
         with self.database.session_factory.begin() as session:
-            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
+            _actor, workspace, team = self.transactions.active_scope(session, actor_id)
             assert team is not None
             account = session.scalar(
-                select(ExchangeAccount)
+                select(models.ExchangeAccount)
                 .where(
-                    ExchangeAccount.exchange_account_id == exchange_account_id,
-                    ExchangeAccount.team_id == team.team_id,
+                    models.ExchangeAccount.exchange_account_id == exchange_account_id,
+                    models.ExchangeAccount.team_id == team.team_id,
                 )
                 .with_for_update()
             )
@@ -1067,7 +1062,7 @@ class AccountService(ServiceComponent):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self.transactions._require_role(
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "account.credentials.manage",
@@ -1076,7 +1071,7 @@ class AccountService(ServiceComponent):
                 team_id=account.team_id,
             )
             if normalized_mode != "UNCONFIGURED" and account.venue not in (
-                SUPPORTED_EXCHANGE_VENUES
+                credentials.SUPPORTED_EXCHANGE_VENUES
             ):
                 _reject(
                     "FREQTRADE_VENUE_UNSUPPORTED",
@@ -1111,7 +1106,7 @@ class AccountService(ServiceComponent):
                 "auth_semantics": auth_semantics,
             }
             caller = f"{actor_id}:{team.team_id}"
-            digest, replay = self.transactions._idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=caller,
                 operation=operation,
@@ -1176,7 +1171,7 @@ class AccountService(ServiceComponent):
                     "auth_version": account.freqtrade_auth_version,
                 },
             }
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=caller,
                 operation=operation,
@@ -1185,7 +1180,7 @@ class AccountService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="FREQTRADE_WORKER_CONFIGURED",
@@ -1225,12 +1220,12 @@ class AccountService(ServiceComponent):
         idempotency_key: str,
     ) -> tuple[PreparedFreqtradeWorkerBinding | None, dict[str, Any] | None]:
         with self.database.session_factory.begin() as session:
-            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
+            _actor, workspace, team = self.transactions.active_scope(session, actor_id)
             assert team is not None
             account = session.scalar(
-                select(ExchangeAccount).where(
-                    ExchangeAccount.exchange_account_id == exchange_account_id,
-                    ExchangeAccount.team_id == team.team_id,
+                select(models.ExchangeAccount).where(
+                    models.ExchangeAccount.exchange_account_id == exchange_account_id,
+                    models.ExchangeAccount.team_id == team.team_id,
                 )
             )
             if account is None:
@@ -1238,7 +1233,7 @@ class AccountService(ServiceComponent):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self.transactions._require_role(
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "account.credentials.manage",
@@ -1246,7 +1241,7 @@ class AccountService(ServiceComponent):
                 account.venue,
                 team_id=account.team_id,
             )
-            _digest, replay = self.transactions._idempotency(
+            _digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation="exchange-account.freqtrade-worker.verify",
@@ -1266,13 +1261,13 @@ class AccountService(ServiceComponent):
 
     def _prepared_freqtrade_worker_binding(
         self,
-        account: ExchangeAccount,
+        account: models.ExchangeAccount,
         workspace_id: UUID,
         *,
         expected_mode: str | None = None,
     ) -> PreparedFreqtradeWorkerBinding:
         if (
-            account.venue not in SUPPORTED_EXCHANGE_VENUES
+            account.venue not in credentials.SUPPORTED_EXCHANGE_VENUES
             or account.freqtrade_worker_mode == "UNCONFIGURED"
             or account.freqtrade_worker_name is None
             or account.freqtrade_worker_url is None
@@ -1334,13 +1329,13 @@ class AccountService(ServiceComponent):
         ):
             normalized_error = "FREQTRADE_WORKER_PROBE_FAILED"
         with self.database.session_factory.begin() as session:
-            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
+            _actor, workspace, team = self.transactions.active_scope(session, actor_id)
             assert team is not None
             account = session.scalar(
-                select(ExchangeAccount)
+                select(models.ExchangeAccount)
                 .where(
-                    ExchangeAccount.exchange_account_id == binding.exchange_account_id,
-                    ExchangeAccount.team_id == team.team_id,
+                    models.ExchangeAccount.exchange_account_id == binding.exchange_account_id,
+                    models.ExchangeAccount.team_id == team.team_id,
                 )
                 .with_for_update()
             )
@@ -1349,7 +1344,7 @@ class AccountService(ServiceComponent):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self.transactions._require_role(
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "account.credentials.manage",
@@ -1358,7 +1353,7 @@ class AccountService(ServiceComponent):
                 team_id=account.team_id,
             )
             caller = f"{actor_id}:{team.team_id}"
-            digest, replay = self.transactions._idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=caller,
                 operation="exchange-account.freqtrade-worker.verify",
@@ -1408,7 +1403,7 @@ class AccountService(ServiceComponent):
                     ),
                 },
             }
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=caller,
                 operation="exchange-account.freqtrade-worker.verify",
@@ -1417,7 +1412,7 @@ class AccountService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type=(
@@ -1454,13 +1449,13 @@ class AccountService(ServiceComponent):
     ) -> PreparedFreqtradeWorkerBinding:
         environment, account_id, venue = _scope_parts(execution_scope)
         expected_worker_mode = (
-            "LIVE" if environment is ExecutionEnvironment.LIVE else "DRY_RUN"
+            "LIVE" if environment is domain.ExecutionEnvironment.LIVE else "DRY_RUN"
         )
         with self.database.session_factory() as session:
-            team = self.transactions._require_role(
+            team = self.transactions.require_role(
                 session, actor_id, "venue.record", account_id, venue
             )
-            self.transactions._validate_sender_lease(
+            self.transactions.validate_sender_lease(
                 session,
                 team.team_id,
                 execution_scope,
@@ -1469,7 +1464,7 @@ class AccountService(ServiceComponent):
                 now,
             )
             if campaign_id is not None:
-                campaign = session.get(Campaign, campaign_id)
+                campaign = session.get(models.Campaign, campaign_id)
                 if (
                     campaign is None
                     or campaign.team_id != team.team_id
@@ -1484,14 +1479,14 @@ class AccountService(ServiceComponent):
                         "EXECUTION_SCOPE_MISMATCH",
                         "Freqtrade worker scope does not match the campaign",
                     )
-            if environment is ExecutionEnvironment.LIVE:
-                live_gate = session.get(CapabilityGate, "LIVE_ORDER_SEND")
-                if live_gate is None or live_gate.status != CapabilityStatus.ENABLED.value:
+            if environment is domain.ExecutionEnvironment.LIVE:
+                live_gate = session.get(models.CapabilityGate, "LIVE_ORDER_SEND")
+                if live_gate is None or live_gate.status != domain.CapabilityStatus.ENABLED.value:
                     _reject(
                         "LIVE_ORDER_SEND_DISABLED",
                         "LIVE order send requires the explicit capability gate",
                     )
-                account = self._require_exchange_account_live_ready(
+                account = require_exchange_account_live_ready(
                     session,
                     team_id=team.team_id,
                     account_id=account_id,
@@ -1499,11 +1494,11 @@ class AccountService(ServiceComponent):
                 )
             else:
                 testnet_account = session.scalar(
-                    select(ExchangeAccount).where(
-                        ExchangeAccount.team_id == team.team_id,
-                        ExchangeAccount.environment == environment.value,
-                        ExchangeAccount.account_id == account_id,
-                        ExchangeAccount.venue == venue,
+                    select(models.ExchangeAccount).where(
+                        models.ExchangeAccount.team_id == team.team_id,
+                        models.ExchangeAccount.environment == environment.value,
+                        models.ExchangeAccount.account_id == account_id,
+                        models.ExchangeAccount.venue == venue,
                     )
                 )
                 if (
@@ -1520,7 +1515,7 @@ class AccountService(ServiceComponent):
                 account = testnet_account
                 if (
                     not team.trading_enabled
-                    or team.execution_mode != TeamExecutionMode.TESTNET.value
+                    or team.execution_mode != domain.TeamExecutionMode.TESTNET.value
                 ):
                     _reject(
                         "TEAM_TESTNET_MODE_REQUIRED",
@@ -1537,7 +1532,7 @@ class AccountService(ServiceComponent):
         binding: PreparedFreqtradeWorkerBinding,
     ) -> None:
         with self.database.session_factory() as session:
-            account = session.get(ExchangeAccount, binding.exchange_account_id)
+            account = session.get(models.ExchangeAccount, binding.exchange_account_id)
             if (
                 account is None
                 or account.team_id != binding.team_id
@@ -1564,7 +1559,7 @@ class AccountService(ServiceComponent):
         owner_id: str,
         fencing_token: int,
         binding: PreparedFreqtradeWorkerBinding,
-        command: FreqtradeEntryCommand | FreqtradeExitCommand,
+        command: freqtrade.FreqtradeEntryCommand | freqtrade.FreqtradeExitCommand,
         external_trade_id: str | None,
         idempotency_key: str,
         now: datetime,
@@ -1577,7 +1572,7 @@ class AccountService(ServiceComponent):
             )
         if owner_id != owner_id.strip() or not owner_id:
             _reject("SENDER_OWNER_INVALID", "sender owner identity is invalid")
-        if isinstance(command, FreqtradeEntryCommand):
+        if isinstance(command, freqtrade.FreqtradeEntryCommand):
             if command.position_adjustment == (external_trade_id is None):
                 _reject(
                     "FREQTRADE_DISPATCH_IDENTITY_INVALID",
@@ -1614,12 +1609,12 @@ class AccountService(ServiceComponent):
             }
         environment, account_id, venue = _scope_parts(execution_scope)
         expected_worker_mode = (
-            "LIVE" if environment is ExecutionEnvironment.LIVE else "DRY_RUN"
+            "LIVE" if environment is domain.ExecutionEnvironment.LIVE else "DRY_RUN"
         )
         operation = f"freqtrade.dispatch:{intent_id}"
         with self.database.session_factory.begin() as session:
-            intent = session.get(OrderIntent, intent_id, with_for_update=True)
-            campaign = None if intent is None else session.get(Campaign, intent.campaign_id)
+            intent = session.get(models.OrderIntent, intent_id, with_for_update=True)
+            campaign = None if intent is None else session.get(models.Campaign, intent.campaign_id)
             if intent is None or campaign is None:
                 _reject("ORDER_INTENT_NOT_FOUND", "Freqtrade intent campaign is unavailable")
             if (
@@ -1633,7 +1628,7 @@ class AccountService(ServiceComponent):
                     "EXECUTION_SCOPE_MISMATCH",
                     "Freqtrade dispatch is outside the intent's exact execution scope",
                 )
-            self.transactions._require_role(
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "venue.record",
@@ -1641,7 +1636,7 @@ class AccountService(ServiceComponent):
                 campaign.venue,
                 team_id=campaign.team_id,
             )
-            self.transactions._validate_sender_lease(
+            self.transactions.validate_sender_lease(
                 session,
                 campaign.team_id,
                 execution_scope,
@@ -1649,14 +1644,14 @@ class AccountService(ServiceComponent):
                 fencing_token,
                 now,
             )
-            if environment is ExecutionEnvironment.LIVE:
-                live_gate = session.get(CapabilityGate, "LIVE_ORDER_SEND")
-                if live_gate is None or live_gate.status != CapabilityStatus.ENABLED.value:
+            if environment is domain.ExecutionEnvironment.LIVE:
+                live_gate = session.get(models.CapabilityGate, "LIVE_ORDER_SEND")
+                if live_gate is None or live_gate.status != domain.CapabilityStatus.ENABLED.value:
                     _reject(
                         "LIVE_ORDER_SEND_DISABLED",
                         "LIVE order send requires the explicit capability gate",
                     )
-                account = self._require_exchange_account_live_ready(
+                account = require_exchange_account_live_ready(
                     session,
                     team_id=campaign.team_id,
                     account_id=campaign.account_id,
@@ -1664,12 +1659,12 @@ class AccountService(ServiceComponent):
                 )
             else:
                 testnet_account = session.scalar(
-                    select(ExchangeAccount).where(
-                        ExchangeAccount.team_id == campaign.team_id,
-                        ExchangeAccount.environment == environment.value,
-                        ExchangeAccount.account_id == campaign.account_id,
-                        ExchangeAccount.venue == campaign.venue,
-                        ExchangeAccount.active,
+                    select(models.ExchangeAccount).where(
+                        models.ExchangeAccount.team_id == campaign.team_id,
+                        models.ExchangeAccount.environment == environment.value,
+                        models.ExchangeAccount.account_id == campaign.account_id,
+                        models.ExchangeAccount.venue == campaign.venue,
+                        models.ExchangeAccount.active,
                     )
                 )
                 if (
@@ -1700,7 +1695,7 @@ class AccountService(ServiceComponent):
                     "FREQTRADE_WORKER_BINDING_CHANGED",
                     "the exact account-bound Freqtrade worker changed before dispatch",
                 )
-            if isinstance(command, FreqtradeEntryCommand) == intent.reduce_only:
+            if isinstance(command, freqtrade.FreqtradeEntryCommand) == intent.reduce_only:
                 _reject(
                     "FREQTRADE_DISPATCH_IDENTITY_INVALID",
                     "Freqtrade dispatch kind does not match the frozen intent",
@@ -1720,7 +1715,7 @@ class AccountService(ServiceComponent):
             # recover the same key by query after a crash without creating a second
             # external write.
             caller = f"team:{campaign.team_id}"
-            digest, replay = self.transactions._idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=caller,
                 operation=operation,
@@ -1739,7 +1734,7 @@ class AccountService(ServiceComponent):
                     )
                 if (
                     not (
-                        isinstance(command, FreqtradeEntryCommand)
+                        isinstance(command, freqtrade.FreqtradeEntryCommand)
                         and not command.position_adjustment
                     )
                     and intent.dispatch_external_id != external_trade_id
@@ -1748,12 +1743,12 @@ class AccountService(ServiceComponent):
                         "FREQTRADE_DISPATCH_SNAPSHOT_CHANGED",
                         "persisted Freqtrade trade identity changed before recovery",
                     )
-                if intent.status == OrderIntentStatus.FILLED.value:
+                if intent.status == domain.OrderIntentStatus.FILLED.value:
                     mode = "COMPLETED"
                 elif intent.status in {
-                    OrderIntentStatus.DISPATCHING.value,
-                    OrderIntentStatus.PARTIALLY_FILLED.value,
-                    OrderIntentStatus.UNKNOWN.value,
+                    domain.OrderIntentStatus.DISPATCHING.value,
+                    domain.OrderIntentStatus.PARTIALLY_FILLED.value,
+                    domain.OrderIntentStatus.UNKNOWN.value,
                 }:
                     mode = "QUERY_ONLY"
                 else:
@@ -1772,13 +1767,13 @@ class AccountService(ServiceComponent):
                     "FREQTRADE_DISPATCH_ALREADY_STARTED",
                     "the intent already has a durable Freqtrade dispatch identity",
                 )
-            if intent.status != OrderIntentStatus.READY.value:
+            if intent.status != domain.OrderIntentStatus.READY.value:
                 _reject(
                     "ORDER_INTENT_STATE_INVALID",
                     "only a READY intent can begin a new Freqtrade dispatch",
                 )
             previous = intent.status
-            intent.status = OrderIntentStatus.DISPATCHING.value
+            intent.status = domain.OrderIntentStatus.DISPATCHING.value
             intent.dispatch_backend = "FREQTRADE"
             intent.dispatch_account_version = binding.account_version
             intent.dispatch_auth_version = binding.auth_version
@@ -1790,10 +1785,10 @@ class AccountService(ServiceComponent):
             intent.updated_at = now
             response = {
                 "intent_id": str(intent.intent_id),
-                "dispatch_status": OrderIntentStatus.DISPATCHING.value,
+                "dispatch_status": domain.OrderIntentStatus.DISPATCHING.value,
                 "intent_version": intent.version,
             }
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=caller,
                 operation=operation,
@@ -1802,7 +1797,7 @@ class AccountService(ServiceComponent):
                 response=response,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="FREQTRADE_DISPATCH_STARTED",
@@ -1820,7 +1815,7 @@ class AccountService(ServiceComponent):
                 account_id=campaign.account_id,
                 now=now,
             )
-            INTENT_TRANSITIONS.labels(previous, intent.status).inc()
+            metrics.INTENT_TRANSITIONS.labels(previous, intent.status).inc()
             return PreparedFreqtradeDispatch(
                 mode="SEND",
                 external_trade_id=intent.dispatch_external_id,
@@ -1837,8 +1832,8 @@ class AccountService(ServiceComponent):
     ) -> str | None:
         """Read only the persisted backend identity for an exact intent scope."""
         with self.database.session_factory() as session:
-            intent = session.get(OrderIntent, intent_id)
-            campaign = None if intent is None else session.get(Campaign, intent.campaign_id)
+            intent = session.get(models.OrderIntent, intent_id)
+            campaign = None if intent is None else session.get(models.Campaign, intent.campaign_id)
             if intent is None or campaign is None:
                 _reject("ORDER_INTENT_NOT_FOUND", "Freqtrade intent campaign is unavailable")
             if execution_scope != _scope_key(
@@ -1850,7 +1845,7 @@ class AccountService(ServiceComponent):
                     "EXECUTION_SCOPE_MISMATCH",
                     "Freqtrade dispatch identity is outside the exact intent scope",
                 )
-            self.transactions._require_role(
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "venue.record",
@@ -1868,17 +1863,17 @@ class AccountService(ServiceComponent):
     def runtime_account_bindings(self) -> tuple[PreparedRuntimeAccountBinding, ...]:
         with self.database.session_factory() as session:
             accounts = session.scalars(
-                select(ExchangeAccount)
-                .where(ExchangeAccount.runtime_sync_enabled)
+                select(models.ExchangeAccount)
+                .where(models.ExchangeAccount.runtime_sync_enabled)
                 .order_by(
-                    ExchangeAccount.team_id,
-                    ExchangeAccount.venue,
-                    ExchangeAccount.account_id,
+                    models.ExchangeAccount.team_id,
+                    models.ExchangeAccount.venue,
+                    models.ExchangeAccount.account_id,
                 )
             ).all()
             bindings: list[PreparedRuntimeAccountBinding] = []
             for account in accounts:
-                team = session.get(Team, account.team_id)
+                team = session.get(models.Team, account.team_id)
                 if (
                     team is None
                     or not team.active
@@ -1887,18 +1882,18 @@ class AccountService(ServiceComponent):
                     or account.connection_status != "VERIFIED"
                     or account.credentials_ciphertext is None
                     or account.credential_version < 1
-                    or account.venue not in SUPPORTED_EXCHANGE_VENUES
+                    or account.venue not in credentials.SUPPORTED_EXCHANGE_VENUES
                     or (account.credential_metadata or {}).get("environment") != account.environment
                 ):
                     _reject(
                         "RUNTIME_BINDING_INVALID",
                         "an enabled read-only runtime binding no longer matches its frozen scope",
                     )
-                principal = self._require_exact_runtime_principal(
+                principal = require_exact_runtime_principal(
                     session,
                     principal_id=account.runtime_service_principal_id,
                     team=team,
-                    role=Role.OPERATOR,
+                    role=domain.Role.OPERATOR,
                     account_id=account.account_id,
                     venue=account.venue,
                     error_code="RUNTIME_BINDING_INVALID",
@@ -1906,7 +1901,7 @@ class AccountService(ServiceComponent):
                         "an enabled read-only runtime binding no longer matches its frozen scope"
                     ),
                 )
-                credentials = self.credential_cipher.decrypt(
+                credential_values = self.credential_cipher.decrypt(
                     account.credentials_ciphertext,
                     team_id=account.team_id,
                     exchange_account_id=account.exchange_account_id,
@@ -1914,9 +1909,9 @@ class AccountService(ServiceComponent):
                     credential_version=account.credential_version,
                 )
                 if account.venue == "HYPERLIQUID":
-                    credentials = {
+                    credential_values = {
                         key: value
-                        for key, value in credentials.items()
+                        for key, value in credential_values.items()
                         if key in {"account_address", "api_wallet_address"}
                     }
                 bindings.append(
@@ -1930,13 +1925,11 @@ class AccountService(ServiceComponent):
                         venue=account.venue,
                         environment=account.environment,
                         account_mode=str(
-                            (account.credential_metadata or {}).get(
-                                "account_mode", "STANDARD"
-                            )
+                            (account.credential_metadata or {}).get("account_mode", "STANDARD")
                         ),
                         account_version=account.version,
                         credential_version=account.credential_version,
-                        credentials=credentials,
+                        credentials=credential_values,
                         hip3_dexes=tuple(account.freqtrade_hip3_dexes or []),
                     )
                 )
@@ -1949,34 +1942,34 @@ class AccountService(ServiceComponent):
 
         with self.database.session_factory() as session:
             accounts = session.scalars(
-                select(ExchangeAccount)
+                select(models.ExchangeAccount)
                 .where(
-                    ExchangeAccount.runtime_sync_enabled,
-                    ExchangeAccount.active.is_(True),
-                    ExchangeAccount.deleted_at.is_(None),
-                    ExchangeAccount.connection_status == "VERIFIED",
-                    ExchangeAccount.freqtrade_worker_status == "VERIFIED",
-                    ExchangeAccount.freqtrade_worker_mode.in_(("DRY_RUN", "LIVE")),
+                    models.ExchangeAccount.runtime_sync_enabled,
+                    models.ExchangeAccount.active.is_(True),
+                    models.ExchangeAccount.deleted_at.is_(None),
+                    models.ExchangeAccount.connection_status == "VERIFIED",
+                    models.ExchangeAccount.freqtrade_worker_status == "VERIFIED",
+                    models.ExchangeAccount.freqtrade_worker_mode.in_(("DRY_RUN", "LIVE")),
                 )
                 .order_by(
-                    ExchangeAccount.team_id,
-                    ExchangeAccount.venue,
-                    ExchangeAccount.account_id,
+                    models.ExchangeAccount.team_id,
+                    models.ExchangeAccount.venue,
+                    models.ExchangeAccount.account_id,
                 )
             ).all()
             bindings: list[PreparedFreqtradeWorkerBinding] = []
             for account in accounts:
-                team = session.get(Team, account.team_id)
+                team = session.get(models.Team, account.team_id)
                 if team is None or not team.active or account.runtime_service_principal_id is None:
                     _reject(
                         "FREQTRADE_RUNTIME_BINDING_INVALID",
                         "a verified Freqtrade worker lost its exact runtime principal",
                     )
-                self._require_exact_runtime_principal(
+                require_exact_runtime_principal(
                     session,
                     principal_id=account.runtime_service_principal_id,
                     team=team,
-                    role=Role.OPERATOR,
+                    role=domain.Role.OPERATOR,
                     account_id=account.account_id,
                     venue=account.venue,
                     error_code="FREQTRADE_RUNTIME_BINDING_INVALID",
@@ -2000,28 +1993,28 @@ class AccountService(ServiceComponent):
     def perptape_runtime_bindings(self) -> tuple[PreparedPerptapeRuntimeBinding, ...]:
         with self.database.session_factory() as session:
             sources = session.scalars(
-                select(TeamSignalSource)
+                select(models.TeamSignalSource)
                 .where(
-                    TeamSignalSource.enabled,
-                    TeamSignalSource.mode == SignalSourceMode.PERPTAPE.value,
-                    TeamSignalSource.deleted_at.is_(None),
-                    TeamSignalSource.credential_ciphertext.is_not(None),
+                    models.TeamSignalSource.enabled,
+                    models.TeamSignalSource.mode == domain.SignalSourceMode.PERPTAPE.value,
+                    models.TeamSignalSource.deleted_at.is_(None),
+                    models.TeamSignalSource.credential_ciphertext.is_not(None),
                 )
-                .order_by(TeamSignalSource.team_id)
+                .order_by(models.TeamSignalSource.team_id)
             ).all()
             bindings: list[PreparedPerptapeRuntimeBinding] = []
             for source in sources:
-                team = session.get(Team, source.team_id)
+                team = session.get(models.Team, source.team_id)
                 if team is None or not team.active or source.service_principal_id is None:
                     _reject(
                         "SIGNAL_SERVICE_PRINCIPAL_INVALID",
                         "an enabled Perptape source is outside its exact team scope",
                     )
-                principal = self._require_exact_runtime_principal(
+                principal = require_exact_runtime_principal(
                     session,
                     principal_id=source.service_principal_id,
                     team=team,
-                    role=Role.PROPOSER,
+                    role=domain.Role.PROPOSER,
                     account_id=None,
                     venue=None,
                     error_code="SIGNAL_SERVICE_PRINCIPAL_INVALID",
@@ -2050,13 +2043,13 @@ class AccountService(ServiceComponent):
 
     def validate_perptape_runtime_binding(self, binding: PreparedPerptapeRuntimeBinding) -> None:
         with self.database.session_factory() as session:
-            source = session.get(TeamSignalSource, binding.signal_source_id)
+            source = session.get(models.TeamSignalSource, binding.signal_source_id)
             if (
                 source is None
                 or source.team_id != binding.team_id
                 or not source.enabled
                 or source.deleted_at is not None
-                or source.mode != SignalSourceMode.PERPTAPE.value
+                or source.mode != domain.SignalSourceMode.PERPTAPE.value
                 or source.service_principal_id != binding.service_principal_id
                 or source.version != binding.source_version
                 or source.credential_version != binding.credential_version
@@ -2065,49 +2058,6 @@ class AccountService(ServiceComponent):
                     "SIGNAL_RUNTIME_BINDING_CHANGED",
                     "the team Perptape binding changed during synchronization",
                 )
-
-    @staticmethod
-    def _lock_perptape_runtime_binding(
-        session: Session,
-        binding: PreparedPerptapeRuntimeBinding,
-    ) -> TeamSignalSource:
-        source = session.scalar(
-            select(TeamSignalSource)
-            .where(TeamSignalSource.signal_source_id == binding.signal_source_id)
-            .with_for_update()
-        )
-        if (
-            source is None
-            or source.team_id != binding.team_id
-            or not source.enabled
-            or source.deleted_at is not None
-            or source.mode != SignalSourceMode.PERPTAPE.value
-            or source.service_principal_id != binding.service_principal_id
-            or source.version != binding.source_version
-            or source.credential_version != binding.credential_version
-        ):
-            _reject(
-                "SIGNAL_RUNTIME_BINDING_CHANGED",
-                "the team Perptape binding changed during synchronization",
-            )
-        team = session.get(Team, binding.team_id)
-        if team is None or not team.active:
-            _reject(
-                "SIGNAL_RUNTIME_BINDING_CHANGED",
-                "the team Perptape binding changed during synchronization",
-            )
-        AccountService._require_exact_runtime_principal(
-            session,
-            principal_id=binding.service_principal_id,
-            team=team,
-            role=Role.PROPOSER,
-            account_id=None,
-            venue=None,
-            error_code="SIGNAL_RUNTIME_BINDING_CHANGED",
-            error_message="the team Perptape binding changed during synchronization",
-            lock=True,
-        )
-        return source
 
     @staticmethod
     def _connection_verification_payload(
@@ -2130,12 +2080,12 @@ class AccountService(ServiceComponent):
     ) -> tuple[PreparedExchangeConnectionVerification | None, dict[str, Any] | None]:
         """Authorize and decrypt a version-pinned probe after checking for a replay."""
         with self.database.session_factory.begin() as session:
-            _actor, workspace, active_team = self.transactions._active_scope(session, actor_id)
+            _actor, workspace, active_team = self.transactions.active_scope(session, actor_id)
             assert active_team is not None
             account = session.scalar(
-                select(ExchangeAccount).where(
-                    ExchangeAccount.exchange_account_id == exchange_account_id,
-                    ExchangeAccount.team_id == active_team.team_id,
+                select(models.ExchangeAccount).where(
+                    models.ExchangeAccount.exchange_account_id == exchange_account_id,
+                    models.ExchangeAccount.team_id == active_team.team_id,
                 )
             )
             if account is None:
@@ -2143,7 +2093,7 @@ class AccountService(ServiceComponent):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self.transactions._require_role(
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "account.credentials.manage",
@@ -2152,7 +2102,7 @@ class AccountService(ServiceComponent):
                 team_id=account.team_id,
             )
             caller = f"{actor_id}:{account.team_id}"
-            _digest, replay = self.transactions._idempotency(
+            _digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=caller,
                 operation="exchange-account.connection.verify",
@@ -2177,7 +2127,7 @@ class AccountService(ServiceComponent):
                     next_retry_at = None
                 current_time = (now or datetime.now(UTC)).astimezone(UTC)
                 if next_retry_at is not None and current_time < next_retry_at.astimezone(UTC):
-                    raise DomainRejected(
+                    raise domain.DomainRejected(
                         "BINANCE_CONNECTION_RETRY_DEFERRED",
                         "Binance connection verification is deferred until next_retry_at",
                         metadata=dict(diagnostics),
@@ -2192,7 +2142,7 @@ class AccountService(ServiceComponent):
                     "CREDENTIAL_ENVIRONMENT_MISMATCH",
                     "stored credentials are not bound to the account execution environment",
                 )
-            credentials = self.credential_cipher.decrypt(
+            credential_values = self.credential_cipher.decrypt(
                 account.credentials_ciphertext,
                 team_id=account.team_id,
                 exchange_account_id=account.exchange_account_id,
@@ -2200,9 +2150,9 @@ class AccountService(ServiceComponent):
                 credential_version=account.credential_version,
             )
             if account.venue == "HYPERLIQUID":
-                credentials = {
+                credential_values = {
                     key: value
-                    for key, value in credentials.items()
+                    for key, value in credential_values.items()
                     if key in {"account_address", "api_wallet_address"}
                 }
             return (
@@ -2218,7 +2168,7 @@ class AccountService(ServiceComponent):
                     ),
                     account_version=account.version,
                     credential_version=account.credential_version,
-                    credentials=credentials,
+                    credentials=credential_values,
                 ),
                 None,
             )
@@ -2239,13 +2189,13 @@ class AccountService(ServiceComponent):
         elif error_code is None or CONNECTION_ERROR_CODE_PATTERN.fullmatch(error_code) is None:
             error_code = "READ_ONLY_PROBE_FAILED"
         with self.database.session_factory.begin() as session:
-            _actor, _workspace, active_team = self.transactions._active_scope(session, actor_id)
+            _actor, _workspace, active_team = self.transactions.active_scope(session, actor_id)
             assert active_team is not None
             account = session.scalar(
-                select(ExchangeAccount)
+                select(models.ExchangeAccount)
                 .where(
-                    ExchangeAccount.exchange_account_id == command.exchange_account_id,
-                    ExchangeAccount.team_id == active_team.team_id,
+                    models.ExchangeAccount.exchange_account_id == command.exchange_account_id,
+                    models.ExchangeAccount.team_id == active_team.team_id,
                 )
                 .with_for_update()
             )
@@ -2254,7 +2204,7 @@ class AccountService(ServiceComponent):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self.transactions._require_role(
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "account.credentials.manage",
@@ -2263,7 +2213,7 @@ class AccountService(ServiceComponent):
                 team_id=account.team_id,
             )
             caller = f"{actor_id}:{account.team_id}"
-            digest, replay = self.transactions._idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=caller,
                 operation="exchange-account.connection.verify",
@@ -2304,7 +2254,7 @@ class AccountService(ServiceComponent):
                 account.runtime_sync_enabled = False
                 if account.trading_status == "ELIGIBLE":
                     account.trading_status = "BLOCKED"
-                self._set_internal_principal_active(
+                set_internal_principal_active(
                     session,
                     account.runtime_service_principal_id,
                     False,
@@ -2335,7 +2285,7 @@ class AccountService(ServiceComponent):
                     "enabled": account.trading_status == "ELIGIBLE",
                 },
             }
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=caller,
                 operation="exchange-account.connection.verify",
@@ -2345,7 +2295,7 @@ class AccountService(ServiceComponent):
                 now=now,
             )
             correlation_id = uuid4()
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type=(
@@ -2368,7 +2318,8 @@ class AccountService(ServiceComponent):
                 now=now,
             )
             if not outcome.success:
-                self.transactions._enqueue_notification_event(
+                enqueue_notification_event(
+                    self.transactions,
                     session,
                     actor_id=str(actor_id),
                     team=active_team,

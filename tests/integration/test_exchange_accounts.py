@@ -20,8 +20,8 @@ from trading_control_plane.freqtrade import FreqtradeWorkerClient, FreqtradeWork
 from trading_control_plane.models import AuditEvent, ExchangeAccount, RoleAssignment, User
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
+from trading_control_plane.runtime_contracts import ConnectionProbeResult
 from trading_control_plane.service import TradingService
-from trading_control_plane.service_core import ConnectionProbeResult
 
 
 def encryption_key() -> str:

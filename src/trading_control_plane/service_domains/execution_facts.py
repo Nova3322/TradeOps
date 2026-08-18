@@ -1,77 +1,59 @@
 from __future__ import annotations
 
-from trading_control_plane.service_component import ServiceComponent
-from trading_control_plane.service_core import (
-    CAPITAL_HISTORY_MIN_INTERVAL,
-    INTENT_TRANSITIONS,
-    MAX_FACT_CLOCK_SKEW,
-    PROTECTION_ISSUES,
-    SUPPORTED_EXCHANGE_VENUES,
-    USD_STABLE_ASSETS,
-    UUID,
-    AbstractContextManager,
-    AccountEquity,
-    AccountEquityObservation,
-    Any,
-    Campaign,
-    CampaignStatus,
-    Decimal,
-    ExecutionEnvironment,
-    FactStatus,
-    FundingPayment,
-    IdempotencyConflict,
-    Instrument,
-    IntentKind,
-    OrderIntent,
-    OrderIntentStatus,
-    Position,
-    PreparedRuntimeAccountBinding,
-    ProtectionOrder,
-    ProtectionStatus,
-    ReservationStatus,
-    RiskReservation,
-    Session,
-    TeamExecutionMode,
-    TradingAuthorization,
-    VenueFill,
-    VenueOrder,
-    VenueOrderStatus,
-    VenueReadOnlySnapshot,
-    _reject,
-    datetime,
-    nullcontext,
-    select,
-    timedelta,
-    uuid4,
+from contextlib import AbstractContextManager, nullcontext
+from datetime import datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from trading_control_plane import (
+    credentials,
+    domain,
+    execution_scope,
+    metrics,
+    models,
+    notilt,
+    rejections,
+    runtime_contracts,
+    venue_read_only,
 )
+from trading_control_plane.service_component import ServiceComponent
 from trading_control_plane.service_domains.accounts import (
     ensure_exchange_account_reference,
     lock_runtime_account_binding,
 )
 from trading_control_plane.service_domains.execution_intent import consume_add_unit
 
+CAPITAL_HISTORY_MIN_INTERVAL = timedelta(minutes=1)
+MAX_FACT_CLOCK_SKEW = execution_scope.MAX_FACT_CLOCK_SKEW
+PreparedRuntimeAccountBinding = runtime_contracts.PreparedRuntimeAccountBinding
+_reject = rejections.reject
+
 
 def release_zero_fill_in_session(
     session: Session,
-    intent: OrderIntent,
-    terminal_status: OrderIntentStatus,
+    intent: models.OrderIntent,
+    terminal_status: domain.OrderIntentStatus,
     confirmed_external: bool = False,
     *,
     now: datetime,
 ) -> None:
     reservation = (
-        session.get(RiskReservation, intent.reservation_id, with_for_update=True)
+        session.get(models.RiskReservation, intent.reservation_id, with_for_update=True)
         if intent.reservation_id is not None
         else None
     )
-    if reservation is not None and reservation.status != ReservationStatus.RELEASED.value:
-        if reservation.status == ReservationStatus.UNKNOWN.value and not confirmed_external:
+    if reservation is not None and reservation.status != domain.ReservationStatus.RELEASED.value:
+        if reservation.status == domain.ReservationStatus.UNKNOWN.value and not confirmed_external:
             _reject("RISK_RESERVATION_UNKNOWN", "unknown risk cannot be released")
-        reservation.status = ReservationStatus.RELEASED.value
+        reservation.status = domain.ReservationStatus.RELEASED.value
         reservation.updated_at = now
         reservation.version += 1
         authorization = session.get(
-            TradingAuthorization, intent.authorization_id, with_for_update=True
+            models.TradingAuthorization, intent.authorization_id, with_for_update=True
         )
         if authorization is None or authorization.used_quantity < intent.quantity:
             _reject("AUTHORIZATION_USAGE_INVALID", "authorization usage is inconsistent")
@@ -81,21 +63,63 @@ def release_zero_fill_in_session(
     intent.version += 1
 
 
+def record_account_equity_observation(
+    session: Session,
+    fact: models.AccountEquity,
+    *,
+    recorded_at: datetime,
+) -> None:
+    session.flush()
+    latest_observed_at = session.scalar(
+        select(models.AccountEquityObservation.observed_at)
+        .where(models.AccountEquityObservation.account_equity_id == fact.account_equity_id)
+        .order_by(models.AccountEquityObservation.observed_at.desc())
+        .limit(1)
+    )
+    if latest_observed_at is not None and (
+        fact.observed_at < latest_observed_at + CAPITAL_HISTORY_MIN_INTERVAL
+    ):
+        return
+    usd_equity = None
+    if fact.fact_status == domain.FactStatus.KNOWN.value:
+        usd_equity = (
+            fact.equity
+            if fact.currency.upper() in notilt.USD_STABLE_ASSETS
+            else fact.valuation_equity
+        )
+    session.add(
+        models.AccountEquityObservation(
+            team_id=fact.team_id,
+            account_equity_id=fact.account_equity_id,
+            environment=fact.environment,
+            location_type=fact.location_type,
+            account_id=fact.account_id,
+            venue=fact.venue,
+            currency=fact.currency,
+            equity=fact.equity,
+            available_balance=fact.available_balance,
+            usd_equity=usd_equity,
+            observed_at=fact.observed_at,
+            recorded_at=recorded_at,
+        )
+    )
+
+
 class FactIngestionExecutionService(ServiceComponent):
     def ingest_normalized_read_only_account_snapshot(
         self,
         account_id: str,
         actor_id: UUID,
-        snapshots: tuple[VenueReadOnlySnapshot, ...],
+        snapshots: tuple[venue_read_only.VenueReadOnlySnapshot, ...],
         *,
         venue: str,
-        environment: ExecutionEnvironment,
+        environment: domain.ExecutionEnvironment,
         runtime_binding: PreparedRuntimeAccountBinding,
         now: datetime,
     ) -> dict[str, Any]:
         """Persist the exchange-neutral fact-adapter contract for an exact binding."""
 
-        if venue not in SUPPORTED_EXCHANGE_VENUES or runtime_binding.venue != venue:
+        if venue not in credentials.SUPPORTED_EXCHANGE_VENUES or runtime_binding.venue != venue:
             _reject(
                 "FACT_ADAPTER_SCOPE_MISMATCH",
                 "normalized facts are outside the exact supported account scope",
@@ -121,7 +145,7 @@ class FactIngestionExecutionService(ServiceComponent):
         known: bool,
         actor_id: UUID,
         *,
-        environment: ExecutionEnvironment | None = None,
+        environment: domain.ExecutionEnvironment | None = None,
         observed_at: datetime | None = None,
         now: datetime,
     ) -> UUID:
@@ -129,18 +153,18 @@ class FactIngestionExecutionService(ServiceComponent):
         if fact_time > now:
             _reject("FACT_TIME_INVALID", "position observation cannot be in the future")
         with self.database.session_factory.begin() as session:
-            team = self.transactions._require_role(
+            team = self.transactions.require_role(
                 session, actor_id, "venue.record", account_id, venue
             )
             if team.execution_mode not in {
-                TeamExecutionMode.TESTNET.value,
-                TeamExecutionMode.LIVE.value,
+                domain.TeamExecutionMode.TESTNET.value,
+                domain.TeamExecutionMode.LIVE.value,
             }:
                 _reject(
                     "TEAM_SETUP_INCOMPLETE",
                     "team must select TESTNET or LIVE before recording venue facts",
                 )
-            actual_environment = ExecutionEnvironment(team.execution_mode)
+            actual_environment = domain.ExecutionEnvironment(team.execution_mode)
             if environment is not None and environment is not actual_environment:
                 _reject(
                     "FACT_ENVIRONMENT_MISMATCH",
@@ -157,16 +181,16 @@ class FactIngestionExecutionService(ServiceComponent):
                 now=now,
             )
             position = session.scalar(
-                select(Position).where(
-                    Position.team_id == team.team_id,
-                    Position.account_id == account_id,
-                    Position.venue == venue,
-                    Position.environment == environment.value,
-                    Position.instrument_id == instrument_id,
+                select(models.Position).where(
+                    models.Position.team_id == team.team_id,
+                    models.Position.account_id == account_id,
+                    models.Position.venue == venue,
+                    models.Position.environment == environment.value,
+                    models.Position.instrument_id == instrument_id,
                 )
             )
             if position is None:
-                position = Position(
+                position = models.Position(
                     team_id=team.team_id,
                     account_id=account_id,
                     venue=venue,
@@ -175,7 +199,9 @@ class FactIngestionExecutionService(ServiceComponent):
                     quantity=quantity,
                     average_entry_price=average_entry_price,
                     mark_price=mark_price,
-                    fact_status=FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value,
+                    fact_status=domain.FactStatus.KNOWN.value
+                    if known
+                    else domain.FactStatus.UNKNOWN.value,
                     observed_at=fact_time,
                     updated_at=now,
                 )
@@ -185,10 +211,12 @@ class FactIngestionExecutionService(ServiceComponent):
                 position.quantity = quantity
                 position.average_entry_price = average_entry_price
                 position.mark_price = mark_price
-                position.fact_status = FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value
+                position.fact_status = (
+                    domain.FactStatus.KNOWN.value if known else domain.FactStatus.UNKNOWN.value
+                )
                 position.observed_at = fact_time
                 position.updated_at = now
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="POSITION_RECORDED",
@@ -211,7 +239,7 @@ class FactIngestionExecutionService(ServiceComponent):
         actor_id: UUID,
         *,
         campaign_id: UUID | None = None,
-        required_environment: ExecutionEnvironment | None = None,
+        required_environment: domain.ExecutionEnvironment | None = None,
         known: bool = True,
         observed_at: datetime | None = None,
         now: datetime,
@@ -220,7 +248,7 @@ class FactIngestionExecutionService(ServiceComponent):
         if fact_time > now:
             _reject("FACT_TIME_INVALID", "protection observation cannot be in the future")
         with self.database.session_factory.begin() as session:
-            position = session.get(Position, position_id)
+            position = session.get(models.Position, position_id)
             if position is None:
                 _reject("POSITION_NOT_FOUND", "protection position is missing")
             if (
@@ -232,7 +260,7 @@ class FactIngestionExecutionService(ServiceComponent):
                     "position is outside the requested execution environment",
                 )
             if campaign_id is not None:
-                campaign = session.get(Campaign, campaign_id)
+                campaign = session.get(models.Campaign, campaign_id)
                 if campaign is None:
                     _reject("CAMPAIGN_NOT_FOUND", "protection campaign is missing")
                 if (
@@ -246,7 +274,7 @@ class FactIngestionExecutionService(ServiceComponent):
                         "CAMPAIGN_POSITION_SCOPE_MISMATCH",
                         "protection position is outside the campaign scope",
                     )
-            self.transactions._require_role(
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "venue.record",
@@ -255,18 +283,20 @@ class FactIngestionExecutionService(ServiceComponent):
                 team_id=position.team_id,
             )
             protection = session.scalar(
-                select(ProtectionOrder).where(ProtectionOrder.position_id == position_id)
+                select(models.ProtectionOrder).where(
+                    models.ProtectionOrder.position_id == position_id
+                )
             )
             effective_coverage = fully_covered and known
             status = (
-                ProtectionStatus.UNKNOWN
+                domain.ProtectionStatus.UNKNOWN
                 if not known
-                else ProtectionStatus.ACTIVE
+                else domain.ProtectionStatus.ACTIVE
                 if effective_coverage
-                else ProtectionStatus.DEGRADED
+                else domain.ProtectionStatus.DEGRADED
             )
             if protection is None:
-                protection = ProtectionOrder(
+                protection = models.ProtectionOrder(
                     position_id=position_id,
                     venue_order_id=venue_order_id,
                     quantity=quantity,
@@ -287,8 +317,8 @@ class FactIngestionExecutionService(ServiceComponent):
                 protection.observed_at = fact_time
                 protection.updated_at = now
             if not effective_coverage:
-                PROTECTION_ISSUES.inc()
-            self.transactions._audit(
+                metrics.PROTECTION_ISSUES.inc()
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="PROTECTION_RECORDED",
@@ -301,46 +331,6 @@ class FactIngestionExecutionService(ServiceComponent):
             )
             return protection.protection_id
 
-    @staticmethod
-    def _record_account_equity_observation(
-        session: Session,
-        fact: AccountEquity,
-        *,
-        recorded_at: datetime,
-    ) -> None:
-        session.flush()
-        latest_observed_at = session.scalar(
-            select(AccountEquityObservation.observed_at)
-            .where(AccountEquityObservation.account_equity_id == fact.account_equity_id)
-            .order_by(AccountEquityObservation.observed_at.desc())
-            .limit(1)
-        )
-        if latest_observed_at is not None and (
-            fact.observed_at < latest_observed_at + CAPITAL_HISTORY_MIN_INTERVAL
-        ):
-            return
-        usd_equity = None
-        if fact.fact_status == FactStatus.KNOWN.value:
-            usd_equity = (
-                fact.equity if fact.currency.upper() in USD_STABLE_ASSETS else fact.valuation_equity
-            )
-        session.add(
-            AccountEquityObservation(
-                team_id=fact.team_id,
-                account_equity_id=fact.account_equity_id,
-                environment=fact.environment,
-                location_type=fact.location_type,
-                account_id=fact.account_id,
-                venue=fact.venue,
-                currency=fact.currency,
-                equity=fact.equity,
-                available_balance=fact.available_balance,
-                usd_equity=usd_equity,
-                observed_at=fact.observed_at,
-                recorded_at=recorded_at,
-            )
-        )
-
     def record_account_equity(
         self,
         account_id: str,
@@ -351,7 +341,7 @@ class FactIngestionExecutionService(ServiceComponent):
         known: bool,
         actor_id: UUID,
         *,
-        environment: ExecutionEnvironment | None = None,
+        environment: domain.ExecutionEnvironment | None = None,
         observed_at: datetime | None = None,
         now: datetime,
     ) -> UUID:
@@ -359,18 +349,18 @@ class FactIngestionExecutionService(ServiceComponent):
         if fact_time > now:
             _reject("FACT_TIME_INVALID", "equity observation cannot be in the future")
         with self.database.session_factory.begin() as session:
-            team = self.transactions._require_role(
+            team = self.transactions.require_role(
                 session, actor_id, "venue.record", account_id, venue
             )
             if team.execution_mode not in {
-                TeamExecutionMode.TESTNET.value,
-                TeamExecutionMode.LIVE.value,
+                domain.TeamExecutionMode.TESTNET.value,
+                domain.TeamExecutionMode.LIVE.value,
             }:
                 _reject(
                     "TEAM_SETUP_INCOMPLETE",
                     "team must select TESTNET or LIVE before recording venue facts",
                 )
-            actual_environment = ExecutionEnvironment(team.execution_mode)
+            actual_environment = domain.ExecutionEnvironment(team.execution_mode)
             if environment is not None and environment is not actual_environment:
                 _reject(
                     "FACT_ENVIRONMENT_MISMATCH",
@@ -387,17 +377,17 @@ class FactIngestionExecutionService(ServiceComponent):
                 now=now,
             )
             fact = session.scalar(
-                select(AccountEquity).where(
-                    AccountEquity.team_id == team.team_id,
-                    AccountEquity.account_id == account_id,
-                    AccountEquity.venue == venue,
-                    AccountEquity.environment == environment.value,
-                    AccountEquity.currency == currency,
+                select(models.AccountEquity).where(
+                    models.AccountEquity.team_id == team.team_id,
+                    models.AccountEquity.account_id == account_id,
+                    models.AccountEquity.venue == venue,
+                    models.AccountEquity.environment == environment.value,
+                    models.AccountEquity.currency == currency,
                 )
             )
-            stable = currency.upper() in USD_STABLE_ASSETS
+            stable = currency.upper() in notilt.USD_STABLE_ASSETS
             if fact is None:
-                fact = AccountEquity(
+                fact = models.AccountEquity(
                     team_id=team.team_id,
                     account_id=account_id,
                     venue=venue,
@@ -412,7 +402,9 @@ class FactIngestionExecutionService(ServiceComponent):
                     valuation_price=Decimal(1) if stable else None,
                     valuation_equity=equity if stable else None,
                     valuation_observed_at=fact_time if stable else None,
-                    fact_status=FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value,
+                    fact_status=domain.FactStatus.KNOWN.value
+                    if known
+                    else domain.FactStatus.UNKNOWN.value,
                     observed_at=fact_time,
                     updated_at=now,
                 )
@@ -429,10 +421,12 @@ class FactIngestionExecutionService(ServiceComponent):
                 fact.valuation_price = Decimal(1) if stable else None
                 fact.valuation_equity = equity if stable else None
                 fact.valuation_observed_at = fact_time if stable else None
-                fact.fact_status = FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value
+                fact.fact_status = (
+                    domain.FactStatus.KNOWN.value if known else domain.FactStatus.UNKNOWN.value
+                )
                 fact.observed_at = fact_time
                 fact.updated_at = now
-            self._record_account_equity_observation(session, fact, recorded_at=now)
+            record_account_equity_observation(session, fact, recorded_at=now)
             return fact.account_equity_id
 
     def record_funding(
@@ -444,11 +438,11 @@ class FactIngestionExecutionService(ServiceComponent):
         currency: str,
         actor_id: UUID,
         *,
-        required_environment: ExecutionEnvironment | None = None,
+        required_environment: domain.ExecutionEnvironment | None = None,
         now: datetime,
     ) -> UUID:
         with self.database.session_factory.begin() as session:
-            campaign = session.get(Campaign, campaign_id)
+            campaign = session.get(models.Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "funding campaign is missing")
             if (
@@ -459,7 +453,7 @@ class FactIngestionExecutionService(ServiceComponent):
                     "EXECUTION_ENVIRONMENT_MISMATCH",
                     "campaign is outside the requested execution environment",
                 )
-            self.transactions._require_role(
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "venue.record",
@@ -467,18 +461,18 @@ class FactIngestionExecutionService(ServiceComponent):
                 campaign.venue,
                 team_id=campaign.team_id,
             )
-            instrument = session.get(Instrument, campaign.instrument_id)
+            instrument = session.get(models.Instrument, campaign.instrument_id)
             if venue != campaign.venue:
                 _reject("VENUE_SCOPE_MISMATCH", "funding venue does not match campaign")
             if instrument is None or currency != instrument.collateral_currency:
                 _reject("PNL_CURRENCY_MISMATCH", "funding currency lacks an FX conversion")
             existing = session.scalar(
-                select(FundingPayment).where(
-                    FundingPayment.team_id == campaign.team_id,
-                    FundingPayment.environment == campaign.environment,
-                    FundingPayment.account_id == campaign.account_id,
-                    FundingPayment.venue == venue,
-                    FundingPayment.venue_payment_id == venue_payment_id,
+                select(models.FundingPayment).where(
+                    models.FundingPayment.team_id == campaign.team_id,
+                    models.FundingPayment.environment == campaign.environment,
+                    models.FundingPayment.account_id == campaign.account_id,
+                    models.FundingPayment.venue == venue,
+                    models.FundingPayment.venue_payment_id == venue_payment_id,
                 )
             )
             if existing is not None:
@@ -488,8 +482,8 @@ class FactIngestionExecutionService(ServiceComponent):
                     and existing.currency == currency
                 ):
                     return existing.funding_payment_id
-                raise IdempotencyConflict
-            payment = FundingPayment(
+                raise domain.IdempotencyConflict
+            payment = models.FundingPayment(
                 team_id=campaign.team_id,
                 campaign_id=campaign_id,
                 account_id=campaign.account_id,
@@ -509,10 +503,10 @@ class FactIngestionExecutionService(ServiceComponent):
         self,
         account_id: str,
         actor_id: UUID,
-        snapshots: tuple[VenueReadOnlySnapshot, ...],
+        snapshots: tuple[venue_read_only.VenueReadOnlySnapshot, ...],
         *,
         venue: str,
-        environment: ExecutionEnvironment,
+        environment: domain.ExecutionEnvironment,
         runtime_binding: PreparedRuntimeAccountBinding | None = None,
         now: datetime,
     ) -> dict[str, Any]:
@@ -610,7 +604,7 @@ class FactIngestionExecutionService(ServiceComponent):
         actor_id: UUID,
         *,
         venue: str,
-        environment: ExecutionEnvironment,
+        environment: domain.ExecutionEnvironment,
         active_symbols: set[str],
         observed_order_ids: set[str],
         covered_hyperliquid_dexes: set[str] | None = None,
@@ -623,20 +617,23 @@ class FactIngestionExecutionService(ServiceComponent):
             self.database.session_factory.begin() if session is None else nullcontext(session)
         )
         with transaction as session:
-            team = self.transactions._require_role(
+            team = self.transactions.require_role(
                 session, actor_id, "venue.record", account_id, venue
             )
             scoped = session.execute(
-                select(Position, Instrument)
-                .join(Instrument, Position.instrument_id == Instrument.instrument_id)
-                .where(
-                    Position.team_id == team.team_id,
-                    Position.account_id == account_id,
-                    Position.venue == venue,
-                    Position.environment == environment.value,
-                    Instrument.venue == venue,
+                select(models.Position, models.Instrument)
+                .join(
+                    models.Instrument,
+                    models.Position.instrument_id == models.Instrument.instrument_id,
                 )
-                .order_by(Instrument.symbol, Position.position_id)
+                .where(
+                    models.Position.team_id == team.team_id,
+                    models.Position.account_id == account_id,
+                    models.Position.venue == venue,
+                    models.Position.environment == environment.value,
+                    models.Instrument.venue == venue,
+                )
+                .order_by(models.Instrument.symbol, models.Position.position_id)
                 .with_for_update()
             ).all()
             if any(position.updated_at > now for position, _instrument in scoped):
@@ -659,47 +656,47 @@ class FactIngestionExecutionService(ServiceComponent):
                 changed = (
                     position.quantity != 0
                     or position.average_entry_price != 0
-                    or position.fact_status != FactStatus.KNOWN.value
+                    or position.fact_status != domain.FactStatus.KNOWN.value
                     or position.observed_at != now
                 )
                 if position.quantity != 0:
                     closed += 1
                 position.quantity = Decimal(0)
                 position.average_entry_price = Decimal(0)
-                position.fact_status = FactStatus.KNOWN.value
+                position.fact_status = domain.FactStatus.KNOWN.value
                 position.observed_at = now
                 position.updated_at = now
 
                 protection = session.scalar(
-                    select(ProtectionOrder)
-                    .where(ProtectionOrder.position_id == position.position_id)
+                    select(models.ProtectionOrder)
+                    .where(models.ProtectionOrder.position_id == position.position_id)
                     .with_for_update()
                 )
                 if protection is not None:
                     protection_order = session.scalar(
-                        select(VenueOrder)
+                        select(models.VenueOrder)
                         .where(
-                            VenueOrder.team_id == team.team_id,
-                            VenueOrder.environment == environment.value,
-                            VenueOrder.account_id == account_id,
-                            VenueOrder.venue == venue,
-                            VenueOrder.venue_order_id == protection.venue_order_id,
+                            models.VenueOrder.team_id == team.team_id,
+                            models.VenueOrder.environment == environment.value,
+                            models.VenueOrder.account_id == account_id,
+                            models.VenueOrder.venue == venue,
+                            models.VenueOrder.venue_order_id == protection.venue_order_id,
                         )
                         .with_for_update()
                     )
                     if protection_order is not None and protection_order.status in {
-                        VenueOrderStatus.SENT.value,
-                        VenueOrderStatus.PARTIALLY_FILLED.value,
-                        VenueOrderStatus.UNKNOWN.value,
+                        domain.VenueOrderStatus.SENT.value,
+                        domain.VenueOrderStatus.PARTIALLY_FILLED.value,
+                        domain.VenueOrderStatus.UNKNOWN.value,
                     }:
                         still_open = protection_order.venue_order_id in observed_order_ids
                         if not still_open:
-                            protection_order.status = VenueOrderStatus.CANCELLED.value
+                            protection_order.status = domain.VenueOrderStatus.CANCELLED.value
                         protection_order.observed_at = now
                         protection_order.updated_at = now
                         if still_open:
                             protection.quantity = Decimal(0)
-                            protection.status = ProtectionStatus.DEGRADED.value
+                            protection.status = domain.ProtectionStatus.DEGRADED.value
                             protection.fully_covered = False
                             protection.observed_at = now
                             protection.updated_at = now
@@ -708,7 +705,7 @@ class FactIngestionExecutionService(ServiceComponent):
                     else:
                         session.delete(protection)
                 if changed:
-                    self.transactions._audit(
+                    self.transactions.audit(
                         session,
                         actor_id=str(actor_id),
                         event_type=f"{venue}_POSITION_COVERED",
@@ -720,17 +717,17 @@ class FactIngestionExecutionService(ServiceComponent):
                         now=now,
                     )
             unresolved_orders = session.scalars(
-                select(VenueOrder)
+                select(models.VenueOrder)
                 .where(
-                    VenueOrder.team_id == team.team_id,
-                    VenueOrder.environment == environment.value,
-                    VenueOrder.account_id == account_id,
-                    VenueOrder.venue == venue,
-                    VenueOrder.status.in_(
+                    models.VenueOrder.team_id == team.team_id,
+                    models.VenueOrder.environment == environment.value,
+                    models.VenueOrder.account_id == account_id,
+                    models.VenueOrder.venue == venue,
+                    models.VenueOrder.status.in_(
                         {
-                            VenueOrderStatus.SENT.value,
-                            VenueOrderStatus.PARTIALLY_FILLED.value,
-                            VenueOrderStatus.UNKNOWN.value,
+                            domain.VenueOrderStatus.SENT.value,
+                            domain.VenueOrderStatus.PARTIALLY_FILLED.value,
+                            domain.VenueOrderStatus.UNKNOWN.value,
                         }
                     ),
                 )
@@ -740,12 +737,12 @@ class FactIngestionExecutionService(ServiceComponent):
                 if order.venue_order_id in observed_order_ids:
                     continue
                 fills = session.scalars(
-                    select(VenueFill).where(
-                        VenueFill.team_id == team.team_id,
-                        VenueFill.environment == environment.value,
-                        VenueFill.account_id == account_id,
-                        VenueFill.venue == venue,
-                        VenueFill.order_intent_id == order.order_intent_id,
+                    select(models.VenueFill).where(
+                        models.VenueFill.team_id == team.team_id,
+                        models.VenueFill.environment == environment.value,
+                        models.VenueFill.account_id == account_id,
+                        models.VenueFill.venue == venue,
+                        models.VenueFill.order_intent_id == order.order_intent_id,
                     )
                 ).all()
                 confirmed_quantity = sum((item.quantity for item in fills), Decimal(0))
@@ -753,13 +750,13 @@ class FactIngestionExecutionService(ServiceComponent):
                     order.order_intent_id is not None
                     and confirmed_quantity >= order.ordered_quantity
                 ):
-                    order.status = VenueOrderStatus.FILLED.value
+                    order.status = domain.VenueOrderStatus.FILLED.value
                     order.filled_quantity = min(confirmed_quantity, order.ordered_quantity)
                 else:
                     # Absence from an account-wide open-order snapshot is not proof
                     # of cancellation.  Keep the terminal state unknown until a
                     # fill or Freqtrade query confirms the outcome.
-                    order.status = VenueOrderStatus.UNKNOWN.value
+                    order.status = domain.VenueOrderStatus.UNKNOWN.value
                 order.observed_at = now
                 order.updated_at = now
             return closed, covered
@@ -768,10 +765,10 @@ class FactIngestionExecutionService(ServiceComponent):
         self,
         account_id: str,
         actor_id: UUID,
-        snapshot: VenueReadOnlySnapshot,
+        snapshot: venue_read_only.VenueReadOnlySnapshot,
         *,
         venue: str,
-        environment: ExecutionEnvironment,
+        environment: domain.ExecutionEnvironment,
         now: datetime,
         session: Session | None = None,
     ) -> dict[str, Any]:
@@ -783,7 +780,7 @@ class FactIngestionExecutionService(ServiceComponent):
             self.database.session_factory.begin() if session is None else nullcontext(session)
         )
         with transaction as session:
-            team = self.transactions._require_role(
+            team = self.transactions.require_role(
                 session, actor_id, "venue.record", account_id, venue
             )
             ensure_exchange_account_reference(
@@ -796,15 +793,15 @@ class FactIngestionExecutionService(ServiceComponent):
                 now=now,
             )
             instrument = session.scalar(
-                select(Instrument)
+                select(models.Instrument)
                 .where(
-                    Instrument.venue == venue,
-                    Instrument.symbol == snapshot.symbol,
+                    models.Instrument.venue == venue,
+                    models.Instrument.symbol == snapshot.symbol,
                 )
                 .with_for_update()
             )
             if instrument is None:
-                instrument = Instrument(
+                instrument = models.Instrument(
                     venue=venue,
                     symbol=snapshot.symbol,
                     tick_size=snapshot.instrument.tick_size,
@@ -829,13 +826,13 @@ class FactIngestionExecutionService(ServiceComponent):
                 instrument.updated_at = now
 
             position = session.scalar(
-                select(Position)
+                select(models.Position)
                 .where(
-                    Position.team_id == team.team_id,
-                    Position.account_id == account_id,
-                    Position.venue == venue,
-                    Position.environment == environment.value,
-                    Position.instrument_id == instrument.instrument_id,
+                    models.Position.team_id == team.team_id,
+                    models.Position.account_id == account_id,
+                    models.Position.venue == venue,
+                    models.Position.environment == environment.value,
+                    models.Position.instrument_id == instrument.instrument_id,
                 )
                 .with_for_update()
             )
@@ -843,7 +840,7 @@ class FactIngestionExecutionService(ServiceComponent):
                 position is not None and position.quantity != 0 and snapshot.position.quantity == 0
             )
             if position is None:
-                position = Position(
+                position = models.Position(
                     team_id=team.team_id,
                     account_id=account_id,
                     venue=venue,
@@ -852,7 +849,7 @@ class FactIngestionExecutionService(ServiceComponent):
                     quantity=snapshot.position.quantity,
                     average_entry_price=snapshot.position.average_entry_price,
                     mark_price=snapshot.position.mark_price,
-                    fact_status=FactStatus.KNOWN.value,
+                    fact_status=domain.FactStatus.KNOWN.value,
                     # A current snapshot's freshness starts when this process
                     # successfully receives it. Exchange event timestamps can be
                     # ahead of the host clock and remain attached to orders/fills.
@@ -870,24 +867,24 @@ class FactIngestionExecutionService(ServiceComponent):
                 position.quantity = snapshot.position.quantity
                 position.average_entry_price = snapshot.position.average_entry_price
                 position.mark_price = snapshot.position.mark_price
-                position.fact_status = FactStatus.KNOWN.value
+                position.fact_status = domain.FactStatus.KNOWN.value
                 position.observed_at = now
                 position.updated_at = now
 
             equity = session.scalar(
-                select(AccountEquity)
+                select(models.AccountEquity)
                 .where(
-                    AccountEquity.team_id == team.team_id,
-                    AccountEquity.account_id == account_id,
-                    AccountEquity.venue == venue,
-                    AccountEquity.environment == environment.value,
-                    AccountEquity.currency == snapshot.equity.currency,
+                    models.AccountEquity.team_id == team.team_id,
+                    models.AccountEquity.account_id == account_id,
+                    models.AccountEquity.venue == venue,
+                    models.AccountEquity.environment == environment.value,
+                    models.AccountEquity.currency == snapshot.equity.currency,
                 )
                 .with_for_update()
             )
-            stable_equity = snapshot.equity.currency.upper() in USD_STABLE_ASSETS
+            stable_equity = snapshot.equity.currency.upper() in notilt.USD_STABLE_ASSETS
             if equity is None:
-                equity = AccountEquity(
+                equity = models.AccountEquity(
                     team_id=team.team_id,
                     account_id=account_id,
                     venue=venue,
@@ -899,7 +896,7 @@ class FactIngestionExecutionService(ServiceComponent):
                     valuation_price=Decimal(1) if stable_equity else None,
                     valuation_equity=snapshot.equity.equity if stable_equity else None,
                     valuation_observed_at=now if stable_equity else None,
-                    fact_status=FactStatus.KNOWN.value,
+                    fact_status=domain.FactStatus.KNOWN.value,
                     observed_at=now,
                     updated_at=now,
                 )
@@ -917,40 +914,42 @@ class FactIngestionExecutionService(ServiceComponent):
                 equity.valuation_price = Decimal(1) if stable_equity else None
                 equity.valuation_equity = snapshot.equity.equity if stable_equity else None
                 equity.valuation_observed_at = now if stable_equity else None
-                equity.fact_status = FactStatus.KNOWN.value
+                equity.fact_status = domain.FactStatus.KNOWN.value
                 equity.observed_at = now
                 equity.updated_at = now
-            self._record_account_equity_observation(session, equity, recorded_at=now)
+            record_account_equity_observation(session, equity, recorded_at=now)
 
             order_count = 0
             for external_order in snapshot.orders:
-                intent: OrderIntent | None = None
+                intent: models.OrderIntent | None = None
                 current_order = session.scalar(
-                    select(VenueOrder)
+                    select(models.VenueOrder)
                     .where(
-                        VenueOrder.team_id == team.team_id,
-                        VenueOrder.environment == environment.value,
-                        VenueOrder.account_id == account_id,
-                        VenueOrder.venue == venue,
-                        VenueOrder.venue_order_id == external_order.order_id,
+                        models.VenueOrder.team_id == team.team_id,
+                        models.VenueOrder.environment == environment.value,
+                        models.VenueOrder.account_id == account_id,
+                        models.VenueOrder.venue == venue,
+                        models.VenueOrder.venue_order_id == external_order.order_id,
                     )
                     .with_for_update()
                 )
                 if current_order is None:
                     current_order = session.scalar(
-                        select(VenueOrder)
+                        select(models.VenueOrder)
                         .where(
-                            VenueOrder.team_id == team.team_id,
-                            VenueOrder.environment == environment.value,
-                            VenueOrder.account_id == account_id,
-                            VenueOrder.venue == venue,
-                            VenueOrder.client_order_id == external_order.client_order_id,
+                            models.VenueOrder.team_id == team.team_id,
+                            models.VenueOrder.environment == environment.value,
+                            models.VenueOrder.account_id == account_id,
+                            models.VenueOrder.venue == venue,
+                            models.VenueOrder.client_order_id == external_order.client_order_id,
                         )
                         .with_for_update()
                     )
                 if current_order is not None and current_order.order_intent_id is not None:
-                    intent = session.get(OrderIntent, current_order.order_intent_id)
-                    campaign = None if intent is None else session.get(Campaign, intent.campaign_id)
+                    intent = session.get(models.OrderIntent, current_order.order_intent_id)
+                    campaign = (
+                        None if intent is None else session.get(models.Campaign, intent.campaign_id)
+                    )
                     if (
                         intent is None
                         or campaign is None
@@ -965,7 +964,7 @@ class FactIngestionExecutionService(ServiceComponent):
                             "persisted order identity does not match its internal scope",
                         )
                 if current_order is None:
-                    current_order = VenueOrder(
+                    current_order = models.VenueOrder(
                         team_id=team.team_id,
                         order_intent_id=None if intent is None else intent.intent_id,
                         account_id=account_id,
@@ -1014,21 +1013,21 @@ class FactIngestionExecutionService(ServiceComponent):
             fill_count = 0
             for external_fill in snapshot.fills:
                 current_fill = session.scalar(
-                    select(VenueFill).where(
-                        VenueFill.team_id == team.team_id,
-                        VenueFill.environment == environment.value,
-                        VenueFill.account_id == account_id,
-                        VenueFill.venue == venue,
-                        VenueFill.venue_fill_id == external_fill.fill_id,
+                    select(models.VenueFill).where(
+                        models.VenueFill.team_id == team.team_id,
+                        models.VenueFill.environment == environment.value,
+                        models.VenueFill.account_id == account_id,
+                        models.VenueFill.venue == venue,
+                        models.VenueFill.venue_fill_id == external_fill.fill_id,
                     )
                 )
                 venue_order = session.scalar(
-                    select(VenueOrder).where(
-                        VenueOrder.team_id == team.team_id,
-                        VenueOrder.environment == environment.value,
-                        VenueOrder.account_id == account_id,
-                        VenueOrder.venue == venue,
-                        VenueOrder.venue_order_id == external_fill.order_id,
+                    select(models.VenueOrder).where(
+                        models.VenueOrder.team_id == team.team_id,
+                        models.VenueOrder.environment == environment.value,
+                        models.VenueOrder.account_id == account_id,
+                        models.VenueOrder.venue == venue,
+                        models.VenueOrder.venue_order_id == external_fill.order_id,
                     )
                 )
                 if venue_order is None:
@@ -1036,18 +1035,18 @@ class FactIngestionExecutionService(ServiceComponent):
                     # the exchange order id. Bind only an exact, unique, recent fully-filled
                     # order; ambiguity remains unbound and therefore fail-closed in reconcile.
                     synthetic_candidates = session.scalars(
-                        select(VenueOrder).where(
-                            VenueOrder.team_id == team.team_id,
-                            VenueOrder.environment == environment.value,
-                            VenueOrder.account_id == account_id,
-                            VenueOrder.venue == venue,
-                            VenueOrder.instrument_id == instrument.instrument_id,
-                            VenueOrder.order_intent_id.is_not(None),
-                            VenueOrder.venue_order_id.like("freqtrade:%"),
-                            VenueOrder.status == VenueOrderStatus.FILLED.value,
-                            VenueOrder.side == external_fill.side,
-                            VenueOrder.ordered_quantity == external_fill.quantity,
-                            VenueOrder.filled_quantity == external_fill.quantity,
+                        select(models.VenueOrder).where(
+                            models.VenueOrder.team_id == team.team_id,
+                            models.VenueOrder.environment == environment.value,
+                            models.VenueOrder.account_id == account_id,
+                            models.VenueOrder.venue == venue,
+                            models.VenueOrder.instrument_id == instrument.instrument_id,
+                            models.VenueOrder.order_intent_id.is_not(None),
+                            models.VenueOrder.venue_order_id.like("freqtrade:%"),
+                            models.VenueOrder.status == domain.VenueOrderStatus.FILLED.value,
+                            models.VenueOrder.side == external_fill.side,
+                            models.VenueOrder.ordered_quantity == external_fill.quantity,
+                            models.VenueOrder.filled_quantity == external_fill.quantity,
                         )
                     ).all()
                     synthetic_candidates = [
@@ -1065,24 +1064,24 @@ class FactIngestionExecutionService(ServiceComponent):
                     # window. Recover only one exact scoped UNKNOWN intent whose frozen
                     # maximum contains this fill. Ambiguity stays unbound and fail-closed.
                     unknown_candidates = session.scalars(
-                        select(VenueOrder)
+                        select(models.VenueOrder)
                         .join(
-                            OrderIntent,
-                            VenueOrder.order_intent_id == OrderIntent.intent_id,
+                            models.OrderIntent,
+                            models.VenueOrder.order_intent_id == models.OrderIntent.intent_id,
                         )
                         .where(
-                            VenueOrder.team_id == team.team_id,
-                            VenueOrder.environment == environment.value,
-                            VenueOrder.account_id == account_id,
-                            VenueOrder.venue == venue,
-                            VenueOrder.instrument_id == instrument.instrument_id,
-                            VenueOrder.order_intent_id.is_not(None),
-                            VenueOrder.venue_order_id.like("UNKNOWN:%"),
-                            VenueOrder.status == VenueOrderStatus.UNKNOWN.value,
-                            VenueOrder.side == external_fill.side,
-                            VenueOrder.filled_quantity == 0,
-                            VenueOrder.ordered_quantity >= external_fill.quantity,
-                            OrderIntent.status == OrderIntentStatus.UNKNOWN.value,
+                            models.VenueOrder.team_id == team.team_id,
+                            models.VenueOrder.environment == environment.value,
+                            models.VenueOrder.account_id == account_id,
+                            models.VenueOrder.venue == venue,
+                            models.VenueOrder.instrument_id == instrument.instrument_id,
+                            models.VenueOrder.order_intent_id.is_not(None),
+                            models.VenueOrder.venue_order_id.like("UNKNOWN:%"),
+                            models.VenueOrder.status == domain.VenueOrderStatus.UNKNOWN.value,
+                            models.VenueOrder.side == external_fill.side,
+                            models.VenueOrder.filled_quantity == 0,
+                            models.VenueOrder.ordered_quantity >= external_fill.quantity,
+                            models.OrderIntent.status == domain.OrderIntentStatus.UNKNOWN.value,
                         )
                         .with_for_update()
                     ).all()
@@ -1094,20 +1093,20 @@ class FactIngestionExecutionService(ServiceComponent):
                     if len(unknown_candidates) == 1:
                         venue_order = unknown_candidates[0]
                         venue_order.venue_order_id = external_fill.order_id
-                        venue_order.status = VenueOrderStatus.FILLED.value
+                        venue_order.status = domain.VenueOrderStatus.FILLED.value
                         venue_order.ordered_quantity = external_fill.quantity
                         venue_order.filled_quantity = external_fill.quantity
                         venue_order.observed_at = external_fill.executed_at
                         venue_order.updated_at = now
                 intent = (
-                    session.get(OrderIntent, venue_order.order_intent_id)
+                    session.get(models.OrderIntent, venue_order.order_intent_id)
                     if venue_order is not None and venue_order.order_intent_id is not None
                     else None
                 )
                 campaign_id = None if intent is None else intent.campaign_id
                 if current_fill is None:
                     session.add(
-                        VenueFill(
+                        models.VenueFill(
                             team_id=team.team_id,
                             venue=venue,
                             venue_fill_id=external_fill.fill_id,
@@ -1148,14 +1147,14 @@ class FactIngestionExecutionService(ServiceComponent):
 
             session.flush()
             bound_orders = session.scalars(
-                select(VenueOrder)
+                select(models.VenueOrder)
                 .where(
-                    VenueOrder.team_id == team.team_id,
-                    VenueOrder.environment == environment.value,
-                    VenueOrder.account_id == account_id,
-                    VenueOrder.venue == venue,
-                    VenueOrder.instrument_id == instrument.instrument_id,
-                    VenueOrder.order_intent_id.is_not(None),
+                    models.VenueOrder.team_id == team.team_id,
+                    models.VenueOrder.environment == environment.value,
+                    models.VenueOrder.account_id == account_id,
+                    models.VenueOrder.venue == venue,
+                    models.VenueOrder.instrument_id == instrument.instrument_id,
+                    models.VenueOrder.order_intent_id.is_not(None),
                 )
                 .with_for_update()
             ).all()
@@ -1163,21 +1162,21 @@ class FactIngestionExecutionService(ServiceComponent):
                 if bound_order.order_intent_id is None:
                     continue
                 bound_intent = session.get(
-                    OrderIntent, bound_order.order_intent_id, with_for_update=True
+                    models.OrderIntent, bound_order.order_intent_id, with_for_update=True
                 )
                 if bound_intent is None:
                     _reject(f"{venue}_ORDER_BINDING_INVALID", "bound order intent is missing")
                 bound_campaign = session.get(
-                    Campaign, bound_intent.campaign_id, with_for_update=True
+                    models.Campaign, bound_intent.campaign_id, with_for_update=True
                 )
                 if bound_campaign is None:
                     _reject(f"{venue}_ORDER_BINDING_INVALID", "bound order campaign is missing")
                 if bound_campaign.team_id != team.team_id:
                     _reject(f"{venue}_ORDER_BINDING_INVALID", "bound order crossed team scope")
                 intent_fills = session.scalars(
-                    select(VenueFill).where(
-                        VenueFill.team_id == team.team_id,
-                        VenueFill.order_intent_id == bound_intent.intent_id,
+                    select(models.VenueFill).where(
+                        models.VenueFill.team_id == team.team_id,
+                        models.VenueFill.order_intent_id == bound_intent.intent_id,
                     )
                 ).all()
                 if any(fill.side != bound_intent.side for fill in intent_fills):
@@ -1192,15 +1191,15 @@ class FactIngestionExecutionService(ServiceComponent):
                         "ORDER_INTENT_OVERFILLED",
                         f"{venue} cumulative fill exceeds intent",
                     )
-                if bound_campaign.status == CampaignStatus.CLOSED.value:
+                if bound_campaign.status == domain.CampaignStatus.CLOSED.value:
                     if bound_intent.status not in {
-                        OrderIntentStatus.FILLED.value,
-                        OrderIntentStatus.CANCELLED.value,
-                        OrderIntentStatus.REJECTED.value,
+                        domain.OrderIntentStatus.FILLED.value,
+                        domain.OrderIntentStatus.CANCELLED.value,
+                        domain.OrderIntentStatus.REJECTED.value,
                     } or bound_order.status not in {
-                        VenueOrderStatus.FILLED.value,
-                        VenueOrderStatus.CANCELLED.value,
-                        VenueOrderStatus.REJECTED.value,
+                        domain.VenueOrderStatus.FILLED.value,
+                        domain.VenueOrderStatus.CANCELLED.value,
+                        domain.VenueOrderStatus.REJECTED.value,
                     }:
                         _reject(
                             "CLOSED_CAMPAIGN_ORDER_NONTERMINAL",
@@ -1217,20 +1216,22 @@ class FactIngestionExecutionService(ServiceComponent):
                 previous = bound_intent.status
                 release_updated_intent = False
                 terminal = {
-                    VenueOrderStatus.CANCELLED.value: OrderIntentStatus.CANCELLED,
-                    VenueOrderStatus.REJECTED.value: OrderIntentStatus.REJECTED,
+                    domain.VenueOrderStatus.CANCELLED.value: domain.OrderIntentStatus.CANCELLED,
+                    domain.VenueOrderStatus.REJECTED.value: domain.OrderIntentStatus.REJECTED,
                 }
-                if bound_order.status == VenueOrderStatus.UNKNOWN.value:
-                    bound_intent.status = OrderIntentStatus.UNKNOWN.value
+                if bound_order.status == domain.VenueOrderStatus.UNKNOWN.value:
+                    bound_intent.status = domain.OrderIntentStatus.UNKNOWN.value
                     if bound_intent.reservation_id is not None:
                         reservation = session.get(
-                            RiskReservation, bound_intent.reservation_id, with_for_update=True
+                            models.RiskReservation,
+                            bound_intent.reservation_id,
+                            with_for_update=True,
                         )
                         if reservation is not None:
-                            reservation.status = ReservationStatus.UNKNOWN.value
+                            reservation.status = domain.ReservationStatus.UNKNOWN.value
                             reservation.updated_at = now
                             reservation.version += 1
-                    bound_campaign.status = CampaignStatus.UNKNOWN.value
+                    bound_campaign.status = domain.CampaignStatus.UNKNOWN.value
                 elif bound_order.status in terminal and filled == 0:
                     release_zero_fill_in_session(
                         session,
@@ -1244,70 +1245,75 @@ class FactIngestionExecutionService(ServiceComponent):
                     if filled > 0 and (
                         filled == bound_intent.quantity
                         or (
-                            bound_order.status == VenueOrderStatus.FILLED.value
+                            bound_order.status == domain.VenueOrderStatus.FILLED.value
                             and filled == bound_order.ordered_quantity
                         )
                     ):
-                        bound_intent.status = OrderIntentStatus.FILLED.value
-                        bound_order.status = VenueOrderStatus.FILLED.value
+                        bound_intent.status = domain.OrderIntentStatus.FILLED.value
+                        bound_order.status = domain.VenueOrderStatus.FILLED.value
                     elif filled > 0 and bound_order.status not in terminal:
-                        bound_intent.status = OrderIntentStatus.PARTIALLY_FILLED.value
-                        bound_order.status = VenueOrderStatus.PARTIALLY_FILLED.value
+                        bound_intent.status = domain.OrderIntentStatus.PARTIALLY_FILLED.value
+                        bound_order.status = domain.VenueOrderStatus.PARTIALLY_FILLED.value
                     elif bound_order.status in terminal:
                         bound_intent.status = terminal[bound_order.status].value
                     if filled > 0 and bound_intent.reservation_id is not None:
                         reservation = session.get(
-                            RiskReservation, bound_intent.reservation_id, with_for_update=True
+                            models.RiskReservation,
+                            bound_intent.reservation_id,
+                            with_for_update=True,
                         )
                         if reservation is not None:
-                            reservation.status = ReservationStatus.OPEN.value
+                            reservation.status = domain.ReservationStatus.OPEN.value
                             reservation.updated_at = now
                             reservation.version += 1
                     if filled > 0:
-                        if bound_intent.kind in {IntentKind.INITIAL.value, IntentKind.ADD.value}:
+                        if bound_intent.kind in {
+                            domain.IntentKind.INITIAL.value,
+                            domain.IntentKind.ADD.value,
+                        }:
                             if bound_campaign.status not in {
-                                CampaignStatus.CLOSING.value,
-                                CampaignStatus.REDUCING.value,
+                                domain.CampaignStatus.CLOSING.value,
+                                domain.CampaignStatus.REDUCING.value,
                             }:
-                                bound_campaign.status = CampaignStatus.OPEN.value
-                        elif bound_intent.kind == IntentKind.EXIT.value:
-                            bound_campaign.status = CampaignStatus.CLOSING.value
+                                bound_campaign.status = domain.CampaignStatus.OPEN.value
+                        elif bound_intent.kind == domain.IntentKind.EXIT.value:
+                            bound_campaign.status = domain.CampaignStatus.CLOSING.value
                         else:
-                            bound_campaign.status = CampaignStatus.REDUCING.value
+                            bound_campaign.status = domain.CampaignStatus.REDUCING.value
                 if previous != bound_intent.status:
                     if not release_updated_intent:
                         bound_intent.updated_at = now
                         bound_intent.version += 1
-                    INTENT_TRANSITIONS.labels(previous, bound_intent.status).inc()
+                    metrics.INTENT_TRANSITIONS.labels(previous, bound_intent.status).inc()
                 bound_order.updated_at = now
                 bound_campaign.updated_at = now
 
             funding_count = 0
             funding_campaign = session.scalar(
-                select(Campaign)
+                select(models.Campaign)
                 .where(
-                    Campaign.team_id == team.team_id,
-                    Campaign.account_id == account_id,
-                    Campaign.venue == venue,
-                    Campaign.environment == environment.value,
-                    Campaign.instrument_id == instrument.instrument_id,
-                    Campaign.status != CampaignStatus.CLOSED.value,
+                    models.Campaign.team_id == team.team_id,
+                    models.Campaign.account_id == account_id,
+                    models.Campaign.venue == venue,
+                    models.Campaign.environment == environment.value,
+                    models.Campaign.instrument_id == instrument.instrument_id,
+                    models.Campaign.status != domain.CampaignStatus.CLOSED.value,
                 )
                 .with_for_update()
             )
             for external_funding in snapshot.funding:
                 current_funding = session.scalar(
-                    select(FundingPayment).where(
-                        FundingPayment.team_id == team.team_id,
-                        FundingPayment.environment == environment.value,
-                        FundingPayment.account_id == account_id,
-                        FundingPayment.venue == venue,
-                        FundingPayment.venue_payment_id == external_funding.payment_id,
+                    select(models.FundingPayment).where(
+                        models.FundingPayment.team_id == team.team_id,
+                        models.FundingPayment.environment == environment.value,
+                        models.FundingPayment.account_id == account_id,
+                        models.FundingPayment.venue == venue,
+                        models.FundingPayment.venue_payment_id == external_funding.payment_id,
                     )
                 )
                 if current_funding is None:
                     session.add(
-                        FundingPayment(
+                        models.FundingPayment(
                             team_id=team.team_id,
                             campaign_id=(
                                 None if funding_campaign is None else funding_campaign.campaign_id
@@ -1334,8 +1340,8 @@ class FactIngestionExecutionService(ServiceComponent):
                 funding_count += 1
 
             protection = session.scalar(
-                select(ProtectionOrder)
-                .where(ProtectionOrder.position_id == position.position_id)
+                select(models.ProtectionOrder)
+                .where(models.ProtectionOrder.position_id == position.position_id)
                 .with_for_update()
             )
             if snapshot.position.quantity != 0:
@@ -1346,7 +1352,7 @@ class FactIngestionExecutionService(ServiceComponent):
                     and observed_protection.trigger_price > 0
                 )
                 if protection is None:
-                    protection = ProtectionOrder(
+                    protection = models.ProtectionOrder(
                         position_id=position.position_id,
                         venue_order_id=(
                             f"{venue}:UNKNOWN:{snapshot.symbol}"
@@ -1364,11 +1370,11 @@ class FactIngestionExecutionService(ServiceComponent):
                             else observed_protection.trigger_price
                         ),
                         status=(
-                            ProtectionStatus.ACTIVE.value
+                            domain.ProtectionStatus.ACTIVE.value
                             if covered
-                            else ProtectionStatus.UNKNOWN.value
+                            else domain.ProtectionStatus.UNKNOWN.value
                             if observed_protection is None
-                            else ProtectionStatus.DEGRADED.value
+                            else domain.ProtectionStatus.DEGRADED.value
                         ),
                         fully_covered=covered,
                         observed_at=now,
@@ -1390,40 +1396,40 @@ class FactIngestionExecutionService(ServiceComponent):
                         else observed_protection.trigger_price
                     )
                     protection.status = (
-                        ProtectionStatus.ACTIVE.value
+                        domain.ProtectionStatus.ACTIVE.value
                         if covered
-                        else ProtectionStatus.UNKNOWN.value
+                        else domain.ProtectionStatus.UNKNOWN.value
                         if observed_protection is None
-                        else ProtectionStatus.DEGRADED.value
+                        else domain.ProtectionStatus.DEGRADED.value
                     )
                     protection.fully_covered = covered
                     protection.observed_at = now
                     protection.updated_at = now
             elif protection is not None:
                 protection_order = session.scalar(
-                    select(VenueOrder)
+                    select(models.VenueOrder)
                     .where(
-                        VenueOrder.environment == environment.value,
-                        VenueOrder.account_id == account_id,
-                        VenueOrder.venue == venue,
-                        VenueOrder.venue_order_id == protection.venue_order_id,
+                        models.VenueOrder.environment == environment.value,
+                        models.VenueOrder.account_id == account_id,
+                        models.VenueOrder.venue == venue,
+                        models.VenueOrder.venue_order_id == protection.venue_order_id,
                     )
                     .with_for_update()
                 )
                 observed_order_ids = {item.order_id for item in snapshot.orders}
                 if protection_order is not None and protection_order.status in {
-                    VenueOrderStatus.SENT.value,
-                    VenueOrderStatus.PARTIALLY_FILLED.value,
-                    VenueOrderStatus.UNKNOWN.value,
+                    domain.VenueOrderStatus.SENT.value,
+                    domain.VenueOrderStatus.PARTIALLY_FILLED.value,
+                    domain.VenueOrderStatus.UNKNOWN.value,
                 }:
                     still_open = protection_order.venue_order_id in observed_order_ids
                     if not still_open:
-                        protection_order.status = VenueOrderStatus.CANCELLED.value
+                        protection_order.status = domain.VenueOrderStatus.CANCELLED.value
                     protection_order.observed_at = snapshot.observed_at
                     protection_order.updated_at = now
                     if still_open:
                         protection.quantity = Decimal(0)
-                        protection.status = ProtectionStatus.DEGRADED.value
+                        protection.status = domain.ProtectionStatus.DEGRADED.value
                         protection.fully_covered = False
                         protection.observed_at = snapshot.observed_at
                         protection.updated_at = now
@@ -1431,7 +1437,7 @@ class FactIngestionExecutionService(ServiceComponent):
                         session.delete(protection)
                 else:
                     session.delete(protection)
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type=f"{venue}_READ_ONLY_SYNCED",

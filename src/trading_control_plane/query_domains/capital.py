@@ -1,27 +1,33 @@
 from __future__ import annotations
 
-from trading_control_plane.query_component import QueryComponent
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import UUID
 
-# ruff: noqa: F403, F405
-from trading_control_plane.query_core import *
+from sqlalchemy import and_, false, func, or_, select
+
+from trading_control_plane import domain, models, notilt, service
+from trading_control_plane import execution_scope as scope_rules
+from trading_control_plane.query_component import QueryComponent, iso_datetime
 
 
 class CapitalQueries(QueryComponent):
-    def treasury_users(self, team_id: UUID, account_id: str, venue: str) -> list[User]:
+    def treasury_users(self, team_id: UUID, account_id: str, venue: str) -> list[models.User]:
         with self.database.session_factory() as session:
             assignments = session.scalars(
-                select(RoleAssignment)
+                select(models.RoleAssignment)
                 .join(
-                    TeamMembership,
+                    models.TeamMembership,
                     and_(
-                        TeamMembership.team_id == RoleAssignment.team_id,
-                        TeamMembership.user_id == RoleAssignment.user_id,
+                        models.TeamMembership.team_id == models.RoleAssignment.team_id,
+                        models.TeamMembership.user_id == models.RoleAssignment.user_id,
                     ),
                 )
                 .where(
-                    RoleAssignment.team_id == team_id,
-                    RoleAssignment.role == Role.TREASURY_ADMIN.value,
-                    TeamMembership.active,
+                    models.RoleAssignment.team_id == team_id,
+                    models.RoleAssignment.role == domain.Role.TREASURY_ADMIN.value,
+                    models.TeamMembership.active,
                 )
             ).all()
             user_ids = {
@@ -31,26 +37,28 @@ class CapitalQueries(QueryComponent):
                 and (item.venue_scope is None or item.venue_scope == venue)
             }
             users = session.scalars(
-                select(User).where(User.user_id.in_(user_ids), User.active)
+                select(models.User).where(models.User.user_id.in_(user_ids), models.User.active)
             ).all()
             for user in users:
                 session.expunge(user)
             return list(users)
 
     def transfer_proposal_version(self, user_id: UUID, transfer_proposal_id: UUID) -> int:
-        _workspace_id, team_id = self._active_scope_ids(user_id)
+        _workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
-            proposal = session.get(TransferProposal, transfer_proposal_id)
+            proposal = session.get(models.TransferProposal, transfer_proposal_id)
             if proposal is None:
-                raise DomainRejected(
+                raise domain.DomainRejected(
                     "TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist"
                 )
             if proposal.team_id != team_id:
-                raise DomainRejected("TEAM_SCOPE_DENIED", "transfer proposal is outside scope")
+                raise domain.DomainRejected(
+                    "TEAM_SCOPE_DENIED", "transfer proposal is outside scope"
+                )
             return proposal.version
 
     @staticmethod
-    def _transfer_proposal_summary(item: TransferProposal) -> dict[str, Any]:
+    def _transfer_proposal_summary(item: models.TransferProposal) -> dict[str, Any]:
         return {
             "transfer_proposal_id": str(item.transfer_proposal_id),
             "team_id": str(item.team_id),
@@ -73,35 +81,37 @@ class CapitalQueries(QueryComponent):
             "max_fee": str(item.max_fee),
             "min_received": str(item.min_received),
             "reason": item.reason,
-            "frozen_at": _iso(item.frozen_at),
-            "expires_at": _iso(item.expires_at),
-            "created_at": _iso(item.created_at),
-            "updated_at": _iso(item.updated_at),
+            "frozen_at": iso_datetime(item.frozen_at),
+            "expires_at": iso_datetime(item.expires_at),
+            "created_at": iso_datetime(item.created_at),
+            "updated_at": iso_datetime(item.updated_at),
         }
 
     def transfer_proposal_detail(self, user_id: UUID, transfer_proposal_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
-            proposal = session.get(TransferProposal, transfer_proposal_id)
+            proposal = session.get(models.TransferProposal, transfer_proposal_id)
             if proposal is None:
-                raise DomainRejected(
+                raise domain.DomainRejected(
                     "TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist"
                 )
             if proposal.team_id != team_id:
-                raise DomainRejected("TEAM_SCOPE_DENIED", "transfer proposal is outside scope")
+                raise domain.DomainRejected(
+                    "TEAM_SCOPE_DENIED", "transfer proposal is outside scope"
+                )
             if not self.service.can_user(
                 user_id, "capital.view", proposal.account_id, proposal.venue
             ):
-                raise DomainRejected("RBAC_DENIED", "transfer proposal is outside scope")
+                raise domain.DomainRejected("RBAC_DENIED", "transfer proposal is outside scope")
             approvals = session.scalars(
-                select(Approval)
-                .where(Approval.transfer_proposal_id == transfer_proposal_id)
-                .order_by(Approval.created_at)
+                select(models.Approval)
+                .where(models.Approval.transfer_proposal_id == transfer_proposal_id)
+                .order_by(models.Approval.created_at)
             ).all()
             authorization = session.scalar(
-                select(TransferAuthorization).where(
-                    TransferAuthorization.team_id == team_id,
-                    TransferAuthorization.transfer_proposal_id == transfer_proposal_id,
+                select(models.TransferAuthorization).where(
+                    models.TransferAuthorization.team_id == team_id,
+                    models.TransferAuthorization.transfer_proposal_id == transfer_proposal_id,
                 )
             )
             result = self._transfer_proposal_summary(proposal)
@@ -114,7 +124,7 @@ class CapitalQueries(QueryComponent):
                             "reviewer_id": str(item.reviewer_id),
                             "decision": item.decision,
                             "reason": item.reason,
-                            "created_at": _iso(item.created_at),
+                            "created_at": iso_datetime(item.created_at),
                         }
                         for item in approvals
                     ],
@@ -124,7 +134,7 @@ class CapitalQueries(QueryComponent):
                         "transfer_authorization_id": str(authorization.transfer_authorization_id),
                         "active": authorization.active,
                         "version": authorization.version,
-                        "expires_at": _iso(authorization.expires_at),
+                        "expires_at": iso_datetime(authorization.expires_at),
                         "amount_limit": str(authorization.amount_limit),
                     },
                 }
@@ -132,7 +142,7 @@ class CapitalQueries(QueryComponent):
             return result
 
     @staticmethod
-    def _capital_transfer_summary(item: CapitalTransfer) -> dict[str, Any]:
+    def _capital_transfer_summary(item: models.CapitalTransfer) -> dict[str, Any]:
         return {
             "capital_transfer_id": str(item.capital_transfer_id),
             "team_id": str(item.team_id),
@@ -158,28 +168,32 @@ class CapitalQueries(QueryComponent):
             "planned_transactions": item.planned_transactions,
             "confirmed_transaction_hashes": item.confirmed_transaction_hashes,
             "protocol_request_id": item.protocol_request_id,
-            "protocol_execute_after": _iso(item.protocol_execute_after),
-            "protocol_expires_at": _iso(item.protocol_expires_at),
+            "protocol_execute_after": iso_datetime(item.protocol_execute_after),
+            "protocol_expires_at": iso_datetime(item.protocol_expires_at),
             "reconciliation_status": item.reconciliation_status,
             "reconciliation_details": item.reconciliation_details,
             "version": item.version,
-            "observed_at": _iso(item.observed_at),
-            "reconciled_at": _iso(item.reconciled_at),
-            "updated_at": _iso(item.updated_at),
+            "observed_at": iso_datetime(item.observed_at),
+            "reconciled_at": iso_datetime(item.reconciled_at),
+            "updated_at": iso_datetime(item.updated_at),
         }
 
     def capital_transfer_detail(self, user_id: UUID, capital_transfer_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
-            transfer = session.get(CapitalTransfer, capital_transfer_id)
+            transfer = session.get(models.CapitalTransfer, capital_transfer_id)
             if transfer is None:
-                raise DomainRejected("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer is missing")
+                raise domain.DomainRejected(
+                    "CAPITAL_TRANSFER_NOT_FOUND", "capital transfer is missing"
+                )
             if transfer.team_id != team_id:
-                raise DomainRejected("TEAM_SCOPE_DENIED", "capital transfer is outside scope")
+                raise domain.DomainRejected(
+                    "TEAM_SCOPE_DENIED", "capital transfer is outside scope"
+                )
             if not self.service.can_user(
                 user_id, "capital.view", transfer.account_id, transfer.venue
             ):
-                raise DomainRejected("RBAC_DENIED", "capital transfer is outside scope")
+                raise domain.DomainRejected("RBAC_DENIED", "capital transfer is outside scope")
             result = self._capital_transfer_summary(transfer)
             result["workspace_id"] = str(workspace_id)
             return result
@@ -194,24 +208,24 @@ class CapitalQueries(QueryComponent):
 
         normalized_environment = environment.strip().upper()
         if normalized_environment not in {"TESTNET", "LIVE"}:
-            raise DomainRejected(
+            raise domain.DomainRejected(
                 "CAPITAL_ENVIRONMENT_INVALID",
                 "capital display requires TESTNET or LIVE",
             )
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
             assignments = session.scalars(
-                select(RoleAssignment).where(
-                    RoleAssignment.user_id == user_id,
-                    RoleAssignment.team_id == team_id,
+                select(models.RoleAssignment).where(
+                    models.RoleAssignment.user_id == user_id,
+                    models.RoleAssignment.team_id == team_id,
                 )
             ).all()
             if not any(
-                "capital.view" in ROLE_ACTIONS[Role(item.role)]
-                or "*" in ROLE_ACTIONS[Role(item.role)]
+                "capital.view" in service.ROLE_ACTIONS[domain.Role(item.role)]
+                or "*" in service.ROLE_ACTIONS[domain.Role(item.role)]
                 for item in assignments
             ):
-                raise DomainRejected("RBAC_DENIED", "capital center access is not assigned")
+                raise domain.DomainRejected("RBAC_DENIED", "capital center access is not assigned")
 
             scope_access: dict[tuple[str | None, str | None], bool] = {}
 
@@ -231,13 +245,13 @@ class CapitalQueries(QueryComponent):
                 return f"{prefix}|{account_id}"
 
             accounts = session.scalars(
-                select(ExchangeAccount)
+                select(models.ExchangeAccount)
                 .where(
-                    ExchangeAccount.team_id == team_id,
-                    ExchangeAccount.environment == normalized_environment,
-                    ExchangeAccount.active,
+                    models.ExchangeAccount.team_id == team_id,
+                    models.ExchangeAccount.environment == normalized_environment,
+                    models.ExchangeAccount.active,
                 )
-                .order_by(ExchangeAccount.venue, ExchangeAccount.label)
+                .order_by(models.ExchangeAccount.venue, models.ExchangeAccount.label)
             ).all()
             options: dict[str, dict[str, Any]] = {
                 key_for("VENUE", item.venue, item.account_id): {
@@ -248,7 +262,7 @@ class CapitalQueries(QueryComponent):
                     "label": item.label,
                     "environment": normalized_environment,
                     "connection_status": item.connection_status,
-                    "last_sync_at": _iso(item.last_connection_check_at),
+                    "last_sync_at": iso_datetime(item.last_connection_check_at),
                     "selectable": False,
                     "disabled_reason": (
                         item.connection_error_code or "尚无可采信的资金数据"
@@ -261,10 +275,10 @@ class CapitalQueries(QueryComponent):
             }
             config = (
                 session.scalar(
-                    select(DirectCapitalConfiguration).where(
-                        DirectCapitalConfiguration.team_id == team_id,
-                        DirectCapitalConfiguration.environment == "LIVE",
-                        DirectCapitalConfiguration.active,
+                    select(models.DirectCapitalConfiguration).where(
+                        models.DirectCapitalConfiguration.team_id == team_id,
+                        models.DirectCapitalConfiguration.environment == "LIVE",
+                        models.DirectCapitalConfiguration.active,
                     )
                 )
                 if normalized_environment == "LIVE"
@@ -295,15 +309,15 @@ class CapitalQueries(QueryComponent):
                         "disabled_reason": "尚无可采信的资金数据",
                     }
             balances = session.scalars(
-                select(AccountEquity)
+                select(models.AccountEquity)
                 .where(
-                    AccountEquity.team_id == team_id,
-                    AccountEquity.environment == normalized_environment,
+                    models.AccountEquity.team_id == team_id,
+                    models.AccountEquity.environment == normalized_environment,
                 )
                 .order_by(
-                    AccountEquity.location_type,
-                    AccountEquity.venue,
-                    AccountEquity.account_id,
+                    models.AccountEquity.location_type,
+                    models.AccountEquity.venue,
+                    models.AccountEquity.account_id,
                 )
             ).all()
             for item in balances:
@@ -320,17 +334,17 @@ class CapitalQueries(QueryComponent):
                 if item.fact_status == "KNOWN":
                     options[key]["selectable"] = True
                     options[key]["disabled_reason"] = None
-                    options[key]["last_sync_at"] = _iso(item.observed_at)
+                    options[key]["last_sync_at"] = iso_datetime(item.observed_at)
             requested = set(selected_account_keys or ())
-            selectable = {
-                key for key, option in options.items() if option.get("selectable", False)
-            }
+            selectable = {key for key, option in options.items() if option.get("selectable", False)}
             selected = requested.intersection(selectable) if requested else set()
             if not requested and selectable:
                 selected = {next(key for key in options if key in selectable)}
             now = datetime.now(UTC)
             risk_policy = session.scalar(
-                select(RiskPolicy).where(RiskPolicy.team_id == team_id, RiskPolicy.active)
+                select(models.RiskPolicy).where(
+                    models.RiskPolicy.team_id == team_id, models.RiskPolicy.active
+                )
             )
             max_age = timedelta(
                 seconds=(risk_policy.max_fact_age_seconds if risk_policy is not None else 300)
@@ -344,7 +358,9 @@ class CapitalQueries(QueryComponent):
                 if key not in options or key not in selected:
                     continue
                 valuation_time = item.observed_at
-                if item.currency.upper() in USD_STABLE_ASSETS:
+                usd_equity: Decimal | None
+                valuation_price: Decimal | None
+                if item.currency.upper() in notilt.USD_STABLE_ASSETS:
                     usd_equity = item.equity
                     valuation_price = Decimal(1)
                 else:
@@ -357,12 +373,12 @@ class CapitalQueries(QueryComponent):
                     and usd_equity is not None
                     and valuation_price is not None
                     and valuation_price > 0
-                    and not fact_is_stale(valuation_time, now, max_age)
+                    and not scope_rules.fact_is_stale(valuation_time, now, max_age)
                 )
                 if current:
                     assert usd_equity is not None
                     current_by_key[key] = current_by_key.get(key, Decimal(0)) + usd_equity
-                    source_as_of[key] = _iso(valuation_time)
+                    source_as_of[key] = iso_datetime(valuation_time)
                 else:
                     issues.add(f"CURRENT_VALUE_MISSING:{key}")
                 balance_data.append(
@@ -392,37 +408,45 @@ class CapitalQueries(QueryComponent):
                         "usd_equity": str(usd_equity) if current else None,
                         "valuation_current": current,
                         "fact_status": item.fact_status,
-                        "observed_at": _iso(item.observed_at),
+                        "observed_at": iso_datetime(item.observed_at),
                     }
                 )
             for key in selected - set(item["account_key"] for item in balance_data):
                 issues.add(f"MISSING_ACCOUNT_SOURCE:{key}")
             observations = session.scalars(
-                select(AccountEquityObservation)
+                select(models.AccountEquityObservation)
                 .where(
-                    AccountEquityObservation.team_id == team_id,
-                    AccountEquityObservation.environment == normalized_environment,
+                    models.AccountEquityObservation.team_id == team_id,
+                    models.AccountEquityObservation.environment == normalized_environment,
                 )
-                .order_by(AccountEquityObservation.observed_at)
+                .order_by(models.AccountEquityObservation.observed_at)
             ).all()
             history = []
-            for item in observations:
-                key = key_for(item.location_type, item.venue, item.account_id)
-                if key not in selected or not can_view_scope(item.account_id, item.venue):
+            for observation in observations:
+                key = key_for(
+                    observation.location_type,
+                    observation.venue,
+                    observation.account_id,
+                )
+                if key not in selected or not can_view_scope(
+                    observation.account_id, observation.venue
+                ):
                     continue
                 history.append(
                     {
                         "source": key,
-                        "source_label": options.get(key, {}).get("label", item.account_id),
-                        "location_type": item.location_type,
-                        "location_id": item.account_id,
+                        "source_label": options.get(key, {}).get("label", observation.account_id),
+                        "location_type": observation.location_type,
+                        "location_id": observation.account_id,
                         "account_key": key,
-                        "venue": item.venue,
-                        "asset": item.currency,
-                        "equity": str(item.equity),
-                        "available_balance": str(item.available_balance),
-                        "usd_equity": None if item.usd_equity is None else str(item.usd_equity),
-                        "observed_at": _iso(item.observed_at),
+                        "venue": observation.venue,
+                        "asset": observation.currency,
+                        "equity": str(observation.equity),
+                        "available_balance": str(observation.available_balance),
+                        "usd_equity": (
+                            None if observation.usd_equity is None else str(observation.usd_equity)
+                        ),
+                        "observed_at": iso_datetime(observation.observed_at),
                     }
                 )
             return {
@@ -464,16 +488,16 @@ class CapitalQueries(QueryComponent):
         authoritative_live_treasury_account_id: str | None = None,
         require_authoritative_live_treasury: bool = False,
     ) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
             now = datetime.now(UTC)
             active_live_accounts = set(
                 session.execute(
-                    select(ExchangeAccount.account_id, ExchangeAccount.venue).where(
-                        ExchangeAccount.team_id == team_id,
-                        ExchangeAccount.environment == "LIVE",
-                        ExchangeAccount.active.is_(True),
-                        ExchangeAccount.deleted_at.is_(None),
+                    select(models.ExchangeAccount.account_id, models.ExchangeAccount.venue).where(
+                        models.ExchangeAccount.team_id == team_id,
+                        models.ExchangeAccount.environment == "LIVE",
+                        models.ExchangeAccount.active.is_(True),
+                        models.ExchangeAccount.deleted_at.is_(None),
                     )
                 ).all()
             )
@@ -500,17 +524,17 @@ class CapitalQueries(QueryComponent):
                 return account_id.lower() == authoritative_live_treasury_account_id.lower()
 
             assignments = session.scalars(
-                select(RoleAssignment).where(
-                    RoleAssignment.user_id == user_id,
-                    RoleAssignment.team_id == team_id,
+                select(models.RoleAssignment).where(
+                    models.RoleAssignment.user_id == user_id,
+                    models.RoleAssignment.team_id == team_id,
                 )
             ).all()
             if not any(
-                "capital.view" in ROLE_ACTIONS[Role(item.role)]
-                or "*" in ROLE_ACTIONS[Role(item.role)]
+                "capital.view" in service.ROLE_ACTIONS[domain.Role(item.role)]
+                or "*" in service.ROLE_ACTIONS[domain.Role(item.role)]
                 for item in assignments
             ):
-                raise DomainRejected("RBAC_DENIED", "capital center access is not assigned")
+                raise domain.DomainRejected("RBAC_DENIED", "capital center access is not assigned")
 
             scope_access: dict[tuple[str | None, str | None], bool] = {}
 
@@ -525,7 +549,7 @@ class CapitalQueries(QueryComponent):
                     )
                 return scope_access[scope]
 
-            def can_view_history(item: AccountEquityObservation) -> bool:
+            def can_view_history(item: models.AccountEquityObservation) -> bool:
                 if not is_active_live_venue(
                     item.environment,
                     item.location_type,
@@ -542,54 +566,56 @@ class CapitalQueries(QueryComponent):
                 return can_view_scope(item.account_id, item.venue)
 
             balances = session.scalars(
-                select(AccountEquity)
-                .where(AccountEquity.team_id == team_id)
+                select(models.AccountEquity)
+                .where(models.AccountEquity.team_id == team_id)
                 .order_by(
-                    AccountEquity.location_type,
-                    AccountEquity.venue,
-                    AccountEquity.account_id,
+                    models.AccountEquity.location_type,
+                    models.AccountEquity.venue,
+                    models.AccountEquity.account_id,
                 )
             ).all()
             proposals = session.scalars(
-                select(TransferProposal)
-                .where(TransferProposal.team_id == team_id)
-                .order_by(TransferProposal.updated_at.desc())
+                select(models.TransferProposal)
+                .where(models.TransferProposal.team_id == team_id)
+                .order_by(models.TransferProposal.updated_at.desc())
             ).all()
             authorizations = session.scalars(
-                select(TransferAuthorization).where(TransferAuthorization.team_id == team_id)
+                select(models.TransferAuthorization).where(
+                    models.TransferAuthorization.team_id == team_id
+                )
             ).all()
             authorization_by_proposal = {item.transfer_proposal_id: item for item in authorizations}
             transfers = session.scalars(
-                select(CapitalTransfer)
-                .where(CapitalTransfer.team_id == team_id)
-                .order_by(CapitalTransfer.updated_at.desc())
+                select(models.CapitalTransfer)
+                .where(models.CapitalTransfer.team_id == team_id)
+                .order_by(models.CapitalTransfer.updated_at.desc())
             ).all()
             direct_operations = session.scalars(
-                select(DirectCapitalOperation)
-                .where(DirectCapitalOperation.team_id == team_id)
-                .order_by(DirectCapitalOperation.updated_at.desc())
+                select(models.DirectCapitalOperation)
+                .where(models.DirectCapitalOperation.team_id == team_id)
+                .order_by(models.DirectCapitalOperation.updated_at.desc())
             ).all()
             policies = session.scalars(
-                select(CapitalAutomationPolicy)
-                .where(CapitalAutomationPolicy.team_id == team_id)
+                select(models.CapitalAutomationPolicy)
+                .where(models.CapitalAutomationPolicy.team_id == team_id)
                 .order_by(
-                    CapitalAutomationPolicy.environment,
-                    CapitalAutomationPolicy.venue,
-                    CapitalAutomationPolicy.account_id,
+                    models.CapitalAutomationPolicy.environment,
+                    models.CapitalAutomationPolicy.venue,
+                    models.CapitalAutomationPolicy.account_id,
                 )
             ).all()
-            observation_query = select(AccountEquityObservation).where(
-                AccountEquityObservation.team_id == team_id,
-                AccountEquityObservation.environment == "LIVE",
+            observation_query = select(models.AccountEquityObservation).where(
+                models.AccountEquityObservation.team_id == team_id,
+                models.AccountEquityObservation.environment == "LIVE",
             )
             if require_authoritative_live_treasury:
                 observation_query = observation_query.where(
                     or_(
-                        AccountEquityObservation.location_type != "VAULT",
+                        models.AccountEquityObservation.location_type != "VAULT",
                         (
                             false()
                             if authoritative_live_treasury_account_id is None
-                            else func.lower(AccountEquityObservation.account_id)
+                            else func.lower(models.AccountEquityObservation.account_id)
                             == authoritative_live_treasury_account_id.lower()
                         ),
                     )
@@ -597,24 +623,24 @@ class CapitalQueries(QueryComponent):
             observations = list(
                 reversed(
                     session.scalars(
-                        observation_query.order_by(AccountEquityObservation.observed_at.desc())
+                        observation_query.order_by(
+                            models.AccountEquityObservation.observed_at.desc()
+                        )
                     ).all()
                 )
             )
             visible_observations = [item for item in observations if can_view_history(item)]
             risk_policy = session.scalar(
-                select(RiskPolicy).where(
-                    RiskPolicy.team_id == team_id,
-                    RiskPolicy.active,
+                select(models.RiskPolicy).where(
+                    models.RiskPolicy.team_id == team_id,
+                    models.RiskPolicy.active,
                 )
             )
             max_fact_age = timedelta(
                 seconds=(risk_policy.max_fact_age_seconds if risk_policy is not None else 300)
             )
             visible_transfers = [
-                item
-                for item in transfers
-                if can_view_scope(item.account_id, item.venue)
+                item for item in transfers if can_view_scope(item.account_id, item.venue)
             ]
             occupied_statuses = {
                 "SOURCE_RESERVED",
@@ -674,7 +700,7 @@ class CapitalQueries(QueryComponent):
                 valuation_time = item.observed_at
                 usd_equity: Decimal | None
                 valuation_price: Decimal | None
-                if item.currency.upper() in USD_STABLE_ASSETS:
+                if item.currency.upper() in notilt.USD_STABLE_ASSETS:
                     usd_equity = item.equity
                     valuation_price = Decimal(1)
                 else:
@@ -687,7 +713,7 @@ class CapitalQueries(QueryComponent):
                     and usd_equity is not None
                     and valuation_price is not None
                     and valuation_price > 0
-                    and not fact_is_stale(valuation_time, now, max_fact_age)
+                    and not scope_rules.fact_is_stale(valuation_time, now, max_fact_age)
                 )
                 source = "VAULT" if item.location_type == "VAULT" else item.venue
                 if item.environment == "LIVE":
@@ -716,7 +742,7 @@ class CapitalQueries(QueryComponent):
                         valuation_issues.add(f"CURRENT_VALUE_MISSING:{source}")
                     elif usd_equity is None or valuation_price is None or valuation_price <= 0:
                         valuation_issues.add(f"UNKNOWN_USD_VALUE:{source}")
-                    elif fact_is_stale(valuation_time, now, max_fact_age):
+                    elif scope_rules.fact_is_stale(valuation_time, now, max_fact_age):
                         valuation_issues.add(f"STALE_LIVE_SOURCE:{source}")
                     else:
                         valuation_issues.add(f"CURRENT_VALUE_MISSING:{source}")
@@ -746,17 +772,17 @@ class CapitalQueries(QueryComponent):
                         ),
                         "valuation_currency": (
                             "USD"
-                            if item.currency.upper() in USD_STABLE_ASSETS
+                            if item.currency.upper() in notilt.USD_STABLE_ASSETS
                             else item.valuation_currency
                         ),
                         "valuation_price": (
                             None if valuation_price is None else str(valuation_price)
                         ),
                         "usd_equity": (None if not valuation_current else str(usd_equity)),
-                        "valuation_observed_at": _iso(item.valuation_observed_at),
+                        "valuation_observed_at": iso_datetime(item.valuation_observed_at),
                         "valuation_current": valuation_current,
                         "fact_status": item.fact_status,
-                        "observed_at": _iso(item.observed_at),
+                        "observed_at": iso_datetime(item.observed_at),
                     }
                 )
             for required_source in ("BINANCE", "HYPERLIQUID", "VAULT"):
@@ -773,9 +799,13 @@ class CapitalQueries(QueryComponent):
                 for source, source_time in current_live_source_times.items():
                     if newest_source_time - source_time > alignment_tolerance:
                         valuation_issues.add(f"TIME_MISALIGNED_SOURCE:{source}")
-            gate = session.get(CapabilityGate, "CAPITAL_TRANSFER")
+            gate = session.get(models.CapabilityGate, "CAPITAL_TRANSFER")
             automation_gates = {
-                key: (None if (value := session.get(CapabilityGate, key)) is None else value.status)
+                key: (
+                    None
+                    if (value := session.get(models.CapabilityGate, key)) is None
+                    else value.status
+                )
                 for key in ("AUTO_PROFIT_SWEEP", "AUTO_OPERATING_REFILL")
             }
             return {
@@ -798,17 +828,17 @@ class CapitalQueries(QueryComponent):
                         "equity": str(item.equity),
                         "available_balance": str(item.available_balance),
                         "usd_equity": (None if item.usd_equity is None else str(item.usd_equity)),
-                        "observed_at": _iso(item.observed_at),
+                        "observed_at": iso_datetime(item.observed_at),
                     }
                     for item in visible_observations
                 ],
                 "history_retention": {
                     "complete": True,
                     "minimum_interval_seconds": 60,
-                    "first_observed_at": _iso(visible_observations[0].observed_at)
+                    "first_observed_at": iso_datetime(visible_observations[0].observed_at)
                     if visible_observations
                     else None,
-                    "last_observed_at": _iso(visible_observations[-1].observed_at)
+                    "last_observed_at": iso_datetime(visible_observations[-1].observed_at)
                     if visible_observations
                     else None,
                     "stored_observations": len(visible_observations),
@@ -819,7 +849,7 @@ class CapitalQueries(QueryComponent):
                     "max_fact_age_seconds": int(max_fact_age.total_seconds()),
                     "alignment_tolerance_seconds": int(alignment_tolerance.total_seconds()),
                     "source_as_of": {
-                        source: _iso(latest_live_source_times.get(source))
+                        source: iso_datetime(latest_live_source_times.get(source))
                         for source in ("BINANCE", "HYPERLIQUID", "VAULT")
                     },
                     "venues": {
@@ -865,7 +895,7 @@ class CapitalQueries(QueryComponent):
                                     authorization.transfer_authorization_id
                                 ),
                                 "active": authorization.active,
-                                "expires_at": _iso(authorization.expires_at),
+                                "expires_at": iso_datetime(authorization.expires_at),
                             }
                         ),
                     }
@@ -896,11 +926,11 @@ class CapitalQueries(QueryComponent):
                         ),
                         "stages": item.stages,
                         "blockers": item.blockers,
-                        "execute_after": _iso(item.execute_after),
-                        "expires_at": _iso(item.expires_at),
-                        "final_confirmed_at": _iso(item.final_confirmed_at),
+                        "execute_after": iso_datetime(item.execute_after),
+                        "expires_at": iso_datetime(item.expires_at),
+                        "final_confirmed_at": iso_datetime(item.final_confirmed_at),
                         "version": item.version,
-                        "updated_at": _iso(item.updated_at),
+                        "updated_at": iso_datetime(item.updated_at),
                     }
                     for item in direct_operations
                     if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
@@ -925,7 +955,7 @@ class CapitalQueries(QueryComponent):
                             "max_fee": str(item.max_fee),
                             "active": item.active,
                             "version": item.version,
-                            "updated_at": _iso(item.updated_at),
+                            "updated_at": iso_datetime(item.updated_at),
                         }
                         for item in policies
                         if self.service.can_user(

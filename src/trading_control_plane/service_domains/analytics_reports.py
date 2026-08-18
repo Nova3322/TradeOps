@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime
+from typing import Any
+from uuid import UUID, uuid4
 
+from trading_control_plane import domain, models
 from trading_control_plane.analytics import ANALYTICS_DATASET_VERSION, AnalyticsDataset
 from trading_control_plane.report_engines import ReportArtifact
 from trading_control_plane.service_component import ServiceComponent
-
-# ruff: noqa: F403, F405
-from trading_control_plane.service_core import *
 
 
 class AnalyticsReportService(ServiceComponent):
@@ -34,17 +35,17 @@ class AnalyticsReportService(ServiceComponent):
             "to_time": dataset.scope.to_time.isoformat(),
         }
         with self.database.session_factory.begin() as session:
-            user, workspace, team = self.transactions._active_scope(session, actor_id)
+            user, workspace, team = self.transactions.active_scope(session, actor_id)
             assert team is not None
             if (
                 workspace.workspace_id != dataset.scope.workspace_id
                 or team.team_id != dataset.scope.team_id
             ):
-                raise DomainRejected(
+                raise domain.DomainRejected(
                     "ANALYTICS_SCOPE_CHANGED",
                     "active Workspace or Team changed while generating the report",
                 )
-            digest, replay = self.transactions._idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=str(actor_id),
                 operation="GENERATE_ANALYTICS_REPORT",
@@ -53,7 +54,7 @@ class AnalyticsReportService(ServiceComponent):
             )
             if replay is not None:
                 return replay
-            report = AnalyticsReport(
+            report = models.AnalyticsReport(
                 workspace_id=workspace.workspace_id,
                 team_id=team.team_id,
                 created_by=user.user_id,
@@ -98,7 +99,7 @@ class AnalyticsReportService(ServiceComponent):
                 "status": report.status,
                 "engine": report.engine,
             }
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="ANALYTICS_REPORT_GENERATED",
@@ -124,7 +125,7 @@ class AnalyticsReportService(ServiceComponent):
                 },
                 now=now,
             )
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=str(actor_id),
                 operation="GENERATE_ANALYTICS_REPORT",

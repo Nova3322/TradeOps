@@ -1,17 +1,27 @@
 from __future__ import annotations
 
-from trading_control_plane.service_component import ServiceComponent
+from datetime import datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import UUID, uuid4
 
-# The domain implementation intentionally consumes the explicit service_core export surface.
-# ruff: noqa: F403, F405
-from trading_control_plane.service_core import *
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from trading_control_plane import authorization_policy, domain, models, rejections
+from trading_control_plane import execution_scope as scope_rules
+from trading_control_plane.service_component import ServiceComponent
+from trading_control_plane.service_domains.risk_policy import active_risk_policy
+
+RISK_RESTORE_COOLDOWN = timedelta(minutes=15)
+RISK_RESTORE_TTL = timedelta(hours=24)
 
 
 class RecoveryRiskService(ServiceComponent):
     @staticmethod
     def _canonical_restore_scopes(
         configured_scopes: tuple[tuple[str, str, str], ...],
-        campaigns: list[Campaign],
+        campaigns: list[models.Campaign],
         *,
         required_environment: str | None = None,
     ) -> list[dict[str, str]]:
@@ -23,7 +33,7 @@ class RecoveryRiskService(ServiceComponent):
         scopes.update(
             (campaign.environment, campaign.account_id, campaign.venue)
             for campaign in campaigns
-            if campaign.status != CampaignStatus.CLOSED.value
+            if campaign.status != domain.CampaignStatus.CLOSED.value
             and (required_environment is None or campaign.environment == required_environment)
         )
         return [
@@ -34,7 +44,7 @@ class RecoveryRiskService(ServiceComponent):
     def _risk_restore_blockers(
         self,
         session: Session,
-        policy: RiskPolicy,
+        policy: models.RiskPolicy,
         required_scopes: list[dict[str, str]],
         *,
         require_live_scope: bool = False,
@@ -42,20 +52,25 @@ class RecoveryRiskService(ServiceComponent):
     ) -> list[str]:
         blockers: set[str] = set()
         if require_live_scope and not any(
-            scope.get("environment") == ExecutionEnvironment.LIVE.value for scope in required_scopes
+            scope.get("environment") == domain.ExecutionEnvironment.LIVE.value
+            for scope in required_scopes
         ):
             blockers.add("LIVE_SCOPE_CONFIGURATION_REQUIRED")
-        if policy.system_state == SystemRiskState.KILL_SWITCH.value:
+        if policy.system_state == domain.SystemRiskState.KILL_SWITCH.value:
             blockers.add("KILL_SWITCH_MANUAL_RECOVERY_REQUIRED")
 
         if (
             session.scalar(
-                select(OrderIntent.intent_id).where(
-                    OrderIntent.campaign_id.in_(
-                        select(Campaign.campaign_id).where(Campaign.team_id == policy.team_id)
+                select(models.OrderIntent.intent_id).where(
+                    models.OrderIntent.campaign_id.in_(
+                        select(models.Campaign.campaign_id).where(
+                            models.Campaign.team_id == policy.team_id
+                        )
                     ),
-                    OrderIntent.kind.in_({IntentKind.INITIAL.value, IntentKind.ADD.value}),
-                    OrderIntent.status.in_(ACTIVE_INTENT_STATUSES),
+                    models.OrderIntent.kind.in_(
+                        {domain.IntentKind.INITIAL.value, domain.IntentKind.ADD.value}
+                    ),
+                    models.OrderIntent.status.in_(scope_rules.ACTIVE_INTENT_STATUSES),
                 )
             )
             is not None
@@ -63,11 +78,13 @@ class RecoveryRiskService(ServiceComponent):
             blockers.add("ACTIVE_NEW_RISK_INTENT")
         if (
             session.scalar(
-                select(OrderIntent.intent_id).where(
-                    OrderIntent.campaign_id.in_(
-                        select(Campaign.campaign_id).where(Campaign.team_id == policy.team_id)
+                select(models.OrderIntent.intent_id).where(
+                    models.OrderIntent.campaign_id.in_(
+                        select(models.Campaign.campaign_id).where(
+                            models.Campaign.team_id == policy.team_id
+                        )
                     ),
-                    OrderIntent.status == OrderIntentStatus.UNKNOWN.value,
+                    models.OrderIntent.status == domain.OrderIntentStatus.UNKNOWN.value,
                 )
             )
             is not None
@@ -75,9 +92,9 @@ class RecoveryRiskService(ServiceComponent):
             blockers.add("ORDER_INTENT_UNKNOWN")
         if (
             session.scalar(
-                select(VenueOrder.venue_order_fact_id).where(
-                    VenueOrder.team_id == policy.team_id,
-                    VenueOrder.status == VenueOrderStatus.UNKNOWN.value,
+                select(models.VenueOrder.venue_order_fact_id).where(
+                    models.VenueOrder.team_id == policy.team_id,
+                    models.VenueOrder.status == domain.VenueOrderStatus.UNKNOWN.value,
                 )
             )
             is not None
@@ -85,9 +102,9 @@ class RecoveryRiskService(ServiceComponent):
             blockers.add("VENUE_ORDER_UNKNOWN")
         if (
             session.scalar(
-                select(RiskReservation.reservation_id).where(
-                    RiskReservation.team_id == policy.team_id,
-                    RiskReservation.status == ReservationStatus.UNKNOWN.value,
+                select(models.RiskReservation.reservation_id).where(
+                    models.RiskReservation.team_id == policy.team_id,
+                    models.RiskReservation.status == domain.ReservationStatus.UNKNOWN.value,
                 )
             )
             is not None
@@ -95,9 +112,9 @@ class RecoveryRiskService(ServiceComponent):
             blockers.add("RISK_RESERVATION_UNKNOWN")
         if (
             session.scalar(
-                select(Campaign.campaign_id).where(
-                    Campaign.team_id == policy.team_id,
-                    Campaign.status == CampaignStatus.UNKNOWN.value,
+                select(models.Campaign.campaign_id).where(
+                    models.Campaign.team_id == policy.team_id,
+                    models.Campaign.status == domain.CampaignStatus.UNKNOWN.value,
                 )
             )
             is not None
@@ -105,14 +122,14 @@ class RecoveryRiskService(ServiceComponent):
             blockers.add("CAMPAIGN_UNKNOWN")
         if (
             session.scalar(
-                select(VenueOrder.venue_order_fact_id).where(
-                    VenueOrder.team_id == policy.team_id,
-                    VenueOrder.order_intent_id.is_(None),
-                    VenueOrder.status.in_(
+                select(models.VenueOrder.venue_order_fact_id).where(
+                    models.VenueOrder.team_id == policy.team_id,
+                    models.VenueOrder.order_intent_id.is_(None),
+                    models.VenueOrder.status.in_(
                         {
-                            VenueOrderStatus.SENT.value,
-                            VenueOrderStatus.PARTIALLY_FILLED.value,
-                            VenueOrderStatus.UNKNOWN.value,
+                            domain.VenueOrderStatus.SENT.value,
+                            domain.VenueOrderStatus.PARTIALLY_FILLED.value,
+                            domain.VenueOrderStatus.UNKNOWN.value,
                         }
                     ),
                 )
@@ -124,7 +141,7 @@ class RecoveryRiskService(ServiceComponent):
         max_age = timedelta(seconds=policy.max_fact_age_seconds)
         for scope in required_scopes:
             try:
-                environment = ExecutionEnvironment(str(scope["environment"]))
+                environment = domain.ExecutionEnvironment(str(scope["environment"]))
                 account_id = str(scope["account_id"])
                 venue = str(scope["venue"])
             except (KeyError, ValueError):
@@ -133,11 +150,11 @@ class RecoveryRiskService(ServiceComponent):
             prefix = f"{environment.value}:{account_id}:{venue}"
             if require_live_scope:
                 source_health = session.scalar(
-                    select(RuntimeSourceHealth).where(
-                        RuntimeSourceHealth.team_id == policy.team_id,
-                        RuntimeSourceHealth.source_name == venue,
-                        RuntimeSourceHealth.account_id == account_id,
-                        RuntimeSourceHealth.venue == venue,
+                    select(models.RuntimeSourceHealth).where(
+                        models.RuntimeSourceHealth.team_id == policy.team_id,
+                        models.RuntimeSourceHealth.source_name == venue,
+                        models.RuntimeSourceHealth.account_id == account_id,
+                        models.RuntimeSourceHealth.venue == venue,
                     )
                 )
                 if source_health is None:
@@ -145,64 +162,64 @@ class RecoveryRiskService(ServiceComponent):
                 elif source_health.status != "SUCCESS":
                     failure_code = source_health.error_code or "READ_ONLY_PROBE_FAILED"
                     blockers.add(f"READ_ONLY_SOURCE_FAILED:{prefix}:{failure_code}")
-                elif self._fact_is_stale(source_health.checked_at, now, max_age):
+                elif scope_rules.fact_is_stale(source_health.checked_at, now, max_age):
                     blockers.add(f"READ_ONLY_SOURCE_STALE:{prefix}")
             equity = session.scalar(
-                select(AccountEquity).where(
-                    AccountEquity.team_id == policy.team_id,
-                    AccountEquity.environment == environment.value,
-                    AccountEquity.account_id == account_id,
-                    AccountEquity.venue == venue,
+                select(models.AccountEquity).where(
+                    models.AccountEquity.team_id == policy.team_id,
+                    models.AccountEquity.environment == environment.value,
+                    models.AccountEquity.account_id == account_id,
+                    models.AccountEquity.venue == venue,
                 )
             )
             if equity is None:
                 blockers.add(f"ACCOUNT_EQUITY_MISSING:{prefix}")
-            elif equity.fact_status != FactStatus.KNOWN.value:
+            elif equity.fact_status != domain.FactStatus.KNOWN.value:
                 blockers.add(f"ACCOUNT_EQUITY_UNKNOWN:{prefix}")
-            elif self._fact_is_stale(equity.observed_at, now, max_age):
+            elif scope_rules.fact_is_stale(equity.observed_at, now, max_age):
                 blockers.add(f"ACCOUNT_EQUITY_STALE:{prefix}")
 
             positions = session.scalars(
-                select(Position).where(
-                    Position.team_id == policy.team_id,
-                    Position.environment == environment.value,
-                    Position.account_id == account_id,
-                    Position.venue == venue,
+                select(models.Position).where(
+                    models.Position.team_id == policy.team_id,
+                    models.Position.environment == environment.value,
+                    models.Position.account_id == account_id,
+                    models.Position.venue == venue,
                 )
             ).all()
             if not positions:
                 blockers.add(f"POSITION_FACTS_MISSING:{prefix}")
             for position in positions:
-                if position.fact_status != FactStatus.KNOWN.value:
+                if position.fact_status != domain.FactStatus.KNOWN.value:
                     blockers.add(f"POSITION_UNKNOWN:{prefix}")
                     continue
-                if self._fact_is_stale(position.observed_at, now, max_age):
+                if scope_rules.fact_is_stale(position.observed_at, now, max_age):
                     blockers.add(f"POSITION_STALE:{prefix}")
                 if position.quantity == 0:
                     continue
                 protection = session.scalar(
-                    select(ProtectionOrder).where(
-                        ProtectionOrder.position_id == position.position_id
+                    select(models.ProtectionOrder).where(
+                        models.ProtectionOrder.position_id == position.position_id
                     )
                 )
                 if (
                     protection is None
-                    or protection.status != ProtectionStatus.ACTIVE.value
+                    or protection.status != domain.ProtectionStatus.ACTIVE.value
                     or not protection.fully_covered
                     or protection.quantity < abs(position.quantity)
                 ):
                     blockers.add(f"PROTECTION_INCOMPLETE:{prefix}")
-                elif self._fact_is_stale(protection.observed_at, now, max_age):
+                elif scope_rules.fact_is_stale(protection.observed_at, now, max_age):
                     blockers.add(f"PROTECTION_STALE:{prefix}")
 
-            execution_scope = _scope_key(environment.value, account_id, venue)
+            execution_scope = scope_rules.scope_key(environment.value, account_id, venue)
             reconciliation = session.scalar(
-                select(ReconciliationRun)
+                select(models.ReconciliationRun)
                 .where(
-                    ReconciliationRun.team_id == policy.team_id,
-                    ReconciliationRun.execution_scope == execution_scope,
+                    models.ReconciliationRun.team_id == policy.team_id,
+                    models.ReconciliationRun.execution_scope == execution_scope,
                 )
-                .order_by(ReconciliationRun.completed_at.desc())
+                .order_by(models.ReconciliationRun.completed_at.desc())
                 .limit(1)
             )
             latest_source_at = max(
@@ -214,12 +231,12 @@ class RecoveryRiskService(ServiceComponent):
             )
             if (
                 reconciliation is None
-                or reconciliation.status != ReconciliationStatus.MATCH.value
+                or reconciliation.status != domain.ReconciliationStatus.MATCH.value
                 or not reconciliation.is_computed
             ):
                 blockers.add(f"COMPUTED_RECONCILIATION_MATCH_REQUIRED:{prefix}")
             elif (
-                self._fact_is_stale(reconciliation.completed_at, now, max_age)
+                scope_rules.fact_is_stale(reconciliation.completed_at, now, max_age)
                 or reconciliation.completed_at < latest_source_at
             ):
                 blockers.add(f"RECONCILIATION_STALE:{prefix}")
@@ -393,9 +410,9 @@ class RecoveryRiskService(ServiceComponent):
 
     @staticmethod
     def _risk_restore_request_drifted(
-        request: RiskControlChangeRequest,
-        policy: RiskPolicy,
-        gate: CapabilityGate,
+        request: models.RiskControlChangeRequest,
+        policy: models.RiskPolicy,
+        gate: models.CapabilityGate,
     ) -> bool:
         return bool(
             request.source_policy_id != policy.policy_id
@@ -414,16 +431,16 @@ class RecoveryRiskService(ServiceComponent):
         now: datetime,
     ) -> dict[str, Any]:
         with self.database.session_factory() as session:
-            team = self.transactions._require_role(session, actor_id, "system.view")
+            team = self.transactions.require_role(session, actor_id, "system.view")
             policy = session.scalar(
-                select(RiskPolicy).where(
-                    RiskPolicy.team_id == team.team_id,
-                    RiskPolicy.active,
+                select(models.RiskPolicy).where(
+                    models.RiskPolicy.team_id == team.team_id,
+                    models.RiskPolicy.active,
                 )
             )
-            gate = session.get(CapabilityGate, "AUTO_ADD")
+            gate = session.get(models.CapabilityGate, "AUTO_ADD")
             if gate is None:
-                _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
+                rejections.reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
             if policy is None:
                 return {
                     "policy": None,
@@ -446,12 +463,13 @@ class RecoveryRiskService(ServiceComponent):
                     "actions": {
                         "configure_policy": {
                             "allowed": any(
-                                "risk_policy.manage" in ROLE_ACTIONS[Role(item.role)]
-                                or "*" in ROLE_ACTIONS[Role(item.role)]
+                                "risk_policy.manage"
+                                in authorization_policy.ROLE_ACTIONS[domain.Role(item.role)]
+                                or "*" in authorization_policy.ROLE_ACTIONS[domain.Role(item.role)]
                                 for item in session.scalars(
-                                    select(RoleAssignment).where(
-                                        RoleAssignment.user_id == actor_id,
-                                        RoleAssignment.team_id == team.team_id,
+                                    select(models.RoleAssignment).where(
+                                        models.RoleAssignment.user_id == actor_id,
+                                        models.RoleAssignment.team_id == team.team_id,
                                     )
                                 )
                             ),
@@ -466,13 +484,13 @@ class RecoveryRiskService(ServiceComponent):
                     "as_of": now.isoformat(),
                 }
             campaigns = session.scalars(
-                select(Campaign).where(Campaign.team_id == team.team_id)
+                select(models.Campaign).where(models.Campaign.team_id == team.team_id)
             ).all()
             scopes = self._canonical_restore_scopes(
                 configured_scopes,
                 list(campaigns),
                 required_environment=(
-                    ExecutionEnvironment.LIVE.value if require_live_scope else None
+                    domain.ExecutionEnvironment.LIVE.value if require_live_scope else None
                 ),
             )
             blockers = self._risk_restore_blockers(
@@ -493,9 +511,9 @@ class RecoveryRiskService(ServiceComponent):
             ):
                 blockers = ["RISK_LIMITS_UNCONFIGURED", *blockers]
             requests = session.scalars(
-                select(RiskControlChangeRequest)
-                .where(RiskControlChangeRequest.team_id == team.team_id)
-                .order_by(RiskControlChangeRequest.created_at.desc())
+                select(models.RiskControlChangeRequest)
+                .where(models.RiskControlChangeRequest.team_id == team.team_id)
+                .order_by(models.RiskControlChangeRequest.created_at.desc())
                 .limit(20)
             ).all()
             request_ids = [item.request_id for item in requests]
@@ -503,9 +521,9 @@ class RecoveryRiskService(ServiceComponent):
                 []
                 if not request_ids
                 else session.scalars(
-                    select(Approval)
-                    .where(Approval.risk_control_change_request_id.in_(request_ids))
-                    .order_by(Approval.created_at, Approval.approval_id)
+                    select(models.Approval)
+                    .where(models.Approval.risk_control_change_request_id.in_(request_ids))
+                    .order_by(models.Approval.created_at, models.Approval.approval_id)
                 ).all()
             )
             identity_ids = {item.requester_id for item in requests}
@@ -518,7 +536,7 @@ class RecoveryRiskService(ServiceComponent):
             usernames = {
                 item.user_id: item.username
                 for item in session.scalars(
-                    select(User).where(User.user_id.in_(identity_ids))
+                    select(models.User).where(models.User.user_id.in_(identity_ids))
                 ).all()
             }
 
@@ -543,26 +561,26 @@ class RecoveryRiskService(ServiceComponent):
                     }
                 )
             assignments = session.scalars(
-                select(RoleAssignment).where(
-                    RoleAssignment.user_id == actor_id,
-                    RoleAssignment.team_id == team.team_id,
+                select(models.RoleAssignment).where(
+                    models.RoleAssignment.user_id == actor_id,
+                    models.RoleAssignment.team_id == team.team_id,
                 )
             ).all()
             role_names = {item.role for item in assignments}
-            restricted = policy.system_state != SystemRiskState.NORMAL.value
+            restricted = policy.system_state != domain.SystemRiskState.NORMAL.value
 
-            def request_superseded(item: RiskControlChangeRequest) -> bool:
+            def request_superseded(item: models.RiskControlChangeRequest) -> bool:
                 return bool(
                     (item.change_type == "RESUME_NEW_RISK" and not restricted)
                     or self._risk_restore_request_drifted(item, policy, gate)
                 )
 
-            def effective_request_status(item: RiskControlChangeRequest) -> str:
+            def effective_request_status(item: models.RiskControlChangeRequest) -> str:
                 if item.status in {
-                    RiskPolicyChangeStatus.PENDING_REVIEW.value,
-                    RiskPolicyChangeStatus.APPROVED.value,
+                    domain.RiskPolicyChangeStatus.PENDING_REVIEW.value,
+                    domain.RiskPolicyChangeStatus.APPROVED.value,
                 } and (item.expires_at <= now or request_superseded(item)):
-                    return RiskPolicyChangeStatus.EXPIRED.value
+                    return domain.RiskPolicyChangeStatus.EXPIRED.value
                 return item.status
 
             active_request = next(
@@ -571,21 +589,21 @@ class RecoveryRiskService(ServiceComponent):
                     for item in requests
                     if effective_request_status(item)
                     in {
-                        RiskPolicyChangeStatus.PENDING_REVIEW.value,
-                        RiskPolicyChangeStatus.APPROVED.value,
+                        domain.RiskPolicyChangeStatus.PENDING_REVIEW.value,
+                        domain.RiskPolicyChangeStatus.APPROVED.value,
                     }
                 ),
                 None,
             )
-            is_admin = Role.SYSTEM_ADMIN.value in role_names
-            is_operator = Role.OPERATOR.value in role_names
-            is_reviewer = Role.REVIEWER.value in role_names
+            is_admin = domain.Role.SYSTEM_ADMIN.value in role_names
+            is_operator = domain.Role.OPERATOR.value in role_names
+            is_reviewer = domain.Role.REVIEWER.value in role_names
             direct_allowed = is_admin and restricted and not blockers
             request_allowed = is_operator and restricted and active_request is None
             review_allowed = bool(
                 is_reviewer
                 and active_request is not None
-                and active_request.status == RiskPolicyChangeStatus.PENDING_REVIEW.value
+                and active_request.status == domain.RiskPolicyChangeStatus.PENDING_REVIEW.value
                 and active_request.requester_id != actor_id
                 and not any(
                     review["reviewer_id"] == str(actor_id)
@@ -595,7 +613,7 @@ class RecoveryRiskService(ServiceComponent):
             execute_allowed = bool(
                 (is_reviewer or is_admin)
                 and active_request is not None
-                and active_request.status == RiskPolicyChangeStatus.APPROVED.value
+                and active_request.status == domain.RiskPolicyChangeStatus.APPROVED.value
                 and active_request.requester_id != actor_id
                 and (
                     active_request.change_type not in {"RESUME_NEW_RISK", "ENABLE_AUTO_ADD"}
@@ -740,11 +758,11 @@ class RecoveryRiskService(ServiceComponent):
         actor_id: UUID | None = None,
     ) -> int:
         with self.database.session_factory() as session:
-            request = session.get(RiskControlChangeRequest, request_id)
+            request = session.get(models.RiskControlChangeRequest, request_id)
             if request is None:
-                _reject("RISK_RESTORE_NOT_FOUND", "restore request does not exist")
+                rejections.reject("RISK_RESTORE_NOT_FOUND", "restore request does not exist")
             if actor_id is not None:
-                self.transactions._require_role(
+                self.transactions.require_role(
                     session,
                     actor_id,
                     "system.view",
@@ -774,7 +792,7 @@ class RecoveryRiskService(ServiceComponent):
             "PAUSE_NEW_RISK",
             "RESUME_NEW_RISK",
         }:
-            _reject("RISK_CHANGE_TYPE_INVALID", "risk control change type is unsupported")
+            rejections.reject("RISK_CHANGE_TYPE_INVALID", "risk control change type is unsupported")
         requested_policy = requested_policy or {}
         payload = {
             "reason": reason,
@@ -785,19 +803,21 @@ class RecoveryRiskService(ServiceComponent):
             "require_live_scope": require_live_scope,
         }
         with self.database.session_factory.begin() as session:
-            team = self.transactions._require_action_assignment(session, actor_id, operation)
-            requester = session.get(User, actor_id)
-            if requester is None or requester.principal_type != PrincipalType.HUMAN.value:
-                _reject("SERVICE_REQUEST_FORBIDDEN", "risk restoration requires a human requester")
+            team = self.transactions.require_action_assignment(session, actor_id, operation)
+            requester = session.get(models.User, actor_id)
+            if requester is None or requester.principal_type != domain.PrincipalType.HUMAN.value:
+                rejections.reject(
+                    "SERVICE_REQUEST_FORBIDDEN", "risk restoration requires a human requester"
+                )
             operator_assignments = session.scalars(
-                select(RoleAssignment).where(
-                    RoleAssignment.user_id == actor_id,
-                    RoleAssignment.team_id == team.team_id,
-                    RoleAssignment.role == Role.OPERATOR.value,
+                select(models.RoleAssignment).where(
+                    models.RoleAssignment.user_id == actor_id,
+                    models.RoleAssignment.team_id == team.team_id,
+                    models.RoleAssignment.role == domain.Role.OPERATOR.value,
                 )
             ).all()
             if not operator_assignments:
-                _reject(
+                rejections.reject(
                     "RISK_RESTORE_OPERATOR_REQUIRED",
                     "reviewed risk restoration must be requested by an operator",
                 )
@@ -809,16 +829,16 @@ class RecoveryRiskService(ServiceComponent):
                 )
                 for _environment, account_id, venue in configured_scopes
             ):
-                _reject(
+                rejections.reject(
                     "RBAC_DENIED",
                     "risk restoration scope is outside the operator assignment",
                 )
             if restore_auto_add:
-                _reject(
+                rejections.reject(
                     "AUTO_ADD_RESTORE_FORBIDDEN",
                     "risk restoration never enables the AUTO_ADD gate",
                 )
-            digest, response = self.transactions._idempotency(
+            digest, response = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -826,40 +846,42 @@ class RecoveryRiskService(ServiceComponent):
                 payload=payload,
             )
             if response is not None:
-                return _as_uuid(str(response["request_id"]))
-            self.transactions._lock_risk_capacity(session, team.team_id)
-            policy = self._active_risk_policy(session, team.team_id)
-            gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
+                return UUID(str(response["request_id"]))
+            self.transactions.lock_risk_capacity(session, team.team_id)
+            policy = active_risk_policy(session, team.team_id)
+            gate = session.get(models.CapabilityGate, "AUTO_ADD", with_for_update=True)
             if gate is None:
-                _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
+                rejections.reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
             if (
                 normalized_change_type in {"RESUME_NEW_RISK", "ENABLE_AUTO_ADD"}
-                and policy.system_state == SystemRiskState.KILL_SWITCH.value
+                and policy.system_state == domain.SystemRiskState.KILL_SWITCH.value
             ):
-                _reject(
+                rejections.reject(
                     "KILL_SWITCH_MANUAL_RECOVERY_REQUIRED",
                     "KILL_SWITCH cannot be resumed through the reviewed restore workflow",
                 )
             if (
                 normalized_change_type == "RESUME_NEW_RISK"
-                and policy.system_state == SystemRiskState.NORMAL.value
+                and policy.system_state == domain.SystemRiskState.NORMAL.value
             ):
-                _reject("RISK_CONTROL_ALREADY_NORMAL", "the requested controls are already open")
+                rejections.reject(
+                    "RISK_CONTROL_ALREADY_NORMAL", "the requested controls are already open"
+                )
             if (
                 normalized_change_type == "ENABLE_AUTO_ADD"
-                and gate.status == CapabilityStatus.ENABLED.value
+                and gate.status == domain.CapabilityStatus.ENABLED.value
             ):
-                _reject("RISK_CONTROL_ALREADY_NORMAL", "AUTO_ADD is already enabled")
+                rejections.reject("RISK_CONTROL_ALREADY_NORMAL", "AUTO_ADD is already enabled")
             if (
                 normalized_change_type == "DISABLE_AUTO_ADD"
-                and gate.status == CapabilityStatus.DISABLED.value
+                and gate.status == domain.CapabilityStatus.DISABLED.value
             ):
-                _reject("RISK_CONTROL_ALREADY_TIGHTENED", "AUTO_ADD is already disabled")
+                rejections.reject("RISK_CONTROL_ALREADY_TIGHTENED", "AUTO_ADD is already disabled")
             if (
                 normalized_change_type == "PAUSE_NEW_RISK"
-                and policy.system_state != SystemRiskState.NORMAL.value
+                and policy.system_state != domain.SystemRiskState.NORMAL.value
             ):
-                _reject("RISK_CONTROL_ALREADY_TIGHTENED", "new risk is already paused")
+                rejections.reject("RISK_CONTROL_ALREADY_TIGHTENED", "new risk is already paused")
             if normalized_change_type == "POLICY_UPDATE":
                 required_policy_fields = {
                     "version",
@@ -871,19 +893,19 @@ class RecoveryRiskService(ServiceComponent):
                     "max_fact_age_seconds",
                 }
                 if set(requested_policy) != required_policy_fields:
-                    _reject(
+                    rejections.reject(
                         "RISK_POLICY_INVALID",
                         "reviewed policy changes require every versioned risk limit",
                     )
             existing_requests = list(
                 session.scalars(
-                    select(RiskControlChangeRequest)
+                    select(models.RiskControlChangeRequest)
                     .where(
-                        RiskControlChangeRequest.team_id == team.team_id,
-                        RiskControlChangeRequest.status.in_(
+                        models.RiskControlChangeRequest.team_id == team.team_id,
+                        models.RiskControlChangeRequest.status.in_(
                             {
-                                RiskPolicyChangeStatus.PENDING_REVIEW.value,
-                                RiskPolicyChangeStatus.APPROVED.value,
+                                domain.RiskPolicyChangeStatus.PENDING_REVIEW.value,
+                                domain.RiskPolicyChangeStatus.APPROVED.value,
                             }
                         ),
                     )
@@ -894,10 +916,10 @@ class RecoveryRiskService(ServiceComponent):
             for existing_request in existing_requests:
                 superseded = self._risk_restore_request_drifted(existing_request, policy, gate)
                 if existing_request.expires_at <= now or superseded:
-                    existing_request.status = RiskPolicyChangeStatus.EXPIRED.value
+                    existing_request.status = domain.RiskPolicyChangeStatus.EXPIRED.value
                     existing_request.version += 1
                     existing_request.updated_at = now
-                    self.transactions._audit(
+                    self.transactions.audit(
                         session,
                         actor_id=str(actor_id),
                         event_type=(
@@ -918,15 +940,19 @@ class RecoveryRiskService(ServiceComponent):
                 else:
                     pending = existing_request.request_id
             if pending is not None:
-                _reject("RISK_RESTORE_ALREADY_PENDING", "a reviewed restore is already active")
+                rejections.reject(
+                    "RISK_RESTORE_ALREADY_PENDING", "a reviewed restore is already active"
+                )
             campaigns = list(
-                session.scalars(select(Campaign).where(Campaign.team_id == team.team_id)).all()
+                session.scalars(
+                    select(models.Campaign).where(models.Campaign.team_id == team.team_id)
+                ).all()
             )
             scopes = self._canonical_restore_scopes(
                 configured_scopes,
                 campaigns,
                 required_environment=(
-                    ExecutionEnvironment.LIVE.value if require_live_scope else None
+                    domain.ExecutionEnvironment.LIVE.value if require_live_scope else None
                 ),
             )
             restoring = normalized_change_type in {"RESUME_NEW_RISK", "ENABLE_AUTO_ADD"}
@@ -938,10 +964,10 @@ class RecoveryRiskService(ServiceComponent):
                     else policy.updated_at
                 ),
             )
-            request = RiskControlChangeRequest(
+            request = models.RiskControlChangeRequest(
                 team_id=team.team_id,
                 requester_id=actor_id,
-                status=RiskPolicyChangeStatus.PENDING_REVIEW.value,
+                status=domain.RiskPolicyChangeStatus.PENDING_REVIEW.value,
                 version=1,
                 reason=reason,
                 restore_auto_add=restore_auto_add,
@@ -967,7 +993,7 @@ class RecoveryRiskService(ServiceComponent):
             session.add(request)
             session.flush()
             result = {"request_id": str(request.request_id)}
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -976,7 +1002,7 @@ class RecoveryRiskService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="RISK_RESTORE_REQUESTED",
@@ -994,13 +1020,13 @@ class RecoveryRiskService(ServiceComponent):
         self,
         request_id: UUID,
         reviewer_id: UUID,
-        decision: ReviewDecision,
+        decision: domain.ReviewDecision,
         reason: str,
         expected_version: int,
         idempotency_key: str,
         *,
         now: datetime,
-    ) -> RiskPolicyChangeStatus:
+    ) -> domain.RiskPolicyChangeStatus:
         operation = "risk.restore.review"
         payload = {
             "request_id": str(request_id),
@@ -1009,18 +1035,20 @@ class RecoveryRiskService(ServiceComponent):
             "expected_version": expected_version,
         }
         expired = False
-        result_status: RiskPolicyChangeStatus | None = None
+        result_status: domain.RiskPolicyChangeStatus | None = None
         with self.database.session_factory.begin() as session:
-            request = session.get(RiskControlChangeRequest, request_id, with_for_update=True)
+            request = session.get(models.RiskControlChangeRequest, request_id, with_for_update=True)
             if request is None:
-                _reject("RISK_RESTORE_NOT_FOUND", "restore request does not exist")
-            self.transactions._require_role(
+                rejections.reject("RISK_RESTORE_NOT_FOUND", "restore request does not exist")
+            self.transactions.require_role(
                 session, reviewer_id, operation, team_id=request.team_id
             )
-            reviewer = session.get(User, reviewer_id)
-            if reviewer is None or reviewer.principal_type != PrincipalType.HUMAN.value:
-                _reject("SERVICE_REVIEW_FORBIDDEN", "risk restoration requires human reviewers")
-            digest, response = self.transactions._idempotency(
+            reviewer = session.get(models.User, reviewer_id)
+            if reviewer is None or reviewer.principal_type != domain.PrincipalType.HUMAN.value:
+                rejections.reject(
+                    "SERVICE_REVIEW_FORBIDDEN", "risk restoration requires human reviewers"
+                )
+            digest, response = self.transactions.idempotency(
                 session,
                 caller_id=f"{reviewer_id}:{request.team_id}",
                 operation=operation,
@@ -1028,41 +1056,43 @@ class RecoveryRiskService(ServiceComponent):
                 payload=payload,
             )
             if response is not None:
-                return RiskPolicyChangeStatus(str(response["status"]))
+                return domain.RiskPolicyChangeStatus(str(response["status"]))
             if request.version != expected_version:
-                _reject("VERSION_CONFLICT", "restore request changed before review")
-            policy = self._active_risk_policy(session, request.team_id)
-            gate = session.get(CapabilityGate, "AUTO_ADD")
+                rejections.reject("VERSION_CONFLICT", "restore request changed before review")
+            policy = active_risk_policy(session, request.team_id)
+            gate = session.get(models.CapabilityGate, "AUTO_ADD")
             if gate is None:
-                _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
+                rejections.reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
             if (
                 request.change_type == "RESUME_NEW_RISK"
-                and policy.system_state == SystemRiskState.NORMAL.value
+                and policy.system_state == domain.SystemRiskState.NORMAL.value
             ) or self._risk_restore_request_drifted(request, policy, gate):
-                _reject(
+                rejections.reject(
                     "RISK_RESTORE_CONTROL_DRIFT",
                     "restore request no longer matches current controls",
                 )
             if request.requester_id == reviewer_id:
-                _reject("SELF_REVIEW_FORBIDDEN", "requester cannot review their restore")
+                rejections.reject("SELF_REVIEW_FORBIDDEN", "requester cannot review their restore")
             if request.expires_at <= now:
-                request.status = RiskPolicyChangeStatus.EXPIRED.value
+                request.status = domain.RiskPolicyChangeStatus.EXPIRED.value
                 request.version += 1
                 request.updated_at = now
                 expired = True
             else:
-                if request.status != RiskPolicyChangeStatus.PENDING_REVIEW.value:
-                    _reject("RISK_RESTORE_NOT_REVIEWABLE", "restore request is not pending")
+                if request.status != domain.RiskPolicyChangeStatus.PENDING_REVIEW.value:
+                    rejections.reject(
+                        "RISK_RESTORE_NOT_REVIEWABLE", "restore request is not pending"
+                    )
                 duplicate = session.scalar(
-                    select(Approval).where(
-                        Approval.risk_control_change_request_id == request_id,
-                        Approval.reviewer_id == reviewer_id,
+                    select(models.Approval).where(
+                        models.Approval.risk_control_change_request_id == request_id,
+                        models.Approval.reviewer_id == reviewer_id,
                     )
                 )
                 if duplicate is not None:
-                    _reject("REVIEW_ALREADY_RECORDED", "reviewer already voted")
+                    rejections.reject("REVIEW_ALREADY_RECORDED", "reviewer already voted")
                 session.add(
-                    Approval(
+                    models.Approval(
                         proposal_id=None,
                         transfer_proposal_id=None,
                         risk_control_change_request_id=request_id,
@@ -1073,24 +1103,24 @@ class RecoveryRiskService(ServiceComponent):
                     )
                 )
                 session.flush()
-                if decision is ReviewDecision.REJECT:
-                    request.status = RiskPolicyChangeStatus.REJECTED.value
+                if decision is domain.ReviewDecision.REJECT:
+                    request.status = domain.RiskPolicyChangeStatus.REJECTED.value
                 else:
                     approvals = session.scalar(
                         select(func.count())
-                        .select_from(Approval)
+                        .select_from(models.Approval)
                         .where(
-                            Approval.risk_control_change_request_id == request_id,
-                            Approval.decision == ReviewDecision.APPROVE.value,
+                            models.Approval.risk_control_change_request_id == request_id,
+                            models.Approval.decision == domain.ReviewDecision.APPROVE.value,
                         )
                     )
                     if int(approvals or 0) >= 1:
-                        request.status = RiskPolicyChangeStatus.APPROVED.value
+                        request.status = domain.RiskPolicyChangeStatus.APPROVED.value
                 request.version += 1
                 request.updated_at = now
-                result_status = RiskPolicyChangeStatus(request.status)
+                result_status = domain.RiskPolicyChangeStatus(request.status)
                 response_value = {"status": request.status, "version": request.version}
-                self.transactions._save_receipt(
+                self.transactions.save_receipt(
                     session,
                     caller_id=f"{reviewer_id}:{request.team_id}",
                     operation=operation,
@@ -1099,7 +1129,7 @@ class RecoveryRiskService(ServiceComponent):
                     response=response_value,
                     now=now,
                 )
-                self.transactions._audit(
+                self.transactions.audit(
                     session,
                     actor_id=str(reviewer_id),
                     event_type="RISK_RESTORE_REVIEWED",
@@ -1112,7 +1142,7 @@ class RecoveryRiskService(ServiceComponent):
                     now=now,
                 )
         if expired:
-            _reject("RISK_RESTORE_EXPIRED", "restore request expired before review")
+            rejections.reject("RISK_RESTORE_EXPIRED", "restore request expired before review")
         if result_status is None:
             raise RuntimeError("risk restore review completed without a status")
         return result_status
@@ -1136,14 +1166,16 @@ class RecoveryRiskService(ServiceComponent):
             "require_live_scope": require_live_scope,
         }
         with self.database.session_factory.begin() as session:
-            request = session.get(RiskControlChangeRequest, request_id, with_for_update=True)
+            request = session.get(models.RiskControlChangeRequest, request_id, with_for_update=True)
             if request is None:
-                _reject("RISK_RESTORE_NOT_FOUND", "restore request does not exist")
-            self.transactions._require_role(session, actor_id, operation, team_id=request.team_id)
-            executor = session.get(User, actor_id)
-            if executor is None or executor.principal_type != PrincipalType.HUMAN.value:
-                _reject("SERVICE_EXECUTION_FORBIDDEN", "risk restoration requires a human executor")
-            digest, response = self.transactions._idempotency(
+                rejections.reject("RISK_RESTORE_NOT_FOUND", "restore request does not exist")
+            self.transactions.require_role(session, actor_id, operation, team_id=request.team_id)
+            executor = session.get(models.User, actor_id)
+            if executor is None or executor.principal_type != domain.PrincipalType.HUMAN.value:
+                rejections.reject(
+                    "SERVICE_EXECUTION_FORBIDDEN", "risk restoration requires a human executor"
+                )
+            digest, response = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{request.team_id}",
                 operation=operation,
@@ -1151,46 +1183,60 @@ class RecoveryRiskService(ServiceComponent):
                 payload=payload,
             )
             if response is not None:
-                return _as_uuid(str(response["policy_id"]))
+                return UUID(str(response["policy_id"]))
             if request.version != expected_version:
-                _reject("VERSION_CONFLICT", "restore request changed before execution")
-            if request.status != RiskPolicyChangeStatus.APPROVED.value:
-                _reject("RISK_RESTORE_NOT_APPROVED", "an independent approval is required")
+                rejections.reject("VERSION_CONFLICT", "restore request changed before execution")
+            if request.status != domain.RiskPolicyChangeStatus.APPROVED.value:
+                rejections.reject(
+                    "RISK_RESTORE_NOT_APPROVED", "an independent approval is required"
+                )
             if request.expires_at <= now:
-                _reject("RISK_RESTORE_EXPIRED", "restore request expired before execution")
+                rejections.reject(
+                    "RISK_RESTORE_EXPIRED", "restore request expired before execution"
+                )
             if request.execute_after > now:
-                _reject("RISK_RESTORE_COOLDOWN", "restore cooldown has not completed")
+                rejections.reject("RISK_RESTORE_COOLDOWN", "restore cooldown has not completed")
             approvals = session.scalars(
-                select(Approval).where(
-                    Approval.risk_control_change_request_id == request_id,
-                    Approval.decision == ReviewDecision.APPROVE.value,
+                select(models.Approval).where(
+                    models.Approval.risk_control_change_request_id == request_id,
+                    models.Approval.decision == domain.ReviewDecision.APPROVE.value,
                 )
             ).all()
             if len({approval.reviewer_id for approval in approvals}) < 1:
-                _reject("RISK_RESTORE_NOT_APPROVED", "an independent approval is required")
+                rejections.reject(
+                    "RISK_RESTORE_NOT_APPROVED", "an independent approval is required"
+                )
             if request.requester_id == actor_id:
-                _reject("SELF_EXECUTION_FORBIDDEN", "requester cannot execute their restore")
-            self.transactions._lock_risk_capacity(session, request.team_id)
-            policy = self._active_risk_policy(session, request.team_id)
-            gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
+                rejections.reject(
+                    "SELF_EXECUTION_FORBIDDEN", "requester cannot execute their restore"
+                )
+            self.transactions.lock_risk_capacity(session, request.team_id)
+            policy = active_risk_policy(session, request.team_id)
+            gate = session.get(models.CapabilityGate, "AUTO_ADD", with_for_update=True)
             if gate is None:
-                _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
+                rejections.reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
             if self._risk_restore_request_drifted(request, policy, gate):
-                _reject("RISK_RESTORE_CONTROL_DRIFT", "risk controls changed after the request")
+                rejections.reject(
+                    "RISK_RESTORE_CONTROL_DRIFT", "risk controls changed after the request"
+                )
             campaigns = list(
-                session.scalars(select(Campaign).where(Campaign.team_id == request.team_id)).all()
+                session.scalars(
+                    select(models.Campaign).where(models.Campaign.team_id == request.team_id)
+                ).all()
             )
             current_scopes = self._canonical_restore_scopes(
                 configured_scopes,
                 campaigns,
                 required_environment=(
-                    ExecutionEnvironment.LIVE.value if request.require_live_scope else None
+                    domain.ExecutionEnvironment.LIVE.value if request.require_live_scope else None
                 ),
             )
             if current_scopes != request.required_scopes:
-                _reject("RISK_RESTORE_SCOPE_DRIFT", "controlled scopes changed after the request")
+                rejections.reject(
+                    "RISK_RESTORE_SCOPE_DRIFT", "controlled scopes changed after the request"
+                )
             if request.require_live_scope != require_live_scope:
-                _reject(
+                rejections.reject(
                     "RISK_RESTORE_SCOPE_DRIFT",
                     "LIVE scope requirement changed after the request",
                 )
@@ -1203,16 +1249,16 @@ class RecoveryRiskService(ServiceComponent):
                     now=now,
                 )
                 if blockers:
-                    _reject("RISK_RESTORE_BLOCKED", ",".join(blockers))
+                    rejections.reject("RISK_RESTORE_BLOCKED", ",".join(blockers))
             resulting_policy = policy
             if request.change_type == "RESUME_NEW_RISK":
                 policy.active = False
                 next_revision = policy.revision + 1
-                resulting_policy = RiskPolicy(
+                resulting_policy = models.RiskPolicy(
                     team_id=request.team_id,
                     version=f"restore-{next_revision}-{request.request_id.hex[:12]}",
                     revision=next_revision,
-                    system_state=SystemRiskState.NORMAL.value,
+                    system_state=domain.SystemRiskState.NORMAL.value,
                     max_total_risk=policy.max_total_risk,
                     max_account_risk=policy.max_account_risk,
                     max_single_loss=policy.max_single_loss,
@@ -1248,16 +1294,18 @@ class RecoveryRiskService(ServiceComponent):
                     or cooldown <= 0
                     or max_age <= 0
                 ):
-                    _reject("RISK_POLICY_INVALID", "reviewed risk limits are invalid")
+                    rejections.reject("RISK_POLICY_INVALID", "reviewed risk limits are invalid")
                 if session.scalar(
-                    select(RiskPolicy.policy_id).where(
-                        RiskPolicy.team_id == request.team_id,
-                        RiskPolicy.version == version,
+                    select(models.RiskPolicy.policy_id).where(
+                        models.RiskPolicy.team_id == request.team_id,
+                        models.RiskPolicy.version == version,
                     )
                 ):
-                    _reject("RISK_POLICY_VERSION_CONFLICT", "risk policy version already exists")
+                    rejections.reject(
+                        "RISK_POLICY_VERSION_CONFLICT", "risk policy version already exists"
+                    )
                 policy.active = False
-                resulting_policy = RiskPolicy(
+                resulting_policy = models.RiskPolicy(
                     team_id=request.team_id,
                     version=version,
                     revision=policy.revision + 1,
@@ -1276,47 +1324,49 @@ class RecoveryRiskService(ServiceComponent):
                 session.add(resulting_policy)
                 session.flush()
             elif request.change_type == "PAUSE_NEW_RISK":
-                if policy.system_state == SystemRiskState.KILL_SWITCH.value:
-                    _reject("RISK_CONTROL_ALREADY_TIGHTENED", "KILL_SWITCH is already stricter")
-                policy.system_state = SystemRiskState.REDUCE_ONLY.value
+                if policy.system_state == domain.SystemRiskState.KILL_SWITCH.value:
+                    rejections.reject(
+                        "RISK_CONTROL_ALREADY_TIGHTENED", "KILL_SWITCH is already stricter"
+                    )
+                policy.system_state = domain.SystemRiskState.REDUCE_ONLY.value
                 policy.revision += 1
                 policy.reason = request.reason
                 policy.updated_by = str(actor_id)
                 policy.updated_at = now
             elif request.change_type == "ENABLE_AUTO_ADD":
-                if policy.system_state != SystemRiskState.NORMAL.value:
-                    _reject("RISK_RESTORE_BLOCKED", "risk policy must be NORMAL")
-                gate.status = CapabilityStatus.ENABLED.value
+                if policy.system_state != domain.SystemRiskState.NORMAL.value:
+                    rejections.reject("RISK_RESTORE_BLOCKED", "risk policy must be NORMAL")
+                gate.status = domain.CapabilityStatus.ENABLED.value
                 gate.reason = request.reason
                 gate.operator_id = str(actor_id)
                 gate.version += 1
                 gate.updated_at = now
             elif request.change_type == "DISABLE_AUTO_ADD":
-                gate.status = CapabilityStatus.DISABLED.value
+                gate.status = domain.CapabilityStatus.DISABLED.value
                 gate.reason = request.reason
                 gate.operator_id = str(actor_id)
                 gate.version += 1
                 gate.updated_at = now
             authorizations = session.scalars(
-                select(TradingAuthorization)
+                select(models.TradingAuthorization)
                 .where(
-                    TradingAuthorization.team_id == request.team_id,
-                    TradingAuthorization.active,
+                    models.TradingAuthorization.team_id == request.team_id,
+                    models.TradingAuthorization.active,
                 )
-                .order_by(TradingAuthorization.authorization_id)
+                .order_by(models.TradingAuthorization.authorization_id)
                 .with_for_update()
             ).all()
             for authorization in authorizations:
                 authorization.active = False
                 if authorization.add_revoked_at is None:
                     authorization.add_revoked_at = now
-            request.status = RiskPolicyChangeStatus.EXECUTED.value
+            request.status = domain.RiskPolicyChangeStatus.EXECUTED.value
             request.resulting_policy_id = resulting_policy.policy_id
             request.executed_at = now
             request.updated_at = now
             request.version += 1
             result = {"policy_id": str(resulting_policy.policy_id), "request_id": str(request_id)}
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=f"{actor_id}:{request.team_id}",
                 operation=operation,
@@ -1325,7 +1375,7 @@ class RecoveryRiskService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="RISK_CONTROL_CHANGE_EXECUTED",
@@ -1356,22 +1406,24 @@ class RecoveryRiskService(ServiceComponent):
             "require_live_scope": require_live_scope,
         }
         with self.database.session_factory.begin() as session:
-            team = self.transactions._require_role(session, actor_id, operation)
+            team = self.transactions.require_role(session, actor_id, operation)
             assignments = session.scalars(
-                select(RoleAssignment).where(
-                    RoleAssignment.user_id == actor_id,
-                    RoleAssignment.team_id == team.team_id,
+                select(models.RoleAssignment).where(
+                    models.RoleAssignment.user_id == actor_id,
+                    models.RoleAssignment.team_id == team.team_id,
                 )
             ).all()
-            if not any(item.role == Role.SYSTEM_ADMIN.value for item in assignments):
-                _reject(
+            if not any(item.role == domain.Role.SYSTEM_ADMIN.value for item in assignments):
+                rejections.reject(
                     "RISK_RESTORE_ADMIN_REQUIRED",
                     "direct risk restoration requires SYSTEM_ADMIN",
                 )
-            actor = session.get(User, actor_id)
-            if actor is None or actor.principal_type != PrincipalType.HUMAN.value:
-                _reject("SERVICE_EXECUTION_FORBIDDEN", "direct restoration requires a human")
-            digest, response = self.transactions._idempotency(
+            actor = session.get(models.User, actor_id)
+            if actor is None or actor.principal_type != domain.PrincipalType.HUMAN.value:
+                rejections.reject(
+                    "SERVICE_EXECUTION_FORBIDDEN", "direct restoration requires a human"
+                )
+            digest, response = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -1379,22 +1431,24 @@ class RecoveryRiskService(ServiceComponent):
                 payload=payload,
             )
             if response is not None:
-                return _as_uuid(str(response["policy_id"]))
-            self.transactions._lock_risk_capacity(session, team.team_id)
-            policy = self._active_risk_policy(session, team.team_id)
-            if policy.system_state == SystemRiskState.NORMAL.value:
-                _reject("RISK_CONTROL_ALREADY_NORMAL", "risk policy is already normal")
-            gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
+                return UUID(str(response["policy_id"]))
+            self.transactions.lock_risk_capacity(session, team.team_id)
+            policy = active_risk_policy(session, team.team_id)
+            if policy.system_state == domain.SystemRiskState.NORMAL.value:
+                rejections.reject("RISK_CONTROL_ALREADY_NORMAL", "risk policy is already normal")
+            gate = session.get(models.CapabilityGate, "AUTO_ADD", with_for_update=True)
             if gate is None:
-                _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
+                rejections.reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
             campaigns = list(
-                session.scalars(select(Campaign).where(Campaign.team_id == team.team_id)).all()
+                session.scalars(
+                    select(models.Campaign).where(models.Campaign.team_id == team.team_id)
+                ).all()
             )
             scopes = self._canonical_restore_scopes(
                 configured_scopes,
                 campaigns,
                 required_environment=(
-                    ExecutionEnvironment.LIVE.value if require_live_scope else None
+                    domain.ExecutionEnvironment.LIVE.value if require_live_scope else None
                 ),
             )
             blockers = self._risk_restore_blockers(
@@ -1405,14 +1459,14 @@ class RecoveryRiskService(ServiceComponent):
                 now=now,
             )
             if blockers:
-                _reject("RISK_RESTORE_BLOCKED", ",".join(blockers))
+                rejections.reject("RISK_RESTORE_BLOCKED", ",".join(blockers))
             policy.active = False
             next_revision = policy.revision + 1
-            restored = RiskPolicy(
+            restored = models.RiskPolicy(
                 team_id=team.team_id,
                 version=f"direct-restore-{next_revision}-{uuid4().hex[:12]}",
                 revision=next_revision,
-                system_state=SystemRiskState.NORMAL.value,
+                system_state=domain.SystemRiskState.NORMAL.value,
                 max_total_risk=policy.max_total_risk,
                 max_account_risk=policy.max_account_risk,
                 max_single_loss=policy.max_single_loss,
@@ -1427,24 +1481,24 @@ class RecoveryRiskService(ServiceComponent):
             session.add(restored)
             session.flush()
             pending_requests = session.scalars(
-                select(RiskControlChangeRequest)
+                select(models.RiskControlChangeRequest)
                 .where(
-                    RiskControlChangeRequest.team_id == team.team_id,
-                    RiskControlChangeRequest.status.in_(
+                    models.RiskControlChangeRequest.team_id == team.team_id,
+                    models.RiskControlChangeRequest.status.in_(
                         {
-                            RiskPolicyChangeStatus.PENDING_REVIEW.value,
-                            RiskPolicyChangeStatus.APPROVED.value,
+                            domain.RiskPolicyChangeStatus.PENDING_REVIEW.value,
+                            domain.RiskPolicyChangeStatus.APPROVED.value,
                         }
                     ),
                 )
                 .with_for_update()
             ).all()
             for pending_request in pending_requests:
-                pending_request.status = RiskPolicyChangeStatus.EXPIRED.value
+                pending_request.status = domain.RiskPolicyChangeStatus.EXPIRED.value
                 pending_request.version += 1
                 pending_request.resulting_policy_id = restored.policy_id
                 pending_request.updated_at = now
-                self.transactions._audit(
+                self.transactions.audit(
                     session,
                     actor_id=str(actor_id),
                     event_type="RISK_RESTORE_SUPERSEDED",
@@ -1457,12 +1511,12 @@ class RecoveryRiskService(ServiceComponent):
                     now=now,
                 )
             authorizations = session.scalars(
-                select(TradingAuthorization)
+                select(models.TradingAuthorization)
                 .where(
-                    TradingAuthorization.team_id == team.team_id,
-                    TradingAuthorization.active,
+                    models.TradingAuthorization.team_id == team.team_id,
+                    models.TradingAuthorization.active,
                 )
-                .order_by(TradingAuthorization.authorization_id)
+                .order_by(models.TradingAuthorization.authorization_id)
                 .with_for_update()
             ).all()
             for authorization in authorizations:
@@ -1470,7 +1524,7 @@ class RecoveryRiskService(ServiceComponent):
                 if authorization.add_revoked_at is None:
                     authorization.add_revoked_at = now
             result = {"policy_id": str(restored.policy_id)}
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -1479,7 +1533,7 @@ class RecoveryRiskService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="RISK_RESTORE_DIRECT_EXECUTED",

@@ -41,8 +41,8 @@ from trading_control_plane.models import (
 )
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
+from trading_control_plane.runtime_contracts import ConnectionProbeResult
 from trading_control_plane.service import TradingService
-from trading_control_plane.service_core import ConnectionProbeResult
 
 NOW = datetime.now(UTC).replace(microsecond=0)
 

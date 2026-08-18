@@ -13,7 +13,7 @@ from typing import Any, Literal, Protocol, cast
 from uuid import uuid4
 
 from trading_control_plane.domain import DomainRejected
-from trading_control_plane.service_core import ConnectionProbeResult
+from trading_control_plane.runtime_contracts import ConnectionProbeResult
 
 logger = logging.getLogger(__name__)
 
@@ -1302,9 +1302,7 @@ class FactAdapterRegistry:
         balances = snapshot.balances
         marks = snapshot.marks
         adapter_metrics = getattr(state.adapter, "_metrics", None)
-        mutable_metrics = (
-            adapter_metrics if isinstance(adapter_metrics, _MutableMetrics) else None
-        )
+        mutable_metrics = adapter_metrics if isinstance(adapter_metrics, _MutableMetrics) else None
         if kind == "POSITION":
             positions = self._merge_rows(
                 positions,
@@ -1358,9 +1356,7 @@ class FactAdapterRegistry:
             funding=snapshot.funding,
             account_status=snapshot.account_status,
             unknown_fields=snapshot.unknown_fields,
-            metrics=(
-                snapshot.metrics if mutable_metrics is None else mutable_metrics.freeze()
-            ),
+            metrics=(snapshot.metrics if mutable_metrics is None else mutable_metrics.freeze()),
         )
 
     async def publish(
