@@ -1,11 +1,73 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from trading_control_plane import domain, models, rejections
+from trading_control_plane import execution_scope as scope_rules
 from trading_control_plane.repositories.execution import find_position_for_scope
 from trading_control_plane.service_component import ServiceComponent
+from trading_control_plane.service_domains.notifications import enqueue_campaign_status_notification
+from trading_control_plane.service_domains.risk_policy import active_risk_policy
 
-# The domain implementation intentionally consumes the explicit service_core export surface.
-# ruff: noqa: F403, F405
-from trading_control_plane.service_core import *
+
+def update_campaign_pnl(
+    session: Session,
+    campaign: models.Campaign,
+    position: models.Position,
+    *,
+    now: datetime,
+    fills: Sequence[models.VenueFill] | None = None,
+) -> domain.PnlBreakdown:
+    campaign_fills = (
+        fills
+        if fills is not None
+        else list(
+            session.scalars(
+                select(models.VenueFill)
+                .where(models.VenueFill.campaign_id == campaign.campaign_id)
+                .order_by(models.VenueFill.executed_at, models.VenueFill.venue_fill_fact_id)
+            ).all()
+        )
+    )
+    instrument = session.get(models.Instrument, campaign.instrument_id)
+    if instrument is None:
+        rejections.reject("INSTRUMENT_UNAVAILABLE", "campaign instrument is missing")
+    payments = session.scalars(
+        select(models.FundingPayment).where(
+            models.FundingPayment.campaign_id == campaign.campaign_id
+        )
+    ).all()
+    if any(fill.fee_currency != instrument.collateral_currency for fill in campaign_fills) or any(
+        payment.currency != instrument.collateral_currency for payment in payments
+    ):
+        rejections.reject("PNL_CURRENCY_MISMATCH", "PnL requires an explicit FX conversion")
+    funding = sum((payment.amount for payment in payments), Decimal(0))
+    result = domain.compute_pnl(
+        fills=tuple(
+            domain.EconomicFill(
+                fill.side,
+                fill.quantity,
+                fill.price,
+                fill.fee,
+                fill.slippage_cost,
+            )
+            for fill in campaign_fills
+        ),
+        mark_price=position.mark_price,
+        funding=funding,
+    )
+    campaign.realized_pnl = result.realized_pnl
+    campaign.unrealized_pnl = result.unrealized_pnl
+    campaign.final_pnl = result.total_pnl
+    campaign.updated_at = now
+    return result
 
 
 class CampaignExecutionService(ServiceComponent):
@@ -13,16 +75,16 @@ class CampaignExecutionService(ServiceComponent):
         self,
         campaign_id: UUID,
         actor_id: UUID,
-        candidates: tuple[TargetCandidate, ...],
+        candidates: tuple[domain.TargetCandidate, ...],
         *,
         now: datetime,
-    ) -> TargetDecision:
-        decision = select_target_position(candidates)
+    ) -> domain.TargetDecision:
+        decision = domain.select_target_position(candidates)
         with self.database.session_factory.begin() as session:
-            campaign = session.get(Campaign, campaign_id, with_for_update=True)
+            campaign = session.get(models.Campaign, campaign_id, with_for_update=True)
             if campaign is None:
-                _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
-            self.transactions._require_role(
+                rejections.reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "order.prepare",
@@ -31,33 +93,35 @@ class CampaignExecutionService(ServiceComponent):
                 team_id=campaign.team_id,
             )
             policy = session.scalar(
-                select(RiskPolicy).where(
-                    RiskPolicy.team_id == campaign.team_id,
-                    RiskPolicy.active,
+                select(models.RiskPolicy).where(
+                    models.RiskPolicy.team_id == campaign.team_id,
+                    models.RiskPolicy.active,
                 )
             )
             if policy is None:
-                _reject("RISK_POLICY_MISSING", "target update requires an active policy")
+                rejections.reject("RISK_POLICY_MISSING", "target update requires an active policy")
             position = find_position_for_scope(session, campaign, for_update=True)
-            if position is None or position.fact_status != FactStatus.KNOWN.value:
-                _reject("POSITION_UNKNOWN", "target update requires a known position")
+            if position is None or position.fact_status != domain.FactStatus.KNOWN.value:
+                rejections.reject("POSITION_UNKNOWN", "target update requires a known position")
             if now - position.observed_at > timedelta(seconds=policy.max_fact_age_seconds):
-                _reject("STALE_FACTS", "target update requires a fresh position")
+                rejections.reject("STALE_FACTS", "target update requires a fresh position")
             if decision.target_quantity > abs(position.quantity):
-                _reject("TARGET_EXCEEDS_POSITION", "target cannot exceed the current position")
+                rejections.reject(
+                    "TARGET_EXCEEDS_POSITION", "target cannot exceed the current position"
+                )
             campaign.current_target_quantity = decision.target_quantity
             campaign.target_version += 1
             campaign.target_reason = ",".join(decision.reasons)
             campaign.target_urgency = decision.urgency.value
             campaign.target_calculated_at = now
             if decision.target_quantity == 0:
-                campaign.status = CampaignStatus.CLOSING.value
+                campaign.status = domain.CampaignStatus.CLOSING.value
             elif decision.target_quantity < abs(position.quantity):
-                campaign.status = CampaignStatus.REDUCING.value
+                campaign.status = domain.CampaignStatus.REDUCING.value
             else:
-                campaign.status = CampaignStatus.OPEN.value
+                campaign.status = domain.CampaignStatus.OPEN.value
             campaign.updated_at = now
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="CAMPAIGN_TARGET_UPDATED",
@@ -76,17 +140,17 @@ class CampaignExecutionService(ServiceComponent):
         actor_id: UUID,
         idempotency_key: str,
         *,
-        candidates: tuple[TargetCandidate, ...] | None = None,
+        candidates: tuple[domain.TargetCandidate, ...] | None = None,
         expected_target_version: int | None = None,
         limit_price: Decimal | None = None,
         now: datetime,
     ) -> UUID:
         operation = "order.reduce"
         with self.database.session_factory.begin() as session:
-            campaign = session.get(Campaign, campaign_id, with_for_update=True)
+            campaign = session.get(models.Campaign, campaign_id, with_for_update=True)
             if campaign is None:
-                _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
-            self.transactions._require_role(
+                rejections.reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "order.prepare",
@@ -95,21 +159,23 @@ class CampaignExecutionService(ServiceComponent):
                 team_id=campaign.team_id,
             )
             position = find_position_for_scope(session, campaign)
-            if position is None or position.fact_status != FactStatus.KNOWN.value:
-                _reject("POSITION_UNKNOWN", "reduction requires current known position")
+            if position is None or position.fact_status != domain.FactStatus.KNOWN.value:
+                rejections.reject("POSITION_UNKNOWN", "reduction requires current known position")
             policy = session.scalar(
-                select(RiskPolicy).where(
-                    RiskPolicy.team_id == campaign.team_id,
-                    RiskPolicy.active,
+                select(models.RiskPolicy).where(
+                    models.RiskPolicy.team_id == campaign.team_id,
+                    models.RiskPolicy.active,
                 )
             )
             if policy is None:
-                _reject("RISK_POLICY_MISSING", "reduction requires an active policy")
+                rejections.reject("RISK_POLICY_MISSING", "reduction requires an active policy")
             if now - position.observed_at > timedelta(seconds=policy.max_fact_age_seconds):
-                _reject("STALE_FACTS", "reduction requires a fresh position")
-            expected_long = campaign.direction == Direction.LONG.value
+                rejections.reject("STALE_FACTS", "reduction requires a fresh position")
+            expected_long = campaign.direction == domain.Direction.LONG.value
             if position.quantity == 0 or (position.quantity > 0) != expected_long:
-                _reject("POSITION_DIRECTION_MISMATCH", "position does not match campaign direction")
+                rejections.reject(
+                    "POSITION_DIRECTION_MISMATCH", "position does not match campaign direction"
+                )
             if candidates is None:
                 payload = {
                     "campaign_id": str(campaign_id),
@@ -134,8 +200,10 @@ class CampaignExecutionService(ServiceComponent):
                     "expected_target_version": expected_target_version,
                 }
             if limit_price is not None and (not limit_price.is_finite() or limit_price <= 0):
-                _reject("ORDER_LIMIT_PRICE_INVALID", "explicit reduction limit must be positive")
-            digest, response = self.transactions._idempotency(
+                rejections.reject(
+                    "ORDER_LIMIT_PRICE_INVALID", "explicit reduction limit must be positive"
+                )
+            digest, response = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{campaign.team_id}",
                 operation=operation,
@@ -143,56 +211,64 @@ class CampaignExecutionService(ServiceComponent):
                 payload={**payload, "team_id": str(campaign.team_id)},
             )
             if response is not None:
-                return _as_uuid(str(response["intent_id"]))
+                return UUID(str(response["intent_id"]))
             if (
                 expected_target_version is not None
                 and campaign.target_version != expected_target_version
             ):
-                _reject("VERSION_CONFLICT", "Campaign target changed before the action")
+                rejections.reject("VERSION_CONFLICT", "Campaign target changed before the action")
             active = session.scalar(
-                select(OrderIntent.intent_id).where(
-                    OrderIntent.campaign_id == campaign_id,
-                    OrderIntent.status.in_(ACTIVE_INTENT_STATUSES),
+                select(models.OrderIntent.intent_id).where(
+                    models.OrderIntent.campaign_id == campaign_id,
+                    models.OrderIntent.status.in_(scope_rules.ACTIVE_INTENT_STATUSES),
                 )
             )
             if active is not None:
-                _reject("ACTIVE_ORDER_INTENT", "campaign already has unresolved intent")
+                rejections.reject("ACTIVE_ORDER_INTENT", "campaign already has unresolved intent")
             if candidates is not None:
                 effective_candidates = candidates
                 if campaign.target_calculated_at is not None:
                     try:
-                        existing_urgency = TargetUrgency(
-                            campaign.target_urgency or TargetUrgency.NORMAL.value
+                        existing_urgency = domain.TargetUrgency(
+                            campaign.target_urgency or domain.TargetUrgency.NORMAL.value
                         )
                     except ValueError:
-                        _reject("CAMPAIGN_TARGET_INVALID", "stored target urgency is invalid")
+                        rejections.reject(
+                            "CAMPAIGN_TARGET_INVALID", "stored target urgency is invalid"
+                        )
                     effective_candidates += (
-                        TargetCandidate(
+                        domain.TargetCandidate(
                             campaign.current_target_quantity,
                             existing_urgency,
                             campaign.target_reason or "existing campaign target",
                         ),
                     )
-                decision = select_target_position(effective_candidates)
+                decision = domain.select_target_position(effective_candidates)
                 if decision.target_quantity > abs(position.quantity):
-                    _reject("TARGET_EXCEEDS_POSITION", "target cannot exceed the current position")
+                    rejections.reject(
+                        "TARGET_EXCEEDS_POSITION", "target cannot exceed the current position"
+                    )
                 campaign.current_target_quantity = decision.target_quantity
                 campaign.target_version += 1
                 campaign.target_reason = ",".join(decision.reasons)
                 campaign.target_urgency = decision.urgency.value
                 campaign.target_calculated_at = now
                 campaign.status = (
-                    CampaignStatus.CLOSING.value
+                    domain.CampaignStatus.CLOSING.value
                     if decision.target_quantity == 0
-                    else CampaignStatus.REDUCING.value
+                    else domain.CampaignStatus.REDUCING.value
                 )
                 campaign.updated_at = now
             reduction_quantity = abs(position.quantity) - campaign.current_target_quantity
             if reduction_quantity <= 0:
-                _reject("TARGET_NOT_REDUCING", "target does not reduce current position")
+                rejections.reject("TARGET_NOT_REDUCING", "target does not reduce current position")
             side = "SELL" if position.quantity > 0 else "BUY"
-            kind = IntentKind.EXIT if campaign.current_target_quantity == 0 else IntentKind.REDUCE
-            intent = OrderIntent(
+            kind = (
+                domain.IntentKind.EXIT
+                if campaign.current_target_quantity == 0
+                else domain.IntentKind.REDUCE
+            )
+            intent = models.OrderIntent(
                 campaign_id=campaign_id,
                 authorization_id=campaign.authorization_id,
                 reservation_id=None,
@@ -207,7 +283,7 @@ class CampaignExecutionService(ServiceComponent):
                 target_version=campaign.target_version,
                 position_id=position.position_id,
                 position_observed_at=position.observed_at,
-                status=OrderIntentStatus.READY.value,
+                status=domain.OrderIntentStatus.READY.value,
                 semantic_hash=digest,
                 actor_id=str(actor_id),
                 correlation_id=uuid4(),
@@ -218,7 +294,7 @@ class CampaignExecutionService(ServiceComponent):
             session.add(intent)
             session.flush()
             result = {"intent_id": str(intent.intent_id)}
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=f"{actor_id}:{campaign.team_id}",
                 operation=operation,
@@ -227,7 +303,7 @@ class CampaignExecutionService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="REDUCTION_INTENT_PREPARED",
@@ -256,10 +332,10 @@ class CampaignExecutionService(ServiceComponent):
             "limit_price": None if limit_price is None else str(limit_price),
         }
         with self.database.session_factory.begin() as session:
-            campaign = session.get(Campaign, campaign_id, with_for_update=True)
+            campaign = session.get(models.Campaign, campaign_id, with_for_update=True)
             if campaign is None:
-                _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
-            self.transactions._require_role(
+                rejections.reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "risk.tighten",
@@ -267,7 +343,7 @@ class CampaignExecutionService(ServiceComponent):
                 campaign.venue,
                 team_id=campaign.team_id,
             )
-            digest, response = self.transactions._idempotency(
+            digest, response = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{campaign.team_id}",
                 operation=operation,
@@ -278,26 +354,32 @@ class CampaignExecutionService(ServiceComponent):
                 intent_value = response.get("intent_id")
                 return (
                     str(response["reason"]),
-                    None if intent_value is None else _as_uuid(str(intent_value)),
+                    None if intent_value is None else UUID(str(intent_value)),
                 )
             if limit_price is not None and (not limit_price.is_finite() or limit_price <= 0):
-                _reject("ORDER_LIMIT_PRICE_INVALID", "explicit exit limit must be positive")
-            proposal = session.get(Proposal, campaign.proposal_id)
+                rejections.reject(
+                    "ORDER_LIMIT_PRICE_INVALID", "explicit exit limit must be positive"
+                )
+            proposal = session.get(models.Proposal, campaign.proposal_id)
             position = find_position_for_scope(session, campaign, for_update=True)
-            policy = self._active_risk_policy(session, campaign.team_id)
+            policy = active_risk_policy(session, campaign.team_id)
             if proposal is None or policy is None:
-                _reject("CAMPAIGN_MANAGEMENT_INVALID", "campaign management facts are incomplete")
-            if position is None or position.fact_status != FactStatus.KNOWN.value:
-                _reject("POSITION_UNKNOWN", "automatic exit requires a known current position")
-            if self._fact_is_stale(
+                rejections.reject(
+                    "CAMPAIGN_MANAGEMENT_INVALID", "campaign management facts are incomplete"
+                )
+            if position is None or position.fact_status != domain.FactStatus.KNOWN.value:
+                rejections.reject(
+                    "POSITION_UNKNOWN", "automatic exit requires a known current position"
+                )
+            if scope_rules.fact_is_stale(
                 position.observed_at,
                 now,
                 timedelta(seconds=policy.max_fact_age_seconds),
             ):
-                _reject("STALE_FACTS", "automatic exit requires a fresh position")
+                rejections.reject("STALE_FACTS", "automatic exit requires a fresh position")
             if position.quantity == 0:
                 result: dict[str, Any] = {"reason": "POSITION_FLAT", "intent_id": None}
-                self.transactions._save_receipt(
+                self.transactions.save_receipt(
                     session,
                     caller_id=f"{actor_id}:{campaign.team_id}",
                     operation=operation,
@@ -309,31 +391,31 @@ class CampaignExecutionService(ServiceComponent):
                 return "POSITION_FLAT", None
             details = proposal.frozen_payload.get("details")
             if not isinstance(details, dict) or details.get("invalidation_price") is None:
-                _reject(
+                rejections.reject(
                     "PROPOSAL_EXIT_CONTRACT_INVALID",
                     "frozen proposal lacks an invalidation price",
                 )
             try:
                 invalidation = Decimal(str(details["invalidation_price"]))
             except (ArithmeticError, TypeError, ValueError):
-                _reject(
+                rejections.reject(
                     "PROPOSAL_EXIT_CONTRACT_INVALID",
                     "frozen invalidation price is invalid",
                 )
             if not invalidation.is_finite() or invalidation <= 0:
-                _reject(
+                rejections.reject(
                     "PROPOSAL_EXIT_CONTRACT_INVALID",
                     "frozen invalidation price is invalid",
                 )
-            kill_switch = policy.system_state == SystemRiskState.KILL_SWITCH.value
+            kill_switch = policy.system_state == domain.SystemRiskState.KILL_SWITCH.value
             invalidated = (
                 position.mark_price <= invalidation
-                if campaign.direction == Direction.LONG.value
+                if campaign.direction == domain.Direction.LONG.value
                 else position.mark_price >= invalidation
             )
             if not kill_switch and not invalidated:
                 result = {"reason": "EXIT_TRIGGER_NOT_MET", "intent_id": None}
-                self.transactions._save_receipt(
+                self.transactions.save_receipt(
                     session,
                     caller_id=f"{actor_id}:{campaign.team_id}",
                     operation=operation,
@@ -345,27 +427,27 @@ class CampaignExecutionService(ServiceComponent):
                 return "EXIT_TRIGGER_NOT_MET", None
             reason = "KILL_SWITCH" if kill_switch else "FROZEN_INVALIDATION_REACHED"
             active = session.scalar(
-                select(OrderIntent.intent_id).where(
-                    OrderIntent.campaign_id == campaign_id,
-                    OrderIntent.status.in_(ACTIVE_INTENT_STATUSES),
+                select(models.OrderIntent.intent_id).where(
+                    models.OrderIntent.campaign_id == campaign_id,
+                    models.OrderIntent.status.in_(scope_rules.ACTIVE_INTENT_STATUSES),
                 )
             )
             if active is not None:
-                _reject("ACTIVE_ORDER_INTENT", "campaign already has unresolved intent")
+                rejections.reject("ACTIVE_ORDER_INTENT", "campaign already has unresolved intent")
             existing_reason = () if campaign.target_reason is None else (campaign.target_reason,)
             target_reasons = tuple(sorted({*existing_reason, reason}))
             campaign.current_target_quantity = Decimal(0)
             campaign.target_version += 1
             campaign.target_reason = ",".join(target_reasons)
-            campaign.target_urgency = TargetUrgency.IMMEDIATE.value
+            campaign.target_urgency = domain.TargetUrgency.IMMEDIATE.value
             campaign.target_calculated_at = now
-            campaign.status = CampaignStatus.CLOSING.value
+            campaign.status = domain.CampaignStatus.CLOSING.value
             campaign.updated_at = now
-            intent = OrderIntent(
+            intent = models.OrderIntent(
                 campaign_id=campaign_id,
                 authorization_id=campaign.authorization_id,
                 reservation_id=None,
-                kind=IntentKind.EXIT.value,
+                kind=domain.IntentKind.EXIT.value,
                 side="SELL" if position.quantity > 0 else "BUY",
                 quantity=abs(position.quantity),
                 limit_price=limit_price,
@@ -376,7 +458,7 @@ class CampaignExecutionService(ServiceComponent):
                 target_version=campaign.target_version,
                 position_id=position.position_id,
                 position_observed_at=position.observed_at,
-                status=OrderIntentStatus.READY.value,
+                status=domain.OrderIntentStatus.READY.value,
                 semantic_hash=digest,
                 actor_id=str(actor_id),
                 correlation_id=uuid4(),
@@ -387,7 +469,7 @@ class CampaignExecutionService(ServiceComponent):
             session.add(intent)
             session.flush()
             result = {"reason": reason, "intent_id": str(intent.intent_id)}
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=f"{actor_id}:{campaign.team_id}",
                 operation=operation,
@@ -396,7 +478,7 @@ class CampaignExecutionService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="AUTOMATIC_EXIT_PREPARED",
@@ -412,10 +494,10 @@ class CampaignExecutionService(ServiceComponent):
 
     def close_campaign(self, campaign_id: UUID, actor_id: UUID, *, now: datetime) -> None:
         with self.database.session_factory.begin() as session:
-            campaign = session.get(Campaign, campaign_id, with_for_update=True)
+            campaign = session.get(models.Campaign, campaign_id, with_for_update=True)
             if campaign is None:
-                _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
-            self.transactions._require_role(
+                rejections.reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "order.prepare",
@@ -423,89 +505,95 @@ class CampaignExecutionService(ServiceComponent):
                 campaign.venue,
                 team_id=campaign.team_id,
             )
-            if campaign.status == CampaignStatus.CLOSED.value:
+            if campaign.status == domain.CampaignStatus.CLOSED.value:
                 return
             policy = session.scalar(
-                select(RiskPolicy).where(
-                    RiskPolicy.team_id == campaign.team_id,
-                    RiskPolicy.active,
+                select(models.RiskPolicy).where(
+                    models.RiskPolicy.team_id == campaign.team_id,
+                    models.RiskPolicy.active,
                 )
             )
             position = find_position_for_scope(session, campaign, for_update=True)
             if (
                 policy is None
                 or position is None
-                or position.fact_status != FactStatus.KNOWN.value
+                or position.fact_status != domain.FactStatus.KNOWN.value
                 or position.quantity != 0
-                or self._fact_is_stale(
+                or scope_rules.fact_is_stale(
                     position.observed_at,
                     now,
                     timedelta(seconds=policy.max_fact_age_seconds),
                 )
             ):
-                _reject("CAMPAIGN_POSITION_NOT_CLOSED", "campaign requires a fresh flat position")
-            exit_intent = session.scalar(
-                select(OrderIntent)
-                .where(
-                    OrderIntent.campaign_id == campaign_id,
-                    OrderIntent.kind == IntentKind.EXIT.value,
+                rejections.reject(
+                    "CAMPAIGN_POSITION_NOT_CLOSED", "campaign requires a fresh flat position"
                 )
-                .order_by(OrderIntent.created_at.desc())
+            exit_intent = session.scalar(
+                select(models.OrderIntent)
+                .where(
+                    models.OrderIntent.campaign_id == campaign_id,
+                    models.OrderIntent.kind == domain.IntentKind.EXIT.value,
+                )
+                .order_by(models.OrderIntent.created_at.desc())
                 .limit(1)
                 .with_for_update()
             )
             terminal_statuses = {
-                OrderIntentStatus.FILLED.value,
-                OrderIntentStatus.CANCELLED.value,
-                OrderIntentStatus.REJECTED.value,
+                domain.OrderIntentStatus.FILLED.value,
+                domain.OrderIntentStatus.CANCELLED.value,
+                domain.OrderIntentStatus.REJECTED.value,
             }
             if exit_intent is None or exit_intent.status not in terminal_statuses:
-                _reject("CAMPAIGN_EXIT_NOT_TERMINAL", "campaign exit is not terminal")
-            scope = _scope_key(campaign.environment, campaign.account_id, campaign.venue)
+                rejections.reject("CAMPAIGN_EXIT_NOT_TERMINAL", "campaign exit is not terminal")
+            scope = scope_rules.scope_key(campaign.environment, campaign.account_id, campaign.venue)
             latest = session.scalar(
-                select(ReconciliationRun)
+                select(models.ReconciliationRun)
                 .where(
-                    ReconciliationRun.team_id == campaign.team_id,
-                    ReconciliationRun.execution_scope == scope,
+                    models.ReconciliationRun.team_id == campaign.team_id,
+                    models.ReconciliationRun.execution_scope == scope,
                 )
-                .order_by(ReconciliationRun.completed_at.desc())
+                .order_by(models.ReconciliationRun.completed_at.desc())
                 .limit(1)
             )
             if (
                 latest is None
-                or latest.status != ReconciliationStatus.MATCH.value
+                or latest.status != domain.ReconciliationStatus.MATCH.value
                 or not latest.is_computed
                 or latest.completed_at < position.observed_at
                 or latest.completed_at < exit_intent.updated_at
             ):
-                _reject("RECONCILIATION_REQUIRED", "campaign closure requires a current MATCH")
+                rejections.reject(
+                    "RECONCILIATION_REQUIRED", "campaign closure requires a current MATCH"
+                )
             reservations = session.scalars(
-                select(RiskReservation)
-                .where(RiskReservation.campaign_id == campaign_id)
+                select(models.RiskReservation)
+                .where(models.RiskReservation.campaign_id == campaign_id)
                 .with_for_update()
             ).all()
             if any(
                 reservation.status
-                in {ReservationStatus.UNKNOWN.value, ReservationStatus.RESERVED.value}
+                in {domain.ReservationStatus.UNKNOWN.value, domain.ReservationStatus.RESERVED.value}
                 for reservation in reservations
             ):
-                _reject("RISK_RESERVATION_UNRESOLVED", "campaign risk is not confirmed closed")
-            self._update_campaign_pnl(session, campaign, position, now=now)
+                rejections.reject(
+                    "RISK_RESERVATION_UNRESOLVED", "campaign risk is not confirmed closed"
+                )
+            update_campaign_pnl(session, campaign, position, now=now)
             for reservation in reservations:
-                if reservation.status == ReservationStatus.OPEN.value:
-                    reservation.status = ReservationStatus.RELEASED.value
+                if reservation.status == domain.ReservationStatus.OPEN.value:
+                    reservation.status = domain.ReservationStatus.RELEASED.value
                     reservation.version += 1
                     reservation.updated_at = now
             authorization = session.get(
-                TradingAuthorization, campaign.authorization_id, with_for_update=True
+                models.TradingAuthorization, campaign.authorization_id, with_for_update=True
             )
             if authorization is not None:
                 authorization.active = False
-            campaign.status = CampaignStatus.CLOSED.value
+            campaign.status = domain.CampaignStatus.CLOSED.value
             campaign.current_target_quantity = Decimal(0)
             campaign.updated_at = now
             correlation_id = uuid4()
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="CAMPAIGN_CLOSED",
@@ -516,7 +604,8 @@ class CampaignExecutionService(ServiceComponent):
                 object_version=campaign.target_version,
                 now=now,
             )
-            self.transactions._enqueue_campaign_status_notification(
+            enqueue_campaign_status_notification(
+                self.transactions,
                 session,
                 actor_id=str(actor_id),
                 campaign=campaign,
@@ -528,12 +617,12 @@ class CampaignExecutionService(ServiceComponent):
 
     def refresh_campaign_pnl(
         self, campaign_id: UUID, actor_id: UUID, *, now: datetime
-    ) -> PnlBreakdown:
+    ) -> domain.PnlBreakdown:
         with self.database.session_factory.begin() as session:
-            campaign = session.get(Campaign, campaign_id, with_for_update=True)
+            campaign = session.get(models.Campaign, campaign_id, with_for_update=True)
             if campaign is None:
-                _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
-            self.transactions._require_role(
+                rejections.reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "view",
@@ -542,14 +631,14 @@ class CampaignExecutionService(ServiceComponent):
                 team_id=campaign.team_id,
             )
             fills = session.scalars(
-                select(VenueFill)
-                .where(VenueFill.campaign_id == campaign_id)
-                .order_by(VenueFill.executed_at, VenueFill.venue_fill_fact_id)
+                select(models.VenueFill)
+                .where(models.VenueFill.campaign_id == campaign_id)
+                .order_by(models.VenueFill.executed_at, models.VenueFill.venue_fill_fact_id)
             ).all()
             position = find_position_for_scope(session, campaign)
-            if position is None or position.fact_status != FactStatus.KNOWN.value:
-                _reject("POSITION_UNKNOWN", "PnL requires known current position")
-            result = self._update_campaign_pnl(
+            if position is None or position.fact_status != domain.FactStatus.KNOWN.value:
+                rejections.reject("POSITION_UNKNOWN", "PnL requires known current position")
+            result = update_campaign_pnl(
                 session,
                 campaign,
                 position,
@@ -557,54 +646,3 @@ class CampaignExecutionService(ServiceComponent):
                 now=now,
             )
             return result
-
-    def _update_campaign_pnl(
-        self,
-        session: Session,
-        campaign: Campaign,
-        position: Position,
-        *,
-        now: datetime,
-        fills: Sequence[VenueFill] | None = None,
-    ) -> PnlBreakdown:
-        campaign_fills = (
-            fills
-            if fills is not None
-            else list(
-                session.scalars(
-                    select(VenueFill)
-                    .where(VenueFill.campaign_id == campaign.campaign_id)
-                    .order_by(VenueFill.executed_at, VenueFill.venue_fill_fact_id)
-                ).all()
-            )
-        )
-        instrument = session.get(Instrument, campaign.instrument_id)
-        if instrument is None:
-            _reject("INSTRUMENT_UNAVAILABLE", "campaign instrument is missing")
-        payments = session.scalars(
-            select(FundingPayment).where(FundingPayment.campaign_id == campaign.campaign_id)
-        ).all()
-        if any(
-            fill.fee_currency != instrument.collateral_currency for fill in campaign_fills
-        ) or any(payment.currency != instrument.collateral_currency for payment in payments):
-            _reject("PNL_CURRENCY_MISMATCH", "PnL requires an explicit FX conversion")
-        funding = sum((payment.amount for payment in payments), Decimal(0))
-        result = compute_pnl(
-            fills=tuple(
-                EconomicFill(
-                    fill.side,
-                    fill.quantity,
-                    fill.price,
-                    fill.fee,
-                    fill.slippage_cost,
-                )
-                for fill in campaign_fills
-            ),
-            mark_price=position.mark_price,
-            funding=funding,
-        )
-        campaign.realized_pnl = result.realized_pnl
-        campaign.unrealized_pnl = result.unrealized_pnl
-        campaign.final_pnl = result.total_pnl
-        campaign.updated_at = now
-        return result

@@ -42,11 +42,11 @@ from trading_control_plane.models import (
 )
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
-from trading_control_plane.service import TradingService
-from trading_control_plane.service_core import (
+from trading_control_plane.runtime_contracts import (
     ConnectionProbeResult,
     PreparedFreqtradeWorkerBinding,
 )
+from trading_control_plane.service import TradingService
 from trading_control_plane.service_domains.execution_facts import release_zero_fill_in_session
 
 

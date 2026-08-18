@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from trading_control_plane.service_component import ServiceComponent
+from datetime import datetime
+from uuid import UUID, uuid4
 
-# ruff: noqa: F403, F405
-from trading_control_plane.service_core import *
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from trading_control_plane import credentials, domain, models, rejections
+from trading_control_plane import execution_scope as scope_rules
+from trading_control_plane.service_component import ServiceComponent
 
 
 def exchange_account_definition(
@@ -20,15 +25,36 @@ def exchange_account_definition(
         or len(normalized_account_id) > 120
         or ":" in normalized_account_id
     ):
-        _reject(
+        rejections.reject(
             "EXCHANGE_ACCOUNT_INVALID",
             "account ID must be exact, non-empty, at most 120 characters, and contain no colon",
         )
-    if normalized_venue not in SUPPORTED_EXCHANGE_VENUES:
-        _reject("EXCHANGE_VENUE_UNSUPPORTED", "exchange venue is unsupported")
+    if normalized_venue not in credentials.SUPPORTED_EXCHANGE_VENUES:
+        rejections.reject("EXCHANGE_VENUE_UNSUPPORTED", "exchange venue is unsupported")
     if not normalized_label or len(normalized_label) > 120:
-        _reject("EXCHANGE_ACCOUNT_INVALID", "account label must contain 1-120 characters")
+        rejections.reject("EXCHANGE_ACCOUNT_INVALID", "account label must contain 1-120 characters")
     return normalized_account_id, normalized_venue, normalized_label
+
+
+def set_internal_principal_active(
+    session: Session,
+    principal_id: UUID | None,
+    active: bool,
+) -> None:
+    if principal_id is None:
+        return
+    principal = session.scalar(
+        select(models.User).where(models.User.user_id == principal_id).with_for_update()
+    )
+    if (
+        principal is None
+        or principal.principal_type != domain.PrincipalType.SERVICE.value
+        or principal.service_kind != domain.ServicePrincipalKind.INTERNAL.value
+    ):
+        return
+    if principal.active != active:
+        principal.active = active
+        principal.auth_version += 1
 
 
 def delete_exchange_account(
@@ -44,22 +70,22 @@ def delete_exchange_account(
     """Archive an account config while preserving immutable trading and audit history."""
 
     with self.database.session_factory.begin() as session:
-        _actor, workspace, team = self.transactions._active_scope(session, actor_id)
+        _actor, workspace, team = self.transactions.active_scope(session, actor_id)
         assert workspace is not None and team is not None
         account = session.scalar(
-            select(ExchangeAccount)
+            select(models.ExchangeAccount)
             .where(
-                ExchangeAccount.exchange_account_id == exchange_account_id,
-                ExchangeAccount.team_id == team.team_id,
+                models.ExchangeAccount.exchange_account_id == exchange_account_id,
+                models.ExchangeAccount.team_id == team.team_id,
             )
             .with_for_update()
         )
         if account is None:
-            _reject(
+            rejections.reject(
                 "EXCHANGE_ACCOUNT_NOT_FOUND",
                 "active exchange account is outside the active team or does not exist",
             )
-        self.transactions._require_role(
+        self.transactions.require_role(
             session,
             actor_id,
             "account.manage",
@@ -73,7 +99,7 @@ def delete_exchange_account(
             "confirmation": confirmation,
             "expected_version": expected_version,
         }
-        digest, replay = self.transactions._idempotency(
+        digest, replay = self.transactions.idempotency(
             session,
             caller_id=caller,
             operation="exchange-account.delete",
@@ -83,15 +109,15 @@ def delete_exchange_account(
         if replay is not None:
             return replay
         if not account.active:
-            _reject(
+            rejections.reject(
                 "EXCHANGE_ACCOUNT_NOT_FOUND",
                 "active exchange account is outside the active team or does not exist",
             )
         if account.version != expected_version:
-            _reject("VERSION_CONFLICT", "exchange account version changed")
+            rejections.reject("VERSION_CONFLICT", "exchange account version changed")
         expected_confirmation = f"DELETE:{account.environment}:{account.account_id}:{account.venue}"
         if confirmation != expected_confirmation:
-            _reject(
+            rejections.reject(
                 "SECOND_CONFIRMATION_REQUIRED",
                 f"confirmation must exactly equal {expected_confirmation}",
             )
@@ -110,77 +136,80 @@ def delete_exchange_account(
         add_blocker(
             "UNFINISHED_PROPOSALS",
             session.scalar(
-                select(func.count(Proposal.proposal_id)).where(
-                    Proposal.team_id == scope[0],
-                    Proposal.environment == scope[1],
-                    Proposal.account_id == scope[2],
-                    Proposal.venue == scope[3],
-                    Proposal.status.in_(("DRAFT", "PENDING_REVIEW", "APPROVED")),
+                select(func.count(models.Proposal.proposal_id)).where(
+                    models.Proposal.team_id == scope[0],
+                    models.Proposal.environment == scope[1],
+                    models.Proposal.account_id == scope[2],
+                    models.Proposal.venue == scope[3],
+                    models.Proposal.status.in_(("DRAFT", "PENDING_REVIEW", "APPROVED")),
                 )
             ),
         )
         add_blocker(
             "ACTIVE_TRADING_AUTHORIZATIONS",
             session.scalar(
-                select(func.count(TradingAuthorization.authorization_id)).where(
-                    TradingAuthorization.team_id == scope[0],
-                    TradingAuthorization.environment == scope[1],
-                    TradingAuthorization.account_id == scope[2],
-                    TradingAuthorization.venue == scope[3],
-                    TradingAuthorization.active,
+                select(func.count(models.TradingAuthorization.authorization_id)).where(
+                    models.TradingAuthorization.team_id == scope[0],
+                    models.TradingAuthorization.environment == scope[1],
+                    models.TradingAuthorization.account_id == scope[2],
+                    models.TradingAuthorization.venue == scope[3],
+                    models.TradingAuthorization.active,
                 )
             ),
         )
         add_blocker(
             "UNFINISHED_ORDER_INTENTS",
             session.scalar(
-                select(func.count(OrderIntent.intent_id))
-                .join(Campaign, Campaign.campaign_id == OrderIntent.campaign_id)
+                select(func.count(models.OrderIntent.intent_id))
+                .join(
+                    models.Campaign, models.Campaign.campaign_id == models.OrderIntent.campaign_id
+                )
                 .where(
-                    Campaign.team_id == scope[0],
-                    Campaign.environment == scope[1],
-                    Campaign.account_id == scope[2],
-                    Campaign.venue == scope[3],
-                    OrderIntent.status.in_(ACTIVE_INTENT_STATUSES),
+                    models.Campaign.team_id == scope[0],
+                    models.Campaign.environment == scope[1],
+                    models.Campaign.account_id == scope[2],
+                    models.Campaign.venue == scope[3],
+                    models.OrderIntent.status.in_(scope_rules.ACTIVE_INTENT_STATUSES),
                 )
             ),
         )
         add_blocker(
             "UNFINISHED_VENUE_ORDERS",
             session.scalar(
-                select(func.count(VenueOrder.venue_order_fact_id)).where(
-                    VenueOrder.team_id == scope[0],
-                    VenueOrder.environment == scope[1],
-                    VenueOrder.account_id == scope[2],
-                    VenueOrder.venue == scope[3],
-                    VenueOrder.status.in_(("SENT", "PARTIALLY_FILLED", "UNKNOWN")),
+                select(func.count(models.VenueOrder.venue_order_fact_id)).where(
+                    models.VenueOrder.team_id == scope[0],
+                    models.VenueOrder.environment == scope[1],
+                    models.VenueOrder.account_id == scope[2],
+                    models.VenueOrder.venue == scope[3],
+                    models.VenueOrder.status.in_(("SENT", "PARTIALLY_FILLED", "UNKNOWN")),
                 )
             ),
         )
         add_blocker(
             "OPEN_OR_UNKNOWN_POSITIONS",
             session.scalar(
-                select(func.count(Position.position_id)).where(
-                    Position.team_id == scope[0],
-                    Position.environment == scope[1],
-                    Position.account_id == scope[2],
-                    Position.venue == scope[3],
-                    (Position.quantity != 0) | (Position.fact_status == FactStatus.UNKNOWN.value),
+                select(func.count(models.Position.position_id)).where(
+                    models.Position.team_id == scope[0],
+                    models.Position.environment == scope[1],
+                    models.Position.account_id == scope[2],
+                    models.Position.venue == scope[3],
+                    (models.Position.quantity != 0)
+                    | (models.Position.fact_status == domain.FactStatus.UNKNOWN.value),
                 )
             ),
         )
         add_blocker(
             "RUNNING_CAPITAL_TRANSFERS",
             session.scalar(
-                select(func.count(CapitalTransfer.capital_transfer_id)).where(
-                    CapitalTransfer.team_id == scope[0],
-                    CapitalTransfer.environment == scope[1],
-                    CapitalTransfer.account_id == scope[2],
-                    CapitalTransfer.venue == scope[3],
-                    CapitalTransfer.status.not_in(
+                select(func.count(models.CapitalTransfer.capital_transfer_id)).where(
+                    models.CapitalTransfer.team_id == scope[0],
+                    models.CapitalTransfer.environment == scope[1],
+                    models.CapitalTransfer.account_id == scope[2],
+                    models.CapitalTransfer.venue == scope[3],
+                    models.CapitalTransfer.status.not_in(
                         {
-                            CapitalTransferStatus.SETTLED.value,
-                            CapitalTransferStatus.FAILED_SOURCE_RESTORED.value,
+                            domain.CapitalTransferStatus.SETTLED.value,
+                            domain.CapitalTransferStatus.FAILED_SOURCE_RESTORED.value,
                         }
                     ),
                 )
@@ -189,21 +218,21 @@ def delete_exchange_account(
         add_blocker(
             "RUNNING_DIRECT_CAPITAL_OPERATIONS",
             session.scalar(
-                select(func.count(DirectCapitalOperation.operation_id)).where(
-                    DirectCapitalOperation.team_id == scope[0],
-                    DirectCapitalOperation.environment == scope[1],
-                    DirectCapitalOperation.account_id == scope[2],
-                    DirectCapitalOperation.venue == scope[3],
-                    DirectCapitalOperation.status.not_in({"BLOCKED", "SETTLED"}),
+                select(func.count(models.DirectCapitalOperation.operation_id)).where(
+                    models.DirectCapitalOperation.team_id == scope[0],
+                    models.DirectCapitalOperation.environment == scope[1],
+                    models.DirectCapitalOperation.account_id == scope[2],
+                    models.DirectCapitalOperation.venue == scope[3],
+                    models.DirectCapitalOperation.status.not_in({"BLOCKED", "SETTLED"}),
                 )
             ),
         )
         if blockers:
-            _reject(
+            rejections.reject(
                 "EXCHANGE_ACCOUNT_DELETE_BLOCKED",
                 ";".join(f"{item['code']}={item['count']}" for item in blockers),
             )
-        self._set_internal_principal_active(
+        set_internal_principal_active(
             session,
             account.runtime_service_principal_id,
             False,
@@ -239,7 +268,7 @@ def delete_exchange_account(
             "status": "DELETED",
             "version": account.version,
         }
-        self.transactions._audit(
+        self.transactions.audit(
             session,
             actor_id=str(actor_id),
             event_type="EXCHANGE_ACCOUNT_DELETED",
@@ -257,7 +286,7 @@ def delete_exchange_account(
             account_id=account.account_id,
             now=now,
         )
-        self.transactions._save_receipt(
+        self.transactions.save_receipt(
             session,
             caller_id=caller,
             operation="exchange-account.delete",
@@ -281,21 +310,23 @@ def update_exchange_account(
 ) -> dict[str, str | int]:
     normalized_label = " ".join(label.strip().split())
     if not normalized_label or len(normalized_label) > 120:
-        _reject("EXCHANGE_ACCOUNT_INVALID", "account label must contain 1-120 characters")
+        rejections.reject("EXCHANGE_ACCOUNT_INVALID", "account label must contain 1-120 characters")
     with self.database.session_factory.begin() as session:
-        _actor, workspace, team = self.transactions._active_scope(session, actor_id)
+        _actor, workspace, team = self.transactions.active_scope(session, actor_id)
         assert workspace is not None and team is not None
         account = session.scalar(
-            select(ExchangeAccount)
+            select(models.ExchangeAccount)
             .where(
-                ExchangeAccount.exchange_account_id == exchange_account_id,
-                ExchangeAccount.team_id == team.team_id,
+                models.ExchangeAccount.exchange_account_id == exchange_account_id,
+                models.ExchangeAccount.team_id == team.team_id,
             )
             .with_for_update()
         )
         if account is None or not account.active:
-            _reject("EXCHANGE_ACCOUNT_NOT_FOUND", "active exchange account does not exist")
-        self.transactions._require_role(
+            rejections.reject(
+                "EXCHANGE_ACCOUNT_NOT_FOUND", "active exchange account does not exist"
+            )
+        self.transactions.require_role(
             session, actor_id, "account.manage", account.account_id, account.venue
         )
         caller = f"{actor_id}:{team.team_id}"
@@ -304,7 +335,7 @@ def update_exchange_account(
             "label": normalized_label,
             "expected_version": expected_version,
         }
-        digest, replay = self.transactions._idempotency(
+        digest, replay = self.transactions.idempotency(
             session,
             caller_id=caller,
             operation="exchange-account.update",
@@ -314,7 +345,7 @@ def update_exchange_account(
         if replay is not None:
             return replay
         if account.version != expected_version:
-            _reject("VERSION_CONFLICT", "exchange account version changed")
+            rejections.reject("VERSION_CONFLICT", "exchange account version changed")
         account.label = normalized_label
         account.version += 1
         account.updated_by = actor_id
@@ -323,7 +354,7 @@ def update_exchange_account(
             "exchange_account_id": str(exchange_account_id),
             "version": account.version,
         }
-        self.transactions._save_receipt(
+        self.transactions.save_receipt(
             session,
             caller_id=caller,
             operation="exchange-account.update",
@@ -332,7 +363,7 @@ def update_exchange_account(
             response=response,
             now=now,
         )
-        self.transactions._audit(
+        self.transactions.audit(
             session,
             actor_id=str(actor_id),
             event_type="EXCHANGE_ACCOUNT_UPDATED",
@@ -364,24 +395,24 @@ def set_exchange_account_state(
 ) -> dict[str, str | int | bool]:
     expected_confirmation = "ENABLE_ACCOUNT" if enabled else "DISABLE_ACCOUNT"
     if confirmation != expected_confirmation:
-        _reject(
+        rejections.reject(
             "SECOND_CONFIRMATION_REQUIRED",
             f"confirmation must exactly equal {expected_confirmation}",
         )
     with self.database.session_factory.begin() as session:
-        _actor, workspace, team = self.transactions._active_scope(session, actor_id)
+        _actor, workspace, team = self.transactions.active_scope(session, actor_id)
         assert workspace is not None and team is not None
         account = session.scalar(
-            select(ExchangeAccount)
+            select(models.ExchangeAccount)
             .where(
-                ExchangeAccount.exchange_account_id == exchange_account_id,
-                ExchangeAccount.team_id == team.team_id,
+                models.ExchangeAccount.exchange_account_id == exchange_account_id,
+                models.ExchangeAccount.team_id == team.team_id,
             )
             .with_for_update()
         )
         if account is None:
-            _reject("EXCHANGE_ACCOUNT_NOT_FOUND", "exchange account does not exist")
-        self.transactions._require_role(
+            rejections.reject("EXCHANGE_ACCOUNT_NOT_FOUND", "exchange account does not exist")
+        self.transactions.require_role(
             session, actor_id, "account.manage", account.account_id, account.venue
         )
         caller = f"{actor_id}:{team.team_id}"
@@ -391,7 +422,7 @@ def set_exchange_account_state(
             "confirmation": confirmation,
             "expected_version": expected_version,
         }
-        digest, replay = self.transactions._idempotency(
+        digest, replay = self.transactions.idempotency(
             session,
             caller_id=caller,
             operation="exchange-account.state",
@@ -401,13 +432,13 @@ def set_exchange_account_state(
         if replay is not None:
             return replay
         if account.version != expected_version:
-            _reject("VERSION_CONFLICT", "exchange account version changed")
+            rejections.reject("VERSION_CONFLICT", "exchange account version changed")
         if enabled and (
             account.credentials_ciphertext is None
             or account.connection_status != "VERIFIED"
             or (account.credential_metadata or {}).get("environment") != account.environment
         ):
-            _reject(
+            rejections.reject(
                 "EXCHANGE_ACCOUNT_ENABLE_BLOCKED",
                 "verified credentials bound to this environment are required",
             )
@@ -415,9 +446,7 @@ def set_exchange_account_state(
         if not enabled:
             account.runtime_sync_enabled = False
             account.trading_status = "DISABLED"
-            self._set_internal_principal_active(
-                session, account.runtime_service_principal_id, False
-            )
+            set_internal_principal_active(session, account.runtime_service_principal_id, False)
         account.version += 1
         account.updated_by = actor_id
         account.updated_at = now
@@ -426,7 +455,7 @@ def set_exchange_account_state(
             "enabled": enabled,
             "version": account.version,
         }
-        self.transactions._save_receipt(
+        self.transactions.save_receipt(
             session,
             caller_id=caller,
             operation="exchange-account.state",
@@ -435,7 +464,7 @@ def set_exchange_account_state(
             response=response,
             now=now,
         )
-        self.transactions._audit(
+        self.transactions.audit(
             session,
             actor_id=str(actor_id),
             event_type="EXCHANGE_ACCOUNT_ENABLED" if enabled else "EXCHANGE_ACCOUNT_DISABLED",

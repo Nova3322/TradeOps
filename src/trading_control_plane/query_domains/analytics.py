@@ -3,8 +3,16 @@ from __future__ import annotations
 import hashlib
 from collections import defaultdict
 from collections.abc import Sequence
+from datetime import UTC, datetime
+from decimal import Decimal
 from hmac import compare_digest
+from typing import Any
+from uuid import UUID
 
+from sqlalchemy import select, tuple_
+from sqlalchemy.orm import Session
+
+from trading_control_plane import domain, models, notilt
 from trading_control_plane.analytics import (
     ANALYTICS_DATASET_VERSION,
     CRYPTO_CALENDAR,
@@ -22,13 +30,10 @@ from trading_control_plane.analytics import (
 )
 from trading_control_plane.query_component import QueryComponent
 
-# ruff: noqa: F403, F405
-from trading_control_plane.query_core import *
-
 
 class AnalyticsQueries(QueryComponent):
     @staticmethod
-    def _report_summary(report: AnalyticsReport) -> dict[str, Any]:
+    def _report_summary(report: models.AnalyticsReport) -> dict[str, Any]:
         return {
             "report_id": str(report.report_id),
             "engine": report.engine,
@@ -60,17 +65,17 @@ class AnalyticsQueries(QueryComponent):
         }
 
     def analytics_report(self, user_id: UUID, report_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
             report = session.scalar(
-                select(AnalyticsReport).where(
-                    AnalyticsReport.report_id == report_id,
-                    AnalyticsReport.workspace_id == workspace_id,
-                    AnalyticsReport.team_id == team_id,
+                select(models.AnalyticsReport).where(
+                    models.AnalyticsReport.report_id == report_id,
+                    models.AnalyticsReport.workspace_id == workspace_id,
+                    models.AnalyticsReport.team_id == team_id,
                 )
             )
             if report is None:
-                raise DomainRejected(
+                raise domain.DomainRejected(
                     "ANALYTICS_REPORT_NOT_FOUND",
                     "report is outside the active Workspace and Team scope",
                 )
@@ -82,7 +87,7 @@ class AnalyticsQueries(QueryComponent):
                     or not isinstance(item.get("venue"), str)
                     for item in exact_scopes
                 ):
-                    raise DomainRejected(
+                    raise domain.DomainRejected(
                         "ANALYTICS_ACCOUNT_SCOPE_UNAVAILABLE",
                         "report does not contain verified exact account and venue scopes",
                     )
@@ -95,7 +100,7 @@ class AnalyticsQueries(QueryComponent):
                     )
                     for item in exact_scopes
                 ):
-                    raise DomainRejected(
+                    raise domain.DomainRejected(
                         "ANALYTICS_ACCOUNT_SCOPE_DENIED",
                         "report account and venue scope is outside current user RBAC",
                     )
@@ -104,11 +109,11 @@ class AnalyticsQueries(QueryComponent):
     def analytics_report_artifact(self, user_id: UUID, report_id: UUID) -> tuple[str, str]:
         self.analytics_report(user_id, report_id)
         with self.database.session_factory() as session:
-            report = session.get(AnalyticsReport, report_id)
+            report = session.get(models.AnalyticsReport, report_id)
             assert report is not None
             actual = hashlib.sha256(report.artifact_html.encode("utf-8")).hexdigest()
             if not compare_digest(actual, report.artifact_sha256):
-                raise DomainRejected(
+                raise domain.DomainRejected(
                     "ANALYTICS_ARTIFACT_INTEGRITY_FAILED",
                     "persisted report artifact failed integrity validation",
                 )
@@ -121,12 +126,12 @@ class AnalyticsQueries(QueryComponent):
         to_time: datetime | None,
     ) -> tuple[datetime, datetime]:
         if environment not in {"TESTNET", "LIVE"}:
-            raise DomainRejected(
+            raise domain.DomainRejected(
                 "ANALYTICS_ENVIRONMENT_INVALID",
                 "analytics history requires TESTNET or LIVE",
             )
         if from_time is None or to_time is None:
-            raise DomainRejected(
+            raise domain.DomainRejected(
                 "ANALYTICS_TIME_BOUNDARY_REQUIRED",
                 "QuantStats requires explicit from_time and to_time boundaries",
             )
@@ -136,30 +141,30 @@ class AnalyticsQueries(QueryComponent):
             or to_time.tzinfo is None
             or to_time.utcoffset() is None
         ):
-            raise DomainRejected(
+            raise domain.DomainRejected(
                 "ANALYTICS_TIMEZONE_REQUIRED",
                 "QuantStats boundaries must be timezone-aware",
             )
         start = from_time.astimezone(UTC)
         end = to_time.astimezone(UTC)
         if start >= end:
-            raise DomainRejected(
+            raise domain.DomainRejected(
                 "ANALYTICS_TIME_RANGE_INVALID", "from_time must be earlier than to_time"
             )
         return start, end
 
     def analytics_report_options(self, user_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
-            team = session.get(Team, team_id)
-            workspace = session.get(Workspace, workspace_id)
+            team = session.get(models.Team, team_id)
+            workspace = session.get(models.Workspace, workspace_id)
             assert team is not None and workspace is not None
             accounts = [
                 account
                 for account in session.scalars(
-                    select(ExchangeAccount)
-                    .where(ExchangeAccount.team_id == team_id, ExchangeAccount.active)
-                    .order_by(ExchangeAccount.venue, ExchangeAccount.account_id)
+                    select(models.ExchangeAccount)
+                    .where(models.ExchangeAccount.team_id == team_id, models.ExchangeAccount.active)
+                    .order_by(models.ExchangeAccount.venue, models.ExchangeAccount.account_id)
                 ).all()
                 if self.service.can_user(user_id, "view", account.account_id, account.venue)
             ]
@@ -197,11 +202,11 @@ class AnalyticsQueries(QueryComponent):
         to_time: datetime | None,
     ) -> AnalyticsDataset:
         start, end = self._validate_request(environment, from_time, to_time)
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
-            team = session.get(Team, team_id)
+            team = session.get(models.Team, team_id)
             if team is None or not team.active:
-                raise DomainRejected("TEAM_SCOPE_DENIED", "active Team is unavailable")
+                raise domain.DomainRejected("TEAM_SCOPE_DENIED", "active Team is unavailable")
             return self._venue_dataset(
                 session,
                 user_id=user_id,
@@ -221,7 +226,7 @@ class AnalyticsQueries(QueryComponent):
         *,
         user_id: UUID,
         workspace_id: UUID,
-        team: Team,
+        team: models.Team,
         environment: str,
         account_id: str | None,
         venue: str | None,
@@ -230,51 +235,53 @@ class AnalyticsQueries(QueryComponent):
         end: datetime,
     ) -> AnalyticsDataset:
         if generation is not None:
-            raise DomainRejected(
+            raise domain.DomainRejected(
                 "ANALYTICS_GENERATION_FORBIDDEN", "TESTNET and LIVE history has no generation"
             )
-        account_query = select(ExchangeAccount).where(
-            ExchangeAccount.team_id == team.team_id,
-            ExchangeAccount.environment == environment,
-            ExchangeAccount.active,
+        account_query = select(models.ExchangeAccount).where(
+            models.ExchangeAccount.team_id == team.team_id,
+            models.ExchangeAccount.environment == environment,
+            models.ExchangeAccount.active,
         )
         if account_id is not None:
-            account_query = account_query.where(ExchangeAccount.account_id == account_id)
+            account_query = account_query.where(models.ExchangeAccount.account_id == account_id)
         if venue is not None:
-            account_query = account_query.where(ExchangeAccount.venue == venue.upper())
+            account_query = account_query.where(models.ExchangeAccount.venue == venue.upper())
         accounts = [
             item
             for item in session.scalars(
-                account_query.order_by(ExchangeAccount.venue, ExchangeAccount.account_id)
+                account_query.order_by(
+                    models.ExchangeAccount.venue, models.ExchangeAccount.account_id
+                )
             ).all()
             if self.service.can_user(user_id, "view", item.account_id, item.venue)
         ]
         if not accounts:
-            raise DomainRejected(
+            raise domain.DomainRejected(
                 "ANALYTICS_ACCOUNT_SCOPE_EMPTY",
                 "no authorized requested-environment account is available for this report",
             )
         if account_id is not None and not any(item.account_id == account_id for item in accounts):
-            raise DomainRejected(
+            raise domain.DomainRejected(
                 "ANALYTICS_ACCOUNT_SCOPE_DENIED", "account is outside the authorized Team scope"
             )
         account_keys = {(item.account_id, item.venue) for item in accounts}
         observations = session.scalars(
-            select(AccountEquityObservation)
+            select(models.AccountEquityObservation)
             .where(
-                AccountEquityObservation.team_id == team.team_id,
-                AccountEquityObservation.environment == environment,
-                AccountEquityObservation.location_type == "VENUE",
+                models.AccountEquityObservation.team_id == team.team_id,
+                models.AccountEquityObservation.environment == environment,
+                models.AccountEquityObservation.location_type == "VENUE",
                 tuple_(
-                    AccountEquityObservation.account_id,
-                    AccountEquityObservation.venue,
+                    models.AccountEquityObservation.account_id,
+                    models.AccountEquityObservation.venue,
                 ).in_(account_keys),
-                AccountEquityObservation.observed_at >= start,
-                AccountEquityObservation.observed_at <= end,
+                models.AccountEquityObservation.observed_at >= start,
+                models.AccountEquityObservation.observed_at <= end,
             )
             .order_by(
-                AccountEquityObservation.observed_at,
-                AccountEquityObservation.observation_id,
+                models.AccountEquityObservation.observed_at,
+                models.AccountEquityObservation.observation_id,
             )
         ).all()
         nav = self._aggregate_venue_nav(observations)
@@ -293,21 +300,21 @@ class AnalyticsQueries(QueryComponent):
             to_time=end,
         )
         instruments = {
-            item.instrument_id: item for item in session.scalars(select(Instrument)).all()
+            item.instrument_id: item for item in session.scalars(select(models.Instrument)).all()
         }
         position_facts = session.scalars(
-            select(Position)
+            select(models.Position)
             .where(
-                Position.team_id == team.team_id,
-                Position.environment == environment,
-                tuple_(Position.account_id, Position.venue).in_(account_keys),
-                Position.observed_at >= start,
-                Position.observed_at <= end,
+                models.Position.team_id == team.team_id,
+                models.Position.environment == environment,
+                tuple_(models.Position.account_id, models.Position.venue).in_(account_keys),
+                models.Position.observed_at >= start,
+                models.Position.observed_at <= end,
             )
-            .order_by(Position.observed_at, Position.position_id)
+            .order_by(models.Position.observed_at, models.Position.position_id)
         ).all()
         if any(item.fact_status != "KNOWN" for item in position_facts):
-            raise DomainRejected(
+            raise domain.DomainRejected(
                 "ANALYTICS_POSITION_VALUATION_MISSING",
                 "venue position valuation is unknown",
             )
@@ -315,7 +322,7 @@ class AnalyticsQueries(QueryComponent):
         for position_fact in position_facts:
             instrument = instruments.get(position_fact.instrument_id)
             if instrument is None or position_fact.mark_price <= 0:
-                raise DomainRejected(
+                raise domain.DomainRejected(
                     "ANALYTICS_POSITION_VALUATION_MISSING",
                     "venue position instrument or mark price is missing",
                 )
@@ -337,21 +344,21 @@ class AnalyticsQueries(QueryComponent):
                 )
             )
         fill_facts = session.scalars(
-            select(VenueFill)
+            select(models.VenueFill)
             .where(
-                VenueFill.team_id == team.team_id,
-                VenueFill.environment == environment,
-                tuple_(VenueFill.account_id, VenueFill.venue).in_(account_keys),
-                VenueFill.executed_at >= start,
-                VenueFill.executed_at <= end,
+                models.VenueFill.team_id == team.team_id,
+                models.VenueFill.environment == environment,
+                tuple_(models.VenueFill.account_id, models.VenueFill.venue).in_(account_keys),
+                models.VenueFill.executed_at >= start,
+                models.VenueFill.executed_at <= end,
             )
-            .order_by(VenueFill.executed_at, VenueFill.venue_fill_fact_id)
+            .order_by(models.VenueFill.executed_at, models.VenueFill.venue_fill_fact_id)
         ).all()
         fills: list[CanonicalFill] = []
         for fill_fact in fill_facts:
             instrument = instruments.get(fill_fact.instrument_id)
             if instrument is None:
-                raise DomainRejected(
+                raise domain.DomainRejected(
                     "ANALYTICS_INSTRUMENT_MISSING", "venue Fill instrument is missing"
                 )
             fills.append(
@@ -384,15 +391,15 @@ class AnalyticsQueries(QueryComponent):
             )
         canonical_fills = deduplicate_fills(tuple(fills))
         order_facts = session.scalars(
-            select(VenueOrder)
+            select(models.VenueOrder)
             .where(
-                VenueOrder.team_id == team.team_id,
-                VenueOrder.environment == environment,
-                tuple_(VenueOrder.account_id, VenueOrder.venue).in_(account_keys),
-                VenueOrder.observed_at >= start,
-                VenueOrder.observed_at <= end,
+                models.VenueOrder.team_id == team.team_id,
+                models.VenueOrder.environment == environment,
+                tuple_(models.VenueOrder.account_id, models.VenueOrder.venue).in_(account_keys),
+                models.VenueOrder.observed_at >= start,
+                models.VenueOrder.observed_at <= end,
             )
-            .order_by(VenueOrder.observed_at, VenueOrder.venue_order_fact_id)
+            .order_by(models.VenueOrder.observed_at, models.VenueOrder.venue_order_fact_id)
         ).all()
         orders = tuple(
             CanonicalOrder(
@@ -417,15 +424,17 @@ class AnalyticsQueries(QueryComponent):
             for fact in order_facts
         )
         funding = session.scalars(
-            select(FundingPayment)
+            select(models.FundingPayment)
             .where(
-                FundingPayment.team_id == team.team_id,
-                FundingPayment.environment == environment,
-                tuple_(FundingPayment.account_id, FundingPayment.venue).in_(account_keys),
-                FundingPayment.paid_at >= start,
-                FundingPayment.paid_at <= end,
+                models.FundingPayment.team_id == team.team_id,
+                models.FundingPayment.environment == environment,
+                tuple_(models.FundingPayment.account_id, models.FundingPayment.venue).in_(
+                    account_keys
+                ),
+                models.FundingPayment.paid_at >= start,
+                models.FundingPayment.paid_at <= end,
             )
-            .order_by(FundingPayment.paid_at, FundingPayment.funding_payment_id)
+            .order_by(models.FundingPayment.paid_at, models.FundingPayment.funding_payment_id)
         ).all()
         performance_cashflows = tuple(
             [
@@ -493,25 +502,27 @@ class AnalyticsQueries(QueryComponent):
 
     @staticmethod
     def _aggregate_venue_nav(
-        observations: Sequence[AccountEquityObservation],
+        observations: Sequence[models.AccountEquityObservation],
     ) -> tuple[NavPoint, ...]:
-        by_source_day: dict[tuple[str, str, str], dict[Any, AccountEquityObservation]] = (
+        by_source_day: dict[tuple[str, str, str], dict[Any, models.AccountEquityObservation]] = (
             defaultdict(dict)
         )
         for item in observations:
             if item.usd_equity is None:
-                raise DomainRejected(
+                raise domain.DomainRejected(
                     "ANALYTICS_CURRENCY_CONVERSION_MISSING",
                     "LIVE equity requires persisted USD valuation",
                 )
             key = (item.account_id, item.venue, item.currency)
             by_source_day[key][item.observed_at.astimezone(UTC).date()] = item
         if not by_source_day:
-            raise DomainRejected("ANALYTICS_NAV_CONTINUITY_MISSING", "LIVE equity history is empty")
+            raise domain.DomainRejected(
+                "ANALYTICS_NAV_CONTINUITY_MISSING", "LIVE equity history is empty"
+            )
         day_sets = [set(items) for items in by_source_day.values()]
         first_days = day_sets[0]
         if any(days != first_days for days in day_sets[1:]):
-            raise DomainRejected(
+            raise domain.DomainRejected(
                 "ANALYTICS_EQUITY_COVERAGE_INCOMPLETE",
                 "LIVE accounts do not share complete UTC daily equity coverage",
             )
@@ -541,27 +552,31 @@ class AnalyticsQueries(QueryComponent):
         end: datetime,
     ) -> tuple[Cashflow, ...]:
         rows = session.scalars(
-            select(CapitalTransfer)
+            select(models.CapitalTransfer)
             .where(
-                CapitalTransfer.team_id == team_id,
-                CapitalTransfer.environment == environment,
-                CapitalTransfer.status == "SETTLED",
-                tuple_(CapitalTransfer.account_id, CapitalTransfer.venue).in_(account_keys),
-                CapitalTransfer.observed_at >= start,
-                CapitalTransfer.observed_at <= end,
+                models.CapitalTransfer.team_id == team_id,
+                models.CapitalTransfer.environment == environment,
+                models.CapitalTransfer.status == "SETTLED",
+                tuple_(models.CapitalTransfer.account_id, models.CapitalTransfer.venue).in_(
+                    account_keys
+                ),
+                models.CapitalTransfer.observed_at >= start,
+                models.CapitalTransfer.observed_at <= end,
             )
-            .order_by(CapitalTransfer.observed_at, CapitalTransfer.capital_transfer_id)
+            .order_by(
+                models.CapitalTransfer.observed_at, models.CapitalTransfer.capital_transfer_id
+            )
         ).all()
         cashflows: list[Cashflow] = []
         for item in rows:
-            if item.asset.upper() not in USD_STABLE_ASSETS:
-                raise DomainRejected(
+            if item.asset.upper() not in notilt.USD_STABLE_ASSETS:
+                raise domain.DomainRejected(
                     "ANALYTICS_CURRENCY_CONVERSION_MISSING",
                     "capital transfer requires persisted conversion to LIVE NAV currency",
                 )
             if item.direction == "VAULT_TO_VENUE":
                 if item.net_received is None:
-                    raise DomainRejected(
+                    raise domain.DomainRejected(
                         "ANALYTICS_CASHFLOW_AMOUNT_MISSING",
                         "settled venue deposit is missing net received amount",
                     )

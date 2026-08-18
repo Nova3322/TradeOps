@@ -1,21 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
 
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected
-from trading_control_plane.models import (
-    Team,
-    TeamMembership,
-    User,
-    Workspace,
-    WorkspaceMembership,
-)
+from trading_control_plane.models import Team, TeamMembership, User, Workspace, WorkspaceMembership
 from trading_control_plane.request_context import current_api_client_context
 from trading_control_plane.service import TradingService
+
+
+def iso_datetime(value: datetime | None) -> str | None:
+    return None if value is None else value.astimezone(UTC).isoformat()
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +36,7 @@ class QueryComponent:
     def service(self) -> TradingService:
         return self.runtime.service
 
-    def _active_scope_ids(self, user_id: UUID) -> tuple[UUID, UUID]:
+    def active_scope_ids(self, user_id: UUID) -> tuple[UUID, UUID]:
         """Resolve and validate the request actor's exact active workspace/team scope."""
 
         with self.database.session_factory() as session:

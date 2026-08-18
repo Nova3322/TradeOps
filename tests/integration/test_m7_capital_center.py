@@ -39,6 +39,7 @@ from trading_control_plane.notilt import (
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
+from trading_control_plane.service_domains.risk_policy import managed_capital_context
 from trading_control_plane.telegram import MockTelegramGateway
 
 
@@ -334,7 +335,7 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
     ]
     assert all(item["usd_equity"] is not None for item in center["history"])
     with database.session_factory() as session:
-        known, total, facts, _ = service._managed_capital_context(
+        known, total, facts, _ = managed_capital_context(
             session,
             team_id=UUID(center["team_id"]),
             environment=ExecutionEnvironment.LIVE.value,
@@ -405,9 +406,7 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
 
     async def api_scope_scenario() -> None:
         async with AsyncClient(
-            transport=ASGITransport(
-                app=build_app(database, MockTelegramGateway())
-            ),
+            transport=ASGITransport(app=build_app(database, MockTelegramGateway())),
             base_url="http://test",
         ) as client:
             await login(client, "treasury-proposer")
@@ -435,9 +434,8 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
             )
 
     asyncio.run(api_scope_scenario())
-    authoritative_service = TradingService(database)
     with database.session_factory() as session:
-        known, total, facts, _ = authoritative_service._managed_capital_context(
+        known, total, facts, _ = managed_capital_context(
             session,
             team_id=UUID(center["team_id"]),
             environment=ExecutionEnvironment.LIVE.value,
@@ -459,7 +457,7 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
         assert vault_fact is not None
         vault_fact.control_status = "READ_ONLY"
     with database.session_factory() as session:
-        controlled, _, _, _ = service._managed_capital_context(
+        controlled, _, _, _ = managed_capital_context(
             session,
             team_id=UUID(center["team_id"]),
             environment=ExecutionEnvironment.LIVE.value,
