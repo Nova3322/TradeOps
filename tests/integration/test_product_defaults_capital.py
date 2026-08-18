@@ -248,6 +248,8 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
     safe = "0x7777777777777777777777777777777777777777"
 
     def info_fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
+        if payload["type"] == "userAbstraction":
+            return "default"
         if payload["type"] == "clearinghouseState":
             return {"withdrawable": "1000"}
         if payload["type"] == "userRole":
@@ -1341,7 +1343,7 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
     }.issubset(events)
 
 
-def test_binance_capital_uses_verified_account_managed_credentials_and_keeps_invalid_fee_plan(
+def test_binance_capital_uses_live_fee_for_small_account_managed_withdrawal(
     database: Database,
 ) -> None:
     credential_key = base64.urlsafe_b64encode(
@@ -1440,18 +1442,42 @@ def test_binance_capital_uses_verified_account_managed_credentials_and_keeps_inv
             assert configuration["binance_capital_credentials_source"] == "ACCOUNT_MANAGEMENT"
             assert configuration["binance_capital_submission_enabled"] is True
 
-            invalid_fee = await client.post(
+            small_withdrawal = await client.post(
                 "/api/capital/direct-operations",
                 json={
                     "path": "BINANCE_TO_VAULT",
-                    "amount": "0.1",
+                    "amount": "1",
                     "final_confirmed": True,
-                    "idempotency_key": "database-capital-invalid-fee",
+                    "idempotency_key": "database-capital-small-withdrawal",
                 },
             )
-            assert invalid_fee.status_code == 200, invalid_fee.text
-            assert "CAPITAL_MIN_RECEIVED_INVALID" in invalid_fee.json()["blockers"]
-            assert "BINANCE_CAPITAL_CREDENTIALS_MISSING" not in invalid_fee.json()["blockers"]
+            assert small_withdrawal.status_code == 200, small_withdrawal.text
+            assert "CAPITAL_MIN_RECEIVED_INVALID" not in small_withdrawal.json()["blockers"]
+            assert (
+                "BINANCE_CAPITAL_CREDENTIALS_MISSING"
+                not in small_withdrawal.json()["blockers"]
+            )
+            small_preview = await client.post(
+                f"/api/capital/direct-operations/"
+                f"{small_withdrawal.json()['operation_id']}/binance-preview",
+                json={
+                    "expected_version": 1,
+                    "final_confirmed": True,
+                    "idempotency_key": "database-capital-small-preview",
+                },
+            )
+            assert small_preview.status_code == 200, small_preview.text
+            assert small_preview.json()["artifact"]["fee"] == "0.1"
+            assert (
+                small_preview.json()["artifact"]["minReceived"]
+                == "0.900000000000000000"
+            )
+            prepared = next(
+                operation
+                for operation in small_preview.json()["data"]["direct_operations"]
+                if operation["operation_id"] == small_withdrawal.json()["operation_id"]
+            )
+            assert prepared["min_received"] == "0.900000000000000000"
 
             created = await client.post(
                 "/api/capital/direct-operations",

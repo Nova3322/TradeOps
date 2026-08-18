@@ -336,15 +336,47 @@ class HyperliquidCapitalGateway:
                 "HYPERLIQUID_WITHDRAWAL_FEE_LIMIT_TOO_LOW",
                 "configured fee limit is below the current Hyperliquid withdrawal fee",
             )
-        state = self._info(base_url, {"type": "clearinghouseState", "user": main})
-        margin = state.get("withdrawable") if isinstance(state, dict) else None
-        try:
-            withdrawable = Decimal(str(margin))
-        except (InvalidOperation, TypeError, ValueError) as exc:
+        abstraction = self._info(base_url, {"type": "userAbstraction", "user": main})
+        if abstraction in {"unifiedAccount", "portfolioMargin"}:
+            state = self._info(base_url, {"type": "spotClearinghouseState", "user": main})
+            balances = state.get("balances") if isinstance(state, dict) else None
+            usdc = next(
+                (
+                    balance
+                    for balance in balances or []
+                    if isinstance(balance, dict) and balance.get("coin") == "USDC"
+                ),
+                None,
+            )
+            try:
+                withdrawable = Decimal(str(usdc["total"])) - Decimal(str(usdc["hold"]))
+            except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+                raise DomainRejected(
+                    "HYPERLIQUID_WITHDRAWABLE_UNKNOWN",
+                    "Hyperliquid did not return a valid unified-account USDC balance",
+                ) from exc
+            withdrawable_source = "UNIFIED_SPOT_USDC"
+        elif abstraction in {None, "default", "disabled", "dexAbstraction"}:
+            state = self._info(base_url, {"type": "clearinghouseState", "user": main})
+            margin = state.get("withdrawable") if isinstance(state, dict) else None
+            try:
+                withdrawable = Decimal(str(margin))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise DomainRejected(
+                    "HYPERLIQUID_WITHDRAWABLE_UNKNOWN",
+                    "Hyperliquid did not return a valid current withdrawable balance",
+                ) from exc
+            withdrawable_source = "PERP_CLEARINGHOUSE"
+        else:
             raise DomainRejected(
                 "HYPERLIQUID_WITHDRAWABLE_UNKNOWN",
-                "Hyperliquid did not return a valid current withdrawable balance",
-            ) from exc
+                "Hyperliquid returned an unsupported account abstraction mode",
+            )
+        if withdrawable < 0:
+            _reject(
+                "HYPERLIQUID_WITHDRAWABLE_UNKNOWN",
+                "Hyperliquid returned a negative current withdrawable balance",
+            )
         if withdrawable < value + CURRENT_WITHDRAWAL_FEE:
             _reject(
                 "HYPERLIQUID_WITHDRAWABLE_INSUFFICIENT",
@@ -375,6 +407,8 @@ class HyperliquidCapitalGateway:
             "expectedFee": str(CURRENT_WITHDRAWAL_FEE),
             "maxFee": None if fee_limit is None else str(fee_limit),
             "withdrawableObserved": str(withdrawable),
+            "withdrawableSource": withdrawable_source,
+            "accountAbstraction": abstraction,
             "nonce": nonce,
             "action": action,
             "typedData": typed_data,
