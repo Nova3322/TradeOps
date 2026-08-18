@@ -405,24 +405,25 @@ def test_database_binding_supervisor_keeps_okx_secrets_out_of_settings() -> None
     assert "okx-fixture-secret" not in repr(binding)
 
 
-def test_runtime_rate_limit_cooldown_skips_only_until_retry_deadline() -> None:
+@pytest.mark.parametrize("source", ["HYPERLIQUID", "BINANCE"])
+def test_runtime_rate_limit_cooldown_skips_only_until_retry_deadline(source: str) -> None:
     now = datetime(2026, 8, 5, 1, 0, tzinfo=UTC)
     worker: Any = object.__new__(RuntimeSyncWorker)
     worker.queries = SimpleNamespace(
         runtime_source_health=lambda _actor, _source, **_scope: {
-            "error_code": "HYPERLIQUID_RATE_LIMITED",
+            "error_code": f"{source}_RATE_LIMITED",
             "retry_at": (now + timedelta(minutes=2)).isoformat(),
         }
     )
 
-    cooldown = worker._rate_limit_cooldown("HYPERLIQUID", actor_id=uuid4(), now=now)
+    cooldown = worker._rate_limit_cooldown(source, actor_id=uuid4(), now=now)
 
     assert cooldown == SourceSyncResult(
         "SKIPPED",
-        error_code="HYPERLIQUID_RATE_LIMITED_COOLDOWN",
+        error_code=f"{source}_RATE_LIMITED_COOLDOWN",
     )
     assert (
-        worker._rate_limit_cooldown("HYPERLIQUID", actor_id=uuid4(), now=now + timedelta(minutes=2))
+        worker._rate_limit_cooldown(source, actor_id=uuid4(), now=now + timedelta(minutes=2))
         is None
     )
 

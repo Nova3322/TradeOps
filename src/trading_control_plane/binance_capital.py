@@ -16,6 +16,7 @@ from typing import Any, NoReturn, cast
 from trading_control_plane.binance_errors import (
     BinanceApiDiagnostic,
     BinanceApiRejected,
+    BinanceRequestState,
     classify_binance_rate_limit,
 )
 from trading_control_plane.domain import DomainRejected
@@ -117,6 +118,7 @@ class BinanceCapitalGateway:
         transport: Transport | None = None,
         clock_ms: Callable[[], int] | None = None,
         rate_limit_state: dict[str, BinanceApiDiagnostic] | None = None,
+        request_state: BinanceRequestState | None = None,
     ) -> None:
         self._base_url = _official_base_url(base_url)
         self._active_base_url = self._base_url
@@ -129,6 +131,7 @@ class BinanceCapitalGateway:
         self._clock_offset_ms = 0
         self._clock_synchronized_at = 0.0
         self._rate_limit_state = rate_limit_state if rate_limit_state is not None else {}
+        self._request_state = request_state or BinanceRequestState()
 
     def __repr__(self) -> str:
         return (
@@ -139,6 +142,11 @@ class BinanceCapitalGateway:
     @property
     def configured(self) -> bool:
         return bool(self._api_key and self._api_secret)
+
+    def attach_request_state(self, state: BinanceRequestState) -> None:
+        """Attach the process/database shared policy without changing credentials."""
+
+        self._request_state = state
 
     def with_credentials(self, *, api_key: str, api_secret: str) -> BinanceCapitalGateway:
         """Bind a short-lived exact-account credential without changing transport policy."""
@@ -151,13 +159,19 @@ class BinanceCapitalGateway:
             transport=self._transport,
             clock_ms=self._clock_ms,
             rate_limit_state=self._rate_limit_state,
+            request_state=self._request_state,
         )
 
     def _rate_limit_key(self) -> str:
-        return hashlib.sha256(str(self._api_key or "").encode()).hexdigest()
+        return "BINANCE_DEPLOYMENT_IP"
 
     def _enforce_rate_limit_backoff(self) -> None:
         diagnostic = self._rate_limit_state.get(self._rate_limit_key())
+        shared = self._request_state.blocked_diagnostic()
+        if shared is not None and (
+            diagnostic is None or shared.next_retry_at > diagnostic.next_retry_at
+        ):
+            diagnostic = shared
         if diagnostic is None or datetime.now(UTC) >= diagnostic.next_retry_at:
             return
         labels = {
@@ -185,6 +199,9 @@ class BinanceCapitalGateway:
             headers=cast(dict[str, str], exc.headers or {}),
         )
         self._rate_limit_state[self._rate_limit_key()] = diagnostic
+        self._request_state.record_rate_limit(
+            diagnostic, host=urllib.parse.urlparse(self._active_base_url).hostname
+        )
         label = {
             "ORDINARY_RATE_LIMIT": "ordinary request rate limit",
             "REQUEST_WEIGHT_EXCEEDED": "request weight limit",
@@ -197,9 +214,19 @@ class BinanceCapitalGateway:
         )
 
     def _timestamp_ms(self) -> int:
+        self._enforce_rate_limit_backoff()
         if self._transport is not None:
             return self._clock_ms()
         monotonic_now = time.monotonic()
+        wall_now = datetime.now(UTC)
+        shared_offset = self._request_state.current_time_offset()
+        if (
+            monotonic_now - self._clock_synchronized_at > 30
+            and shared_offset is not None
+            and wall_now - shared_offset[1] <= timedelta(seconds=30)
+        ):
+            self._clock_offset_ms = shared_offset[0]
+            self._clock_synchronized_at = monotonic_now
         if monotonic_now - self._clock_synchronized_at > 30:
             server_time: int | None = None
             last_error: BaseException | None = None
@@ -214,6 +241,10 @@ class BinanceCapitalGateway:
                         request, timeout=time_timeout
                     ) as response:
                         raw = json.loads(response.read())
+                        self._request_state.record_success(
+                            getattr(response, "headers", {}),
+                            host=urllib.parse.urlparse(base_url).hostname,
+                        )
                     server_time = int(raw["serverTime"])
                     break
                 except urllib.error.HTTPError as exc:
@@ -241,9 +272,17 @@ class BinanceCapitalGateway:
                 ) from last_error
             self._clock_offset_ms = server_time - self._clock_ms()
             self._clock_synchronized_at = monotonic_now
+            self._request_state.record_time_offset(self._clock_offset_ms, synchronized_at=wall_now)
         return self._clock_ms() + self._clock_offset_ms
 
-    def _request(self, method: str, path: str, params: dict[str, object] | None = None) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, object] | None = None,
+        *,
+        priority: str = "CORE",
+    ) -> Any:
         if not self.configured:
             _reject(
                 "BINANCE_CAPITAL_CREDENTIALS_MISSING",
@@ -252,6 +291,14 @@ class BinanceCapitalGateway:
         assert self._api_key is not None
         assert self._api_secret is not None
         self._enforce_rate_limit_backoff()
+        if priority == "LOW":
+            retry_at = self._request_state.low_priority_retry_at()
+            if retry_at is not None and retry_at > datetime.now(UTC):
+                raise DomainRejected(
+                    "BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED",
+                    "Binance non-urgent receipt read is deferred to preserve weight headroom",
+                    metadata={"next_retry_at": retry_at.isoformat()},
+                )
         semantic_params = {
             key: str(value) for key, value in (params or {}).items() if value is not None
         }
@@ -261,7 +308,12 @@ class BinanceCapitalGateway:
             prepared = dict(semantic_params)
             prepared["recvWindow"] = str(self._recv_window_ms)
             prepared["timestamp"] = str(self._timestamp_ms())
-            return self._transport(method, path, dict(prepared), self._timeout_seconds)
+            result = self._transport(method, path, dict(prepared), self._timeout_seconds)
+            if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
+                self._request_state.record_success(result[1], host="api.binance.com")
+                return result[0]
+            self._request_state.record_success(host="api.binance.com")
+            return result
         base_urls = (
             _ordered_official_base_urls(self._active_base_url)
             if method == "GET"
@@ -298,6 +350,10 @@ class BinanceCapitalGateway:
                     request, timeout=self._timeout_seconds
                 ) as response:
                     result = json.loads(response.read())
+                    self._request_state.record_success(
+                        getattr(response, "headers", {}),
+                        host=urllib.parse.urlparse(base_url).hostname,
+                    )
                 self._active_base_url = base_url
                 return result
             except urllib.error.HTTPError as exc:
@@ -428,7 +484,6 @@ class BinanceCapitalGateway:
                 row.get("asset") == SUPPORTED_ASSET
                 and row.get("type") == transfer_type
                 and observed_amount == amount
-                and str(row.get("status", "")).upper() == "CONFIRMED"
             ):
                 matches.append(row)
         if len(matches) > 1:
@@ -443,14 +498,12 @@ class BinanceCapitalGateway:
             "type": transfer_type,
             "asset": SUPPORTED_ASSET,
             "amount": str(amount),
-            "status": "CONFIRMED",
+            "status": str(row.get("status", "UNKNOWN")).upper(),
             "tranId": row.get("tranId"),
             "timestamp": row.get("timestamp"),
         }
 
-    def _probe_universal_transfer_access(
-        self, *, transfer_type: str, now: datetime
-    ) -> None:
+    def _probe_universal_transfer_access(self, *, transfer_type: str, now: datetime) -> None:
         """Probe the exact read-only Universal Transfer endpoint used by this path.
 
         ``enableInternalTransfer`` is not a reliable capability signal across
@@ -506,7 +559,13 @@ class BinanceCapitalGateway:
             now=now,
         )
         if existing is not None:
-            return existing
+            if existing["status"] == "CONFIRMED":
+                return existing
+            raise DomainRejected(
+                "BINANCE_INTERNAL_TRANSFER_PENDING",
+                "A matching Binance internal transfer already exists and must be reconciled "
+                "from read-only history before any new POST",
+            )
         try:
             raw = self._request(
                 "POST",
@@ -532,7 +591,7 @@ class BinanceCapitalGateway:
             prepared_at=prepared_at,
             now=now,
         )
-        if confirmed is None:
+        if confirmed is None or confirmed["status"] != "CONFIRMED":
             raise DomainRejected(
                 "BINANCE_INTERNAL_TRANSFER_PENDING",
                 "Binance accepted the internal transfer but its confirmed history is not "
@@ -738,9 +797,7 @@ class BinanceCapitalGateway:
             "allowlisted": True,
             "travelRuleRequired": False,
             "spotAvailableObserved": str(available),
-            "internalTransferType": (
-                USDM_TO_SPOT if internal_transfer_amount > 0 else None
-            ),
+            "internalTransferType": (USDM_TO_SPOT if internal_transfer_amount > 0 else None),
             "internalTransferAmount": str(internal_transfer_amount),
             "preparedAt": now.astimezone(UTC).isoformat(),
             "expiresAt": (now + timedelta(minutes=2)).astimezone(UTC).isoformat(),
@@ -852,6 +909,7 @@ class BinanceCapitalGateway:
             "GET",
             "/sapi/v1/capital/withdraw/history",
             {"coin": SUPPORTED_ASSET, "withdrawOrderId": order_id},
+            priority="LOW",
         )
         if not isinstance(raw, list) or len(raw) != 1:
             _reject("BINANCE_CAPITAL_RECEIPT_NOT_FOUND", "exact Binance withdrawal was not found")
@@ -876,6 +934,7 @@ class BinanceCapitalGateway:
             "GET",
             "/sapi/v1/capital/deposit/hisrec",
             {"coin": SUPPORTED_ASSET, "txId": transaction_hash},
+            priority="LOW",
         )
         if not isinstance(raw, list) or len(raw) != 1:
             _reject("BINANCE_CAPITAL_RECEIPT_NOT_FOUND", "exact Binance deposit was not found")

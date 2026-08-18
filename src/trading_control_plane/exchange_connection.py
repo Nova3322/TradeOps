@@ -9,6 +9,7 @@ from trading_control_plane.binance import (
     BinancePortfolioMarginReadOnlyClient,
     BinanceReadOnlyClient,
 )
+from trading_control_plane.binance_errors import BinanceRequestState
 from trading_control_plane.bybit import BybitReadOnlyClient
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.hyperliquid import HyperliquidReadOnlyClient
@@ -36,8 +37,17 @@ class ExchangeConnectionVerifier(Protocol):
 class ReadOnlyExchangeConnectionVerifier:
     """One-shot official-host probes; no method can sign or submit a trading action."""
 
-    @staticmethod
-    def _binance(credentials: Mapping[str, str], now: datetime, *, environment: str) -> None:
+    def __init__(self, *, request_state: BinanceRequestState | None = None) -> None:
+        self._request_state = request_state or BinanceRequestState()
+
+    def _binance(self, credentials: Mapping[str, str], now: datetime, *, environment: str) -> None:
+        retry_at = self._request_state.low_priority_retry_at(now=now)
+        if retry_at is not None and retry_at > now:
+            raise DomainRejected(
+                "BINANCE_CONNECTION_WEIGHT_HEADROOM_DEFERRED",
+                "manual Binance connection verification is deferred to preserve weight headroom",
+                metadata={"next_retry_at": retry_at.isoformat()},
+            )
         standard = BinanceReadOnlyClient(
             base_url=(
                 "https://testnet.binancefuture.com"
@@ -46,6 +56,7 @@ class ReadOnlyExchangeConnectionVerifier:
             ),
             api_key=credentials["api_key"],
             api_secret=credentials["api_secret"],
+            request_state=self._request_state,
         )
         try:
             standard.verify_connection(now=now)
@@ -59,11 +70,17 @@ class ReadOnlyExchangeConnectionVerifier:
                 base_url="https://papi.binance.com",
                 api_key=credentials["api_key"],
                 api_secret=credentials["api_secret"],
+                request_state=self._request_state,
             )
             try:
                 portfolio.verify_connection(now=now)
                 return
-            except DomainRejected:
+            except DomainRejected as portfolio_error:
+                if portfolio_error.code in {
+                    "BINANCE_RATE_LIMITED",
+                    "BINANCE_CONNECTION_WEIGHT_HEADROOM_DEFERRED",
+                }:
+                    raise portfolio_error from None
                 raise standard_error from None
 
     def verify(

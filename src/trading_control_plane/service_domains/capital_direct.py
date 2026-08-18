@@ -578,10 +578,14 @@ class DirectOperationCapitalService(ServiceComponent):
                 allowed_functions = {"executeWhitelistRelease"}
                 stage_code = "NOTILT_UNSIGNED_RELEASE_EXECUTION_PREVIEW"
             elif preview_kind == "INITIAL":
-                allowed_functions = {"requestWhitelistRelease"} if outbound else {
-                    "approve",
-                    "deposit",
-                }
+                allowed_functions = (
+                    {"requestWhitelistRelease"}
+                    if outbound
+                    else {
+                        "approve",
+                        "deposit",
+                    }
+                )
                 stage_code = (
                     "NOTILT_UNSIGNED_RELEASE_REQUEST_PREVIEW"
                     if outbound
@@ -692,11 +696,9 @@ class DirectOperationCapitalService(ServiceComponent):
                     "NOTILT_RELEASE_NOT_EXECUTABLE",
                     "verified NoTilt release execution is required before destination transfer",
                 )
-            if (
-                str(artifact.get("recipient", "")).lower()
-                != str(item.destination_reference or "").lower()
-                or str(artifact.get("amount")) != str(item.min_received or item.amount)
-            ):
+            if str(artifact.get("recipient", "")).lower() != str(
+                item.destination_reference or ""
+            ).lower() or str(artifact.get("amount")) != str(item.min_received or item.amount):
                 _reject(
                     "NOTILT_PLAN_INVALID",
                     "NoTilt destination transfer changed the frozen destination or amount",
@@ -1143,8 +1145,7 @@ class DirectOperationCapitalService(ServiceComponent):
                         existing
                         for existing in reversed(item.stages)
                         if isinstance(existing, dict)
-                        and str(existing.get("code", ""))
-                        in treasury_preview_codes
+                        and str(existing.get("code", "")) in treasury_preview_codes
                     ),
                     None,
                 )
@@ -1191,15 +1192,12 @@ class DirectOperationCapitalService(ServiceComponent):
                     (
                         existing.get("evidence")
                         for existing in reversed(item.stages)
-                        if existing.get("code")
-                        == "NOTILT_RELEASE_REQUEST_RECEIPT_CONFIRMED"
+                        if existing.get("code") == "NOTILT_RELEASE_REQUEST_RECEIPT_CONFIRMED"
                     ),
                     None,
                 )
                 try:
-                    release_expires_at = datetime.fromisoformat(
-                        str(release_receipt["expires_at"])
-                    )
+                    release_expires_at = datetime.fromisoformat(str(release_receipt["expires_at"]))
                 except (KeyError, TypeError, ValueError) as exc:
                     raise DomainRejected(
                         "NOTILT_RECEIPT_INVALID",
@@ -1340,8 +1338,7 @@ class DirectOperationCapitalService(ServiceComponent):
                     "Safe source receipt does not match this capital path",
                 )
             if item.path == DirectCapitalPath.VAULT_TO_BINANCE.value and not any(
-                stage.get("code") == "BINANCE_DEPOSIT_PREFLIGHT_READY"
-                for stage in item.stages
+                stage.get("code") == "BINANCE_DEPOSIT_PREFLIGHT_READY" for stage in item.stages
             ):
                 _reject(
                     "BINANCE_DEPOSIT_PREFLIGHT_REQUIRED",
@@ -1351,17 +1348,17 @@ class DirectOperationCapitalService(ServiceComponent):
                 (
                     stage
                     for stage in reversed(item.stages)
-                    if stage.get("code")
-                    == "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
+                    if stage.get("code") == "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
                 ),
                 None,
             )
             evidence_hash = str(
                 evidence.get("transactionHash") or evidence.get("transaction_hash") or ""
             ).lower()
-            if submitted is None or evidence_hash != str(
-                submitted.get("transaction_hash", "")
-            ).lower():
+            if (
+                submitted is None
+                or evidence_hash != str(submitted.get("transaction_hash", "")).lower()
+            ):
                 _reject(
                     "TREASURY_RECEIPT_REFERENCE_MISMATCH",
                     "Safe receipt does not match the wallet-submitted transfer",
@@ -1486,17 +1483,14 @@ class DirectOperationCapitalService(ServiceComponent):
                 else "NOTILT_RELEASE_EXECUTION_SUBMITTED_BY_HUMAN_WALLET"
             )
             submitted = next(
-                (
-                    stage
-                    for stage in reversed(item.stages)
-                    if stage.get("code") == submission_code
-                ),
+                (stage for stage in reversed(item.stages) if stage.get("code") == submission_code),
                 None,
             )
             evidence_hash = str(evidence.get("transaction_hash", "")).lower()
-            if submitted is None or evidence_hash != str(
-                submitted.get("transaction_hash", "")
-            ).lower():
+            if (
+                submitted is None
+                or evidence_hash != str(submitted.get("transaction_hash", "")).lower()
+            ):
                 _reject(
                     "NOTILT_RECEIPT_REFERENCE_MISMATCH",
                     "NoTilt receipt does not match the recorded wallet transaction",
@@ -1801,12 +1795,9 @@ class DirectOperationCapitalService(ServiceComponent):
                             ]
                         )
                     )
-                elif (
-                    item.path == DirectCapitalPath.HYPERLIQUID_TO_VAULT.value
-                    and (
-                        item.treasury_provider == "SAFE_SPENDING_LIMIT"
-                        or "TREASURY_DESTINATION_RECEIPT_CONFIRMED" in confirmed
-                    )
+                elif item.path == DirectCapitalPath.HYPERLIQUID_TO_VAULT.value and (
+                    item.treasury_provider == "SAFE_SPENDING_LIMIT"
+                    or "TREASURY_DESTINATION_RECEIPT_CONFIRMED" in confirmed
                 ):
                     item.status = "SETTLED"
                     item.receipt_status = "CONFIRMED"
@@ -2180,3 +2171,81 @@ class DirectOperationCapitalService(ServiceComponent):
                 now=now,
             )
             return item.version
+
+    def acquire_direct_capital_binance_receipt_poll(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        expected_version: int,
+        stage: str,
+        token: str,
+        now: datetime,
+    ) -> None:
+        """Lease one Binance receipt stage across tabs and server requests."""
+
+        expected_path = {
+            "BINANCE_DEPOSIT": DirectCapitalPath.VAULT_TO_BINANCE.value,
+            "BINANCE_WITHDRAWAL": DirectCapitalPath.BINANCE_TO_VAULT.value,
+        }.get(stage)
+        if expected_path is None:
+            _reject("BINANCE_CAPITAL_RECEIPT_STAGE_INVALID", "unknown Binance receipt stage")
+        with self.database.session_factory.begin() as session:
+            item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
+            self.transactions._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
+            if item.version != expected_version:
+                _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
+            if item.path != expected_path:
+                _reject("BINANCE_CAPITAL_RECEIPT_STAGE_INVALID", "receipt does not match path")
+            lease_until = (
+                None
+                if item.receipt_poll_started_at is None
+                else item.receipt_poll_started_at + timedelta(seconds=90)
+            )
+            if (
+                item.receipt_poll_token is not None
+                and item.receipt_poll_token != token
+                and lease_until is not None
+                and lease_until > now
+            ):
+                raise DomainRejected(
+                    "BINANCE_RECEIPT_CHECK_IN_PROGRESS",
+                    "this Binance receipt stage already has an active server-side check",
+                    metadata={
+                        "operation_id": str(operation_id),
+                        "receipt_stage": item.receipt_poll_stage,
+                        "next_retry_at": lease_until.astimezone(UTC).isoformat(),
+                    },
+                )
+            item.receipt_poll_stage = stage
+            item.receipt_poll_started_at = now
+            item.receipt_poll_token = token
+            item.updated_at = now
+
+    def release_direct_capital_binance_receipt_poll(
+        self,
+        operation_id: UUID,
+        *,
+        stage: str,
+        token: str,
+        now: datetime,
+    ) -> None:
+        with self.database.session_factory.begin() as session:
+            item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                return
+            if item.receipt_poll_stage != stage or item.receipt_poll_token != token:
+                return
+            item.receipt_poll_stage = None
+            item.receipt_poll_started_at = None
+            item.receipt_poll_token = None
+            item.updated_at = now

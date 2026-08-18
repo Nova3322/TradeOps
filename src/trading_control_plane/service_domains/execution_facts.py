@@ -8,6 +8,48 @@ from trading_control_plane.service_core import *
 
 
 class FactIngestionExecutionService(ServiceComponent):
+    def binance_history_cursors(
+        self,
+        account_id: str,
+        actor_id: UUID,
+        *,
+        environment: ExecutionEnvironment,
+    ) -> dict[str, dict[str, datetime | None]]:
+        """Return persisted per-symbol overlap cursors for incremental Binance history."""
+
+        with self.database.session_factory() as session:
+            team = self.transactions._require_role(
+                session, actor_id, "venue.record", account_id, "BINANCE"
+            )
+            fills = session.execute(
+                select(Instrument.symbol, func.max(VenueFill.executed_at))
+                .join(Instrument, Instrument.instrument_id == VenueFill.instrument_id)
+                .where(
+                    VenueFill.team_id == team.team_id,
+                    VenueFill.environment == environment.value,
+                    VenueFill.account_id == account_id,
+                    VenueFill.venue == "BINANCE",
+                )
+                .group_by(Instrument.symbol)
+            ).all()
+            funding = session.execute(
+                select(Instrument.symbol, func.max(FundingPayment.paid_at))
+                .join(Instrument, Instrument.instrument_id == FundingPayment.instrument_id)
+                .where(
+                    FundingPayment.team_id == team.team_id,
+                    FundingPayment.environment == environment.value,
+                    FundingPayment.account_id == account_id,
+                    FundingPayment.venue == "BINANCE",
+                )
+                .group_by(Instrument.symbol)
+            ).all()
+        result: dict[str, dict[str, datetime | None]] = {}
+        for symbol, executed_at in fills:
+            result.setdefault(str(symbol), {"fills": None, "funding": None})["fills"] = executed_at
+        for symbol, paid_at in funding:
+            result.setdefault(str(symbol), {"fills": None, "funding": None})["funding"] = paid_at
+        return result
+
     def record_position(
         self,
         account_id: str,

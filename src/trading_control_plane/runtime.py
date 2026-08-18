@@ -18,6 +18,7 @@ from trading_control_plane.binance import (
     BinancePortfolioMarginReadOnlyClient,
     BinanceReadOnlyClient,
 )
+from trading_control_plane.binance_state import DatabaseBinanceRequestState
 from trading_control_plane.bybit import BybitReadOnlyClient
 from trading_control_plane.config import Settings, get_settings
 from trading_control_plane.database import Database
@@ -146,6 +147,7 @@ class SourceSyncResult:
     status: SourceStatus
     items_observed: int = 0
     error_code: str | None = None
+    retry_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,6 +398,15 @@ class RuntimeSyncWorker:
             runtime_binding=runtime_binding,
             now=now,
         )
+        cursor_installer = getattr(self.binance, "set_history_cursors", None)
+        if cursor_installer is not None:
+            cursor_installer(
+                self.service.binance_history_cursors(
+                    account_id,
+                    actor_id,
+                    environment=ExecutionEnvironment(self.settings.binance_fact_environment),
+                )
+            )
         snapshots = self.binance.read_account_snapshots(
             (self.settings.runtime_binance_symbol,), now=now
         )
@@ -792,7 +803,10 @@ class RuntimeSyncWorker:
         try:
             items_observed = action()
         except DomainRejected as exc:
-            results[name] = SourceSyncResult("FAILED", error_code=exc.code)
+            retry_at = None
+            if exc.metadata is not None and exc.metadata.get("next_retry_at") is not None:
+                retry_at = str(exc.metadata["next_retry_at"])
+            results[name] = SourceSyncResult("FAILED", error_code=exc.code, retry_at=retry_at)
             logger.warning(
                 "Runtime read-only source synchronization failed",
                 extra={
@@ -855,11 +869,21 @@ class RuntimeSyncWorker:
         results: dict[str, SourceSyncResult] = {}
 
         if self.settings.binance_read_only_enabled:
-            self._attempt(
+            cooldown = self._rate_limit_cooldown(
                 "BINANCE",
-                lambda: self._record_binance(actor.user_id, started_at),
-                results,
+                actor_id=actor.user_id,
+                account_id=self.settings.runtime_binance_account_id,
+                venue="BINANCE",
+                now=started_at,
             )
+            if cooldown is None:
+                self._attempt(
+                    "BINANCE",
+                    lambda: self._record_binance(actor.user_id, started_at),
+                    results,
+                )
+            else:
+                results["BINANCE"] = cooldown
         else:
             results["BINANCE"] = SourceSyncResult("SKIPPED")
 
@@ -973,17 +997,27 @@ class RuntimeSyncWorker:
             )
         result: SourceSyncResult
         if binding.venue == "BINANCE":
-            results: dict[str, SourceSyncResult] = {}
-            self._attempt(
+            cooldown = self._rate_limit_cooldown(
                 "BINANCE",
-                lambda: self._record_binance(
-                    binding.service_principal_id,
-                    now,
-                    runtime_binding=binding,
-                ),
-                results,
+                actor_id=binding.service_principal_id,
+                account_id=binding.account_id,
+                venue=binding.venue,
+                now=now,
             )
-            result = results["BINANCE"]
+            if cooldown is not None:
+                result = cooldown
+            else:
+                results: dict[str, SourceSyncResult] = {}
+                self._attempt(
+                    "BINANCE",
+                    lambda: self._record_binance(
+                        binding.service_principal_id,
+                        now,
+                        runtime_binding=binding,
+                    ),
+                    results,
+                )
+                result = results["BINANCE"]
         elif binding.venue == "HYPERLIQUID":
             cooldown = self._rate_limit_cooldown(
                 "HYPERLIQUID",
@@ -1197,12 +1231,14 @@ def build_runtime_worker(settings: Settings, database: Database) -> RuntimeSyncW
         timeout_seconds=settings.perptape_timeout_seconds,
     )
     binance: BinanceReader
+    binance_request_state = DatabaseBinanceRequestState(database)
     if settings.binance_account_mode == "PORTFOLIO_MARGIN":
         binance = BinancePortfolioMarginReadOnlyClient(
             base_url=settings.binance_live_base_url,
             api_key=settings.binance_api_key,
             api_secret=settings.binance_api_secret,
             recv_window_ms=settings.binance_recv_window_ms,
+            request_state=binance_request_state,
         )
     else:
         binance = BinanceReadOnlyClient(
@@ -1210,6 +1246,7 @@ def build_runtime_worker(settings: Settings, database: Database) -> RuntimeSyncW
             api_key=settings.binance_api_key,
             api_secret=settings.binance_api_secret,
             recv_window_ms=settings.binance_recv_window_ms,
+            request_state=binance_request_state,
         )
     hyperliquid = HyperliquidReadOnlyClient(
         base_url=settings.hyperliquid_base_url,

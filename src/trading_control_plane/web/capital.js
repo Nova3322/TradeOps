@@ -311,6 +311,40 @@ const ARBITRUM_WALLET_CHAIN = {
 let directCapitalWalletActions = new Map();
 const directCapitalReceiptReconciliations = new Map();
 const directCapitalOutboundContinuations = new Map();
+const BINANCE_RECEIPT_BROWSER_LEASE_MS = 60_000;
+
+async function withBinanceReceiptBrowserSingleflight(reconciliationKey, action) {
+  const lockName = `tradeops:binance-receipt:${reconciliationKey}`;
+  const browserLocks = globalThis.navigator?.locks;
+  if (browserLocks?.request) {
+    return browserLocks.request(lockName, {mode:'exclusive', ifAvailable:true}, lock => (
+      lock ? action() : {pending:true, active_reconciliation:true}
+    ));
+  }
+  const storage = globalThis.localStorage;
+  if (!storage) return action();
+  const owner = crypto.randomUUID();
+  const renew = () => storage.setItem(lockName, JSON.stringify({owner, expiresAt:Date.now() + BINANCE_RECEIPT_BROWSER_LEASE_MS}));
+  try {
+    const active = JSON.parse(storage.getItem(lockName) || 'null');
+    if (active?.owner && Number(active.expiresAt) > Date.now()) return {pending:true, active_reconciliation:true};
+    renew();
+    const claimed = JSON.parse(storage.getItem(lockName) || 'null');
+    if (claimed?.owner !== owner) return {pending:true, active_reconciliation:true};
+  } catch (_error) {
+    return action();
+  }
+  const heartbeat = setInterval(renew, BINANCE_RECEIPT_BROWSER_LEASE_MS / 2);
+  try {
+    return await action();
+  } finally {
+    clearInterval(heartbeat);
+    try {
+      const active = JSON.parse(storage.getItem(lockName) || 'null');
+      if (active?.owner === owner) storage.removeItem(lockName);
+    } catch (_error) { /* the server-side lease remains authoritative */ }
+  }
+}
 
 function directCapitalCurrentPhase(operation) {
   const stages = operation?.stages || [];
@@ -707,7 +741,7 @@ async function prepareAndSubmitBinanceWithdrawal({operationId, version}) {
     timeoutMs:60_000,
     body:JSON.stringify({expected_version:Number(version), final_confirmed:true, idempotency_key:crypto.randomUUID()}),
   });
-  return retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/binance-submit`, {
+  return api(`/api/capital/direct-operations/${operationId}/binance-submit`, {
     method:'POST',
     body:JSON.stringify({
       expected_version:Number(preview.version),
@@ -715,7 +749,7 @@ async function prepareAndSubmitBinanceWithdrawal({operationId, version}) {
       confirmation_phrase:'CONFIRM_BINANCE_WITHDRAWAL',
       idempotency_key:crypto.randomUUID(),
     }),
-  }), {attempts:20, delayMs:1000});
+  });
 }
 
 const PUBLIC_RECEIPT_PENDING_CODES = new Set([
@@ -726,11 +760,14 @@ const PUBLIC_RECEIPT_PENDING_CODES = new Set([
   'BINANCE_CAPITAL_WITHDRAWAL_PENDING',
   'BINANCE_CAPITAL_DEPOSIT_PENDING',
   'BINANCE_INTERNAL_TRANSFER_PENDING',
+  'BINANCE_CAPITAL_RATE_LIMITED',
+  'BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED',
+  'BINANCE_RECEIPT_CHECK_IN_PROGRESS',
 ]);
 
 const waitForPublicReceipt = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
-async function retryDirectPublicReceipt(request, {attempts = 20, delayMs = 3000} = {}) {
+async function retryDirectPublicReceipt(request, {attempts = 20, delayMs = 3000, delaysMs = null} = {}) {
   let lastPendingError = null;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
@@ -738,7 +775,14 @@ async function retryDirectPublicReceipt(request, {attempts = 20, delayMs = 3000}
     } catch (error) {
       if (!PUBLIC_RECEIPT_PENDING_CODES.has(error?.code)) throw error;
       lastPendingError = error;
-      if (attempt + 1 < attempts) await waitForPublicReceipt(delayMs);
+      if (error?.code === 'BINANCE_RECEIPT_CHECK_IN_PROGRESS') break;
+      if (attempt + 1 < attempts) {
+        const nextRetryAt = Date.parse(error?.details?.next_retry_at || '');
+        const retryAfterMs = Number(error?.details?.retry_after_seconds || 0) * 1000;
+        const serverDelayMs = Number.isFinite(nextRetryAt) ? Math.max(0, nextRetryAt - Date.now()) : 0;
+        const scheduledDelayMs = delaysMs?.[Math.min(attempt, delaysMs.length - 1)] ?? delayMs;
+        await waitForPublicReceipt(Math.max(scheduledDelayMs, retryAfterMs, serverDelayMs));
+      }
     }
   }
   return {pending:true, error:lastPendingError};
@@ -896,16 +940,57 @@ function reconcilePendingHyperliquidDeposits(operations) {
 }
 
 async function verifyBinanceReceipt({operationId, version, stage, transactionHash}) {
-  return retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/binance-receipt`, {
-    method:'POST',
-    timeoutMs:60_000,
-    body:JSON.stringify({
-      expected_version:Number(version),
-      stage,
-      transaction_hash:transactionHash || undefined,
-      idempotency_key:crypto.randomUUID(),
-    }),
-  }), {attempts:120, delayMs:3000});
+  const idempotencyKey = crypto.randomUUID();
+  return withBinanceReceiptBrowserSingleflight(`${operationId}:${stage}`, () => (
+    retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/binance-receipt`, {
+      method:'POST',
+      timeoutMs:60_000,
+      body:JSON.stringify({
+        expected_version:Number(version),
+        stage,
+        transaction_hash:transactionHash || undefined,
+        idempotency_key:idempotencyKey,
+      }),
+    }), {attempts:6, delaysMs:[3000, 5000, 10000, 20000, 30000]})
+  ));
+}
+
+function reconcilePendingBinanceReceipts(operations) {
+  (operations || []).filter(operation => (
+    ['VAULT_TO_BINANCE', 'BINANCE_TO_VAULT'].includes(operation.path)
+    && operation.status === 'AWAITING_RECEIPT'
+  )).slice(0, 1).forEach(operation => {
+    const stages = operation.stages || [];
+    const receiptStage = operation.path === 'VAULT_TO_BINANCE' ? 'BINANCE_DEPOSIT' : 'BINANCE_WITHDRAWAL';
+    const reconciliationKey = `${operation.operation_id}:${receiptStage}`;
+    if (directCapitalReceiptReconciliations.has(reconciliationKey)) return;
+    const confirmed = stages.some(stage => stage.code === `${receiptStage}_RECEIPT_CONFIRMED`);
+    const sourceSubmission = operation.path === 'VAULT_TO_BINANCE'
+      ? [...stages].reverse().find(stage => ['NOTILT_DESTINATION_TRANSFER_SUBMITTED_BY_HUMAN_WALLET', 'TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET'].includes(stage.code))
+      : [...stages].reverse().find(stage => stage.code === 'BINANCE_RESTRICTED_WITHDRAWAL_SUBMITTED');
+    if (confirmed || !sourceSubmission) return;
+    const transactionHash = sourceSubmission.transaction_hash || sourceSubmission.submission?.transactionHash || '';
+    const job = verifyBinanceReceipt({
+      operationId:operation.operation_id,
+      version:Number(operation.version),
+      stage:receiptStage,
+      transactionHash,
+    }).then(async receipt => {
+      if (receipt.pending) {
+        setDirectCapitalLiveProgress('币安回执仍在确认；刷新页面后会从当前阶段继续，不会并行重复核对');
+        return;
+      }
+      showToast('币安与链上公开回执已核对');
+      await route();
+    }).catch(async error => {
+      if (error?.code === 'VERSION_CONFLICT') setTimeout(() => route(), 0);
+      else {
+        setDirectCapitalLiveProgress(`币安资金已提交，公开回执核对暂缓（${error?.code || 'RECEIPT_UNAVAILABLE'}）；系统不会重复提交`);
+        setTimeout(() => route(), 30_000);
+      }
+    }).finally(() => directCapitalReceiptReconciliations.delete(reconciliationKey));
+    directCapitalReceiptReconciliations.set(reconciliationKey, job);
+  });
 }
 
 async function continueSafeOutboundExecution({operationId, version, path, transactionHash}) {
@@ -1522,6 +1607,7 @@ async function renderCapitalCenter() {
   main.innerHTML = `<section class="page capital-page"><header class="page-head capital-page-head"><div><p class="eyebrow">${fmtExecutionMode(displayEnvironment)} · 资金保管</p><h1>资金中心</h1><p class="lede">集中查看 Vault、Safe 与生产资金路径；资金账户汇总和曲线统一在绩效报表展示。</p></div>${displayEnvironment === 'LIVE' ? `<div class="capital-gate-summary"><small>生产资金操作</small><b>${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b><span>在途 / 占用 ${fmtNumber(liveInTransit)} USDC</span></div>` : ''}</header>${displayEnvironment === 'LIVE' ? liveContent : testnetContent}</section>`;
   bindCapitalActions();
   if (displayEnvironment === 'LIVE') {
+    reconcilePendingBinanceReceipts(item.direct_operations);
     reconcilePendingHyperliquidWithdrawals(item.direct_operations);
     reconcilePendingSafeHyperliquidDeposits(item.direct_operations);
     reconcilePendingHyperliquidDeposits(item.direct_operations);
@@ -1833,10 +1919,13 @@ function bindCapitalActions() {
     const target = event.currentTarget;
     await withPending(target, '自动核对到账…', async () => {
       try {
-        const payload = {expected_version:Number(target.dataset.operationVersion), stage:target.dataset.binanceStage, idempotency_key:crypto.randomUUID()};
-        if (target.dataset.transactionHash) payload.transaction_hash = target.dataset.transactionHash;
-        await api(`/api/capital/direct-operations/${target.dataset.binanceReceiptDirect}/binance-receipt`, {method:'POST', body:JSON.stringify(payload)});
-        showToast('币安与链上公开回执已核对');
+        const receipt = await verifyBinanceReceipt({
+          operationId:target.dataset.binanceReceiptDirect,
+          version:Number(target.dataset.operationVersion),
+          stage:target.dataset.binanceStage,
+          transactionHash:target.dataset.transactionHash,
+        });
+        showToast(receipt.pending ? '币安回执仍在确认，刷新页面后会继续核对' : '币安与链上公开回执已核对');
         await route();
       } catch (error) { showApiError(error); }
     });

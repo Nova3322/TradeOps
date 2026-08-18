@@ -7,15 +7,16 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import partial
 from typing import Any, cast
 
 from trading_control_plane.binance_errors import (
     BinanceApiRejected,
+    BinanceRequestState,
     classify_binance_rate_limit,
 )
 from trading_control_plane.domain import DomainRejected
@@ -50,6 +51,8 @@ def _raise_rate_limit(
     *,
     exchange_code: int | None,
     exchange_message: str | None,
+    state: BinanceRequestState | None = None,
+    host: str | None = None,
 ) -> None:
     diagnostic = classify_binance_rate_limit(
         http_status=exc.code,
@@ -57,6 +60,8 @@ def _raise_rate_limit(
         binance_error_message=exchange_message,
         headers=cast(dict[str, str], exc.headers or {}),
     )
+    if state is not None:
+        state.record_rate_limit(diagnostic, host=host)
     label = {
         "ORDINARY_RATE_LIMIT": "ordinary request rate limit",
         "REQUEST_WEIGHT_EXCEEDED": "request weight limit",
@@ -69,7 +74,27 @@ def _raise_rate_limit(
     ) from exc
 
 
-def _server_time_from(base_url: str, timeout: float) -> int:
+def _enforce_request_state(state: BinanceRequestState | None) -> None:
+    if state is None:
+        return
+    diagnostic = state.blocked_diagnostic()
+    if diagnostic is None:
+        return
+    raise BinanceApiRejected(
+        "BINANCE_RATE_LIMITED",
+        "Binance deployment-wide cooldown is active until next_retry_at",
+        diagnostic,
+    )
+
+
+def _server_time_from(
+    base_url: str,
+    timeout: float,
+    *,
+    state: BinanceRequestState | None = None,
+) -> int:
+    _enforce_request_state(state)
+    host = urllib.parse.urlparse(base_url).hostname
     request = urllib.request.Request(  # noqa: S310 - caller pins the official Binance host
         f"{base_url.rstrip('/')}/fapi/v1/time",
         method="GET",
@@ -79,6 +104,8 @@ def _server_time_from(base_url: str, timeout: float) -> int:
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
                 raw = json.loads(response.read())
+                if state is not None:
+                    state.record_success(getattr(response, "headers", {}), host=host)
             return int(raw["serverTime"])
         except urllib.error.HTTPError as exc:
             exchange_code, exchange_message = _binance_http_error(exc)
@@ -87,6 +114,8 @@ def _server_time_from(base_url: str, timeout: float) -> int:
                     exc,
                     exchange_code=exchange_code,
                     exchange_message=exchange_message,
+                    state=state,
+                    host=host,
                 )
             last_error = exc
             if attempt < 2 and exc.code >= 500:
@@ -110,7 +139,15 @@ def _default_server_time_fetcher(timeout: float) -> int:
     return _server_time_from("https://fapi.binance.com", timeout)
 
 
-def _default_fetcher(url: str, headers: dict[str, str], timeout: float) -> JsonValue:
+def _default_fetcher(
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
+    *,
+    state: BinanceRequestState | None = None,
+) -> JsonValue:
+    _enforce_request_state(state)
+    host = urllib.parse.urlparse(url).hostname
     request = urllib.request.Request(url, headers=headers, method="GET")  # noqa: S310
     body: bytes | None = None
     last_error: BaseException | None = None
@@ -118,6 +155,8 @@ def _default_fetcher(url: str, headers: dict[str, str], timeout: float) -> JsonV
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
                 body = response.read()
+                if state is not None:
+                    state.record_success(getattr(response, "headers", {}), host=host)
             break
         except urllib.error.HTTPError as exc:
             exchange_code, exchange_message = _binance_http_error(exc)
@@ -130,6 +169,8 @@ def _default_fetcher(url: str, headers: dict[str, str], timeout: float) -> JsonV
                     exc,
                     exchange_code=exchange_code,
                     exchange_message=exchange_message,
+                    state=state,
+                    host=host,
                 )
             else:
                 code = "BINANCE_READ_ONLY_UNAVAILABLE"
@@ -281,16 +322,34 @@ class BinanceReadOnlyClient:
         recv_window_ms: int = 5_000,
         fetcher: JsonFetcher = _default_fetcher,
         server_time_fetcher: ServerTimeFetcher | None = None,
+        request_state: BinanceRequestState | None = None,
+        clock_ms: Callable[[], int] | None = None,
+        exchange_info_cache_seconds: int = 1_800,
+        history_refresh_seconds: int = 600,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._api_secret = api_secret
         self._recv_window_ms = recv_window_ms
-        self._fetcher = fetcher
-        self._server_time_fetcher = server_time_fetcher or partial(
-            _server_time_from,
-            self._base_url,
+        self._request_state = request_state or BinanceRequestState()
+        self._fetcher_records_state = fetcher is _default_fetcher
+        self._fetcher = (
+            partial(_default_fetcher, state=self._request_state)
+            if fetcher is _default_fetcher
+            else fetcher
         )
+        self._server_time_records_state = server_time_fetcher is None
+        self._server_time_fetcher = server_time_fetcher or partial(
+            _server_time_from, self._base_url, state=self._request_state
+        )
+        self._clock_ms = clock_ms or (lambda: int(time.time() * 1000))
+        self._exchange_info_cache_seconds = max(1_800, exchange_info_cache_seconds)
+        self._exchange_info_cache: JsonValue | None = None
+        self._exchange_info_cached_at: datetime | None = None
+        self._symbol_exchange_info_cache: dict[str, tuple[JsonValue, datetime]] = {}
+        self._history_refresh_seconds = min(900, max(300, history_refresh_seconds))
+        self._history_last_requested_at: datetime | None = None
+        self._history_cursors: dict[str, dict[str, datetime | None]] = {}
 
     @property
     def configured(self) -> bool:
@@ -299,14 +358,107 @@ class BinanceReadOnlyClient:
     def read_active_instruments(self) -> tuple[BinanceInstrument, ...]:
         """Read the complete official USDⓈ-M perpetual catalog without credentials."""
 
-        exchange = self._public_get("/fapi/v1/exchangeInfo", {})
+        exchange = self._exchange_info()
         return self._parse_active_instruments(exchange)
 
+    def set_history_cursors(self, cursors: Mapping[str, Mapping[str, datetime | None]]) -> None:
+        self._history_cursors = {
+            symbol: {
+                "fills": values.get("fills"),
+                "funding": values.get("funding"),
+            }
+            for symbol, values in cursors.items()
+        }
+
+    def _exchange_info(self, *, now: datetime | None = None) -> JsonValue:
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        if (
+            self._exchange_info_cache is not None
+            and self._exchange_info_cached_at is not None
+            and (current - self._exchange_info_cached_at).total_seconds()
+            < self._exchange_info_cache_seconds
+        ):
+            return self._exchange_info_cache
+        exchange = self._public_get("/fapi/v1/exchangeInfo", {})
+        self._exchange_info_cache = exchange
+        self._exchange_info_cached_at = current
+        return exchange
+
+    def _exchange_info_for_symbol(self, symbol: str, *, now: datetime) -> JsonValue:
+        current = now.astimezone(UTC)
+        if (
+            self._exchange_info_cache is not None
+            and self._exchange_info_cached_at is not None
+            and (current - self._exchange_info_cached_at).total_seconds()
+            < self._exchange_info_cache_seconds
+        ):
+            return self._exchange_info_cache
+        cached = self._symbol_exchange_info_cache.get(symbol)
+        if (
+            cached is not None
+            and (current - cached[1]).total_seconds() < self._exchange_info_cache_seconds
+        ):
+            return cached[0]
+        exchange = self._public_get("/fapi/v1/exchangeInfo", {"symbol": symbol})
+        self._symbol_exchange_info_cache[symbol] = (exchange, current)
+        return exchange
+
+    def _timestamp_ms(self) -> int:
+        _enforce_request_state(self._request_state)
+        now = datetime.now(UTC)
+        cached = self._request_state.current_time_offset()
+        if cached is not None and now - cached[1] <= timedelta(seconds=30):
+            return self._clock_ms() + cached[0]
+        try:
+            server_time = self._server_time_fetcher(5.0)
+        except BinanceApiRejected as exc:
+            self._request_state.record_rate_limit(exc.diagnostic)
+            raise
+        if not self._server_time_records_state:
+            self._request_state.record_success()
+        self._request_state.record_time_offset(server_time - self._clock_ms(), synchronized_at=now)
+        return server_time
+
+    def _history_due(self, now: datetime) -> bool:
+        return (
+            self._history_last_requested_at is None
+            or (now - self._history_last_requested_at).total_seconds()
+            >= self._history_refresh_seconds
+        )
+
+    def _history_params(self, symbol: str, kind: str) -> dict[str, str]:
+        params = {"symbol": symbol, "limit": "1000"}
+        cursor = self._history_cursors.get(symbol, {}).get(kind)
+        if cursor is not None:
+            overlap = cursor.astimezone(UTC) - timedelta(minutes=5)
+            params["startTime"] = str(max(0, int(overlap.timestamp() * 1000)))
+        return params
+
+    def _assert_low_priority_allowed(self, now: datetime) -> None:
+        retry_at = self._request_state.low_priority_retry_at(now=now)
+        if retry_at is not None and retry_at > now:
+            raise DomainRejected(
+                "BINANCE_HISTORY_DEFERRED_WEIGHT_HEADROOM",
+                "Binance history reads are deferred to preserve request-weight headroom",
+                metadata={"next_retry_at": retry_at.isoformat()},
+            )
+
     def _public_get(self, path: str, params: dict[str, str]) -> JsonValue:
+        _enforce_request_state(self._request_state)
         query = urllib.parse.urlencode(params)
-        return self._fetcher(f"{self._base_url}{path}?{query}", {}, 5.0)
+        try:
+            result = self._fetcher(f"{self._base_url}{path}?{query}", {}, 5.0)
+        except BinanceApiRejected as exc:
+            self._request_state.record_rate_limit(
+                exc.diagnostic, host=urllib.parse.urlparse(self._base_url).hostname
+            )
+            raise
+        if not self._fetcher_records_state:
+            self._request_state.record_success()
+        return result
 
     def _signed_get(self, path: str, params: dict[str, str], *, timestamp_ms: int) -> JsonValue:
+        _enforce_request_state(self._request_state)
         if not self.configured:
             raise DomainRejected(
                 "BINANCE_READ_ONLY_NOT_CONFIGURED",
@@ -321,11 +473,20 @@ class BinanceReadOnlyClient:
         assert self._api_secret is not None
         signature = hmac.new(self._api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
         assert self._api_key is not None
-        return self._fetcher(
-            f"{self._base_url}{path}?{query}&signature={signature}",
-            {"X-MBX-APIKEY": self._api_key},
-            5.0,
-        )
+        try:
+            result = self._fetcher(
+                f"{self._base_url}{path}?{query}&signature={signature}",
+                {"X-MBX-APIKEY": self._api_key},
+                5.0,
+            )
+        except BinanceApiRejected as exc:
+            self._request_state.record_rate_limit(
+                exc.diagnostic, host=urllib.parse.urlparse(self._base_url).hostname
+            )
+            raise
+        if not self._fetcher_records_state:
+            self._request_state.record_success()
+        return result
 
     def verify_connection(self, *, now: datetime) -> None:
         """Authenticate one USD-M account read without persisting account facts."""
@@ -334,7 +495,7 @@ class BinanceReadOnlyClient:
         raw = self._signed_get(
             "/fapi/v3/balance",
             {},
-            timestamp_ms=self._server_time_fetcher(5.0),
+            timestamp_ms=self._timestamp_ms(),
         )
         if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
             raise DomainRejected(
@@ -345,7 +506,7 @@ class BinanceReadOnlyClient:
         if not symbol or symbol != symbol.upper():
             raise DomainRejected("BINANCE_SYMBOL_INVALID", "Binance symbol must be uppercase")
         timestamp_ms = int(now.timestamp() * 1000)
-        exchange = self._public_get("/fapi/v1/exchangeInfo", {"symbol": symbol})
+        exchange = self._exchange_info_for_symbol(symbol, now=now)
         position = self._signed_get(
             "/fapi/v3/positionRisk", {"symbol": symbol}, timestamp_ms=timestamp_ms
         )
@@ -390,7 +551,7 @@ class BinanceReadOnlyClient:
         target_symbols = configured | active_symbols | self._order_symbols(orders, "openOrders")
         current_snapshots: list[BinanceReadOnlySnapshot] = []
         for symbol in sorted(target_symbols):
-            exchange = self._public_get("/fapi/v1/exchangeInfo", {"symbol": symbol})
+            exchange = self._exchange_info_for_symbol(symbol, now=now)
             instrument = self._parse_instrument(exchange, symbol)
             parsed_orders = self._parse_orders(orders, symbol, now)
             position = self._parse_position_or_flat(positions, symbol, now)
@@ -407,20 +568,23 @@ class BinanceReadOnlyClient:
                     protection=self._select_protection(parsed_orders, position),
                 )
             )
+        if not self._history_due(now):
+            return tuple(current_snapshots)
+        self._history_last_requested_at = now
         try:
+            self._assert_low_priority_allowed(now)
             snapshots: list[BinanceReadOnlySnapshot] = []
             for snapshot in current_snapshots:
                 fills = self._signed_get(
                     "/fapi/v1/userTrades",
-                    {"symbol": snapshot.symbol, "limit": "1000"},
+                    self._history_params(snapshot.symbol, "fills"),
                     timestamp_ms=timestamp_ms,
                 )
                 funding = self._signed_get(
                     "/fapi/v1/income",
                     {
-                        "symbol": snapshot.symbol,
+                        **self._history_params(snapshot.symbol, "funding"),
                         "incomeType": "FUNDING_FEE",
-                        "limit": "1000",
                     },
                     timestamp_ms=timestamp_ms,
                 )
@@ -740,6 +904,10 @@ class BinancePortfolioMarginReadOnlyClient:
         recv_window_ms: int = 10_000,
         fetcher: JsonFetcher = _default_fetcher,
         server_time_fetcher: ServerTimeFetcher = _default_server_time_fetcher,
+        request_state: BinanceRequestState | None = None,
+        clock_ms: Callable[[], int] | None = None,
+        exchange_info_cache_seconds: int = 1_800,
+        history_refresh_seconds: int = 600,
     ) -> None:
         parsed = urllib.parse.urlparse(base_url)
         if parsed.scheme != "https" or parsed.hostname != "papi.binance.com":
@@ -750,18 +918,120 @@ class BinancePortfolioMarginReadOnlyClient:
         self._api_key = api_key
         self._api_secret = api_secret
         self._recv_window_ms = recv_window_ms
-        self._fetcher = fetcher
-        self._server_time_fetcher = server_time_fetcher
+        self._request_state = request_state or BinanceRequestState()
+        self._fetcher_records_state = fetcher is _default_fetcher
+        self._fetcher = (
+            partial(_default_fetcher, state=self._request_state)
+            if fetcher is _default_fetcher
+            else fetcher
+        )
+        self._server_time_records_state = server_time_fetcher is _default_server_time_fetcher
+        self._server_time_fetcher = (
+            partial(_server_time_from, "https://fapi.binance.com", state=self._request_state)
+            if self._server_time_records_state
+            else server_time_fetcher
+        )
+        self._clock_ms = clock_ms or (lambda: int(time.time() * 1000))
+        self._exchange_info_cache_seconds = max(1_800, exchange_info_cache_seconds)
+        self._exchange_info_cache: JsonValue | None = None
+        self._exchange_info_cached_at: datetime | None = None
+        self._symbol_exchange_info_cache: dict[str, tuple[JsonValue, datetime]] = {}
+        self._history_refresh_seconds = min(900, max(300, history_refresh_seconds))
+        self._history_last_requested_at: datetime | None = None
+        self._history_cursors: dict[str, dict[str, datetime | None]] = {}
 
     @property
     def configured(self) -> bool:
         return bool(self._api_key and self._api_secret)
 
     def read_active_instruments(self) -> tuple[BinanceInstrument, ...]:
-        exchange = self._market_get("/fapi/v1/exchangeInfo", {})
+        exchange = self._exchange_info()
         return BinanceReadOnlyClient._parse_active_instruments(exchange)
 
+    def set_history_cursors(self, cursors: Mapping[str, Mapping[str, datetime | None]]) -> None:
+        self._history_cursors = {
+            symbol: {
+                "fills": values.get("fills"),
+                "funding": values.get("funding"),
+            }
+            for symbol, values in cursors.items()
+        }
+
+    def _exchange_info(self, *, now: datetime | None = None) -> JsonValue:
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        if (
+            self._exchange_info_cache is not None
+            and self._exchange_info_cached_at is not None
+            and (current - self._exchange_info_cached_at).total_seconds()
+            < self._exchange_info_cache_seconds
+        ):
+            return self._exchange_info_cache
+        exchange = self._market_get("/fapi/v1/exchangeInfo", {})
+        self._exchange_info_cache = exchange
+        self._exchange_info_cached_at = current
+        return exchange
+
+    def _exchange_info_for_symbol(self, symbol: str, *, now: datetime) -> JsonValue:
+        current = now.astimezone(UTC)
+        if (
+            self._exchange_info_cache is not None
+            and self._exchange_info_cached_at is not None
+            and (current - self._exchange_info_cached_at).total_seconds()
+            < self._exchange_info_cache_seconds
+        ):
+            return self._exchange_info_cache
+        cached = self._symbol_exchange_info_cache.get(symbol)
+        if (
+            cached is not None
+            and (current - cached[1]).total_seconds() < self._exchange_info_cache_seconds
+        ):
+            return cached[0]
+        exchange = self._market_get("/fapi/v1/exchangeInfo", {"symbol": symbol})
+        self._symbol_exchange_info_cache[symbol] = (exchange, current)
+        return exchange
+
+    def _timestamp_ms(self) -> int:
+        _enforce_request_state(self._request_state)
+        now = datetime.now(UTC)
+        cached = self._request_state.current_time_offset()
+        if cached is not None and now - cached[1] <= timedelta(seconds=30):
+            return self._clock_ms() + cached[0]
+        try:
+            server_time = self._server_time_fetcher(5.0)
+        except BinanceApiRejected as exc:
+            self._request_state.record_rate_limit(exc.diagnostic)
+            raise
+        if not self._server_time_records_state:
+            self._request_state.record_success()
+        self._request_state.record_time_offset(server_time - self._clock_ms(), synchronized_at=now)
+        return server_time
+
+    def _history_due(self, now: datetime) -> bool:
+        return (
+            self._history_last_requested_at is None
+            or (now - self._history_last_requested_at).total_seconds()
+            >= self._history_refresh_seconds
+        )
+
+    def _history_params(self, symbol: str, kind: str) -> dict[str, str]:
+        params = {"symbol": symbol, "limit": "1000"}
+        cursor = self._history_cursors.get(symbol, {}).get(kind)
+        if cursor is not None:
+            overlap = cursor.astimezone(UTC) - timedelta(minutes=5)
+            params["startTime"] = str(max(0, int(overlap.timestamp() * 1000)))
+        return params
+
+    def _assert_low_priority_allowed(self, now: datetime) -> None:
+        retry_at = self._request_state.low_priority_retry_at(now=now)
+        if retry_at is not None and retry_at > now:
+            raise DomainRejected(
+                "BINANCE_HISTORY_DEFERRED_WEIGHT_HEADROOM",
+                "Binance history reads are deferred to preserve request-weight headroom",
+                metadata={"next_retry_at": retry_at.isoformat()},
+            )
+
     def _signed_get(self, path: str, params: dict[str, str], *, timestamp_ms: int) -> JsonValue:
+        _enforce_request_state(self._request_state)
         if not self.configured:
             raise DomainRejected(
                 "BINANCE_READ_ONLY_NOT_CONFIGURED",
@@ -776,21 +1046,38 @@ class BinancePortfolioMarginReadOnlyClient:
         assert self._api_secret is not None
         signature = hmac.new(self._api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
         assert self._api_key is not None
-        return self._fetcher(
-            f"{self._base_url}{path}?{query}&signature={signature}",
-            {"X-MBX-APIKEY": self._api_key},
-            5.0,
-        )
+        try:
+            result = self._fetcher(
+                f"{self._base_url}{path}?{query}&signature={signature}",
+                {"X-MBX-APIKEY": self._api_key},
+                5.0,
+            )
+        except BinanceApiRejected as exc:
+            self._request_state.record_rate_limit(
+                exc.diagnostic, host=urllib.parse.urlparse(self._base_url).hostname
+            )
+            raise
+        if not self._fetcher_records_state:
+            self._request_state.record_success()
+        return result
 
     def _market_get(self, path: str, params: dict[str, str]) -> JsonValue:
+        _enforce_request_state(self._request_state)
         query = urllib.parse.urlencode(params)
-        return self._fetcher(f"https://fapi.binance.com{path}?{query}", {}, 5.0)
+        try:
+            result = self._fetcher(f"https://fapi.binance.com{path}?{query}", {}, 5.0)
+        except BinanceApiRejected as exc:
+            self._request_state.record_rate_limit(exc.diagnostic, host="fapi.binance.com")
+            raise
+        if not self._fetcher_records_state:
+            self._request_state.record_success(host="fapi.binance.com")
+        return result
 
     def verify_connection(self, *, now: datetime) -> None:
         """Authenticate one Portfolio Margin account read without ingesting facts."""
 
         del now
-        timestamp_ms = self._server_time_fetcher(5.0)
+        timestamp_ms = self._timestamp_ms()
         raw = self._signed_get("/papi/v1/account", {}, timestamp_ms=timestamp_ms)
         if not isinstance(raw, dict) or not isinstance(raw.get("totalWalletBalance"), str):
             raise DomainRejected(
@@ -802,9 +1089,9 @@ class BinancePortfolioMarginReadOnlyClient:
         del now
         if not symbol or symbol != symbol.upper():
             raise DomainRejected("BINANCE_SYMBOL_INVALID", "Binance symbol must be uppercase")
-        timestamp_ms = self._server_time_fetcher(5.0)
+        timestamp_ms = self._timestamp_ms()
         observed_at = datetime.fromtimestamp(timestamp_ms / 1000, UTC)
-        exchange = self._market_get("/fapi/v1/exchangeInfo", {"symbol": symbol})
+        exchange = self._exchange_info_for_symbol(symbol, now=observed_at)
         mark = self._market_get("/fapi/v1/premiumIndex", {"symbol": symbol})
         um_account = self._signed_get("/papi/v1/um/account", {}, timestamp_ms=timestamp_ms)
         account = self._signed_get("/papi/v1/account", {}, timestamp_ms=timestamp_ms)
@@ -848,9 +1135,8 @@ class BinancePortfolioMarginReadOnlyClient:
     ) -> tuple[BinanceReadOnlySnapshot, ...]:
         """Read the authoritative UM account positions once, then enrich each covered symbol."""
 
-        del now
         configured = BinanceReadOnlyClient._validated_symbols(symbols)
-        timestamp_ms = self._server_time_fetcher(5.0)
+        timestamp_ms = self._timestamp_ms()
         observed_at = datetime.fromtimestamp(timestamp_ms / 1000, UTC)
         um_account = self._signed_get("/papi/v1/um/account", {}, timestamp_ms=timestamp_ms)
         account = self._signed_get("/papi/v1/account", {}, timestamp_ms=timestamp_ms)
@@ -876,7 +1162,7 @@ class BinancePortfolioMarginReadOnlyClient:
         )
         market: dict[str, tuple[BinanceInstrument, JsonValue]] = {}
         for symbol in sorted(target_symbols):
-            exchange = self._market_get("/fapi/v1/exchangeInfo", {"symbol": symbol})
+            exchange = self._exchange_info_for_symbol(symbol, now=now)
             mark = self._market_get("/fapi/v1/premiumIndex", {"symbol": symbol})
             market[symbol] = (BinanceReadOnlyClient._parse_instrument(exchange, symbol), mark)
         collateral_currencies = {
@@ -909,20 +1195,23 @@ class BinancePortfolioMarginReadOnlyClient:
                     protection=BinanceReadOnlyClient._select_protection(parsed_orders, position),
                 )
             )
+        if not self._history_due(now):
+            return tuple(current_snapshots)
+        self._history_last_requested_at = now
         try:
+            self._assert_low_priority_allowed(now)
             snapshots: list[BinanceReadOnlySnapshot] = []
             for snapshot in current_snapshots:
                 fills = self._signed_get(
                     "/papi/v1/um/userTrades",
-                    {"symbol": snapshot.symbol, "limit": "1000"},
+                    self._history_params(snapshot.symbol, "fills"),
                     timestamp_ms=timestamp_ms,
                 )
                 funding = self._signed_get(
                     "/papi/v1/um/income",
                     {
-                        "symbol": snapshot.symbol,
+                        **self._history_params(snapshot.symbol, "funding"),
                         "incomeType": "FUNDING_FEE",
-                        "limit": "1000",
                     },
                     timestamp_ms=timestamp_ms,
                 )

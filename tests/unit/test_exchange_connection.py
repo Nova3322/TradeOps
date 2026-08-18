@@ -10,8 +10,10 @@ from typing import Any
 import pytest
 
 from trading_control_plane.binance import BinanceReadOnlyClient
+from trading_control_plane.binance_errors import BinanceRequestState
 from trading_control_plane.bybit import BybitReadOnlyClient
 from trading_control_plane.domain import DomainRejected
+from trading_control_plane.exchange_connection import ReadOnlyExchangeConnectionVerifier
 from trading_control_plane.hyperliquid import HyperliquidReadOnlyClient
 from trading_control_plane.okx import OkxReadOnlyClient
 
@@ -53,6 +55,64 @@ def test_binance_connection_probe_is_one_signed_read_without_fact_ingestion() ->
         query["signature"]
         == hmac.new(b"secret-5678", unsigned.encode(), hashlib.sha256).hexdigest()
     )
+
+
+def test_portfolio_connection_rate_limit_is_not_hidden_by_standard_auth_fallback(
+    monkeypatch,
+) -> None:
+    class Standard:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def verify_connection(self, *, now: datetime) -> None:
+            del now
+            raise DomainRejected("BINANCE_AUTHENTICATION_FAILED", "not a standard account")
+
+    class Portfolio:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def verify_connection(self, *, now: datetime) -> None:
+            raise DomainRejected(
+                "BINANCE_RATE_LIMITED",
+                "portfolio host is cooling down",
+                metadata={"next_retry_at": now.isoformat(), "http_status": 429},
+            )
+
+    monkeypatch.setattr("trading_control_plane.exchange_connection.BinanceReadOnlyClient", Standard)
+    monkeypatch.setattr(
+        "trading_control_plane.exchange_connection.BinancePortfolioMarginReadOnlyClient",
+        Portfolio,
+    )
+
+    result = ReadOnlyExchangeConnectionVerifier().verify(
+        venue="BINANCE",
+        environment="LIVE",
+        credentials={"api_key": "key", "api_secret": "secret"},
+        now=NOW,
+    )
+
+    assert result.success is False
+    assert result.error_code == "BINANCE_RATE_LIMITED"
+    assert result.diagnostics == {"next_retry_at": NOW.isoformat(), "http_status": 429}
+
+
+def test_manual_binance_connection_is_deferred_before_network_near_weight_limit() -> None:
+    state = BinanceRequestState()
+    state.record_response_headers(
+        {"X-MBX-USED-WEIGHT-1M": "1920"}, observed_at=NOW
+    )
+
+    result = ReadOnlyExchangeConnectionVerifier(request_state=state).verify(
+        venue="BINANCE",
+        environment="LIVE",
+        credentials={"api_key": "key", "api_secret": "secret"},
+        now=NOW,
+    )
+
+    assert result.success is False
+    assert result.error_code == "BINANCE_CONNECTION_WEIGHT_HEADROOM_DEFERRED"
+    assert result.diagnostics is not None and result.diagnostics["next_retry_at"]
 
 
 def test_hyperliquid_connection_probe_uses_only_public_account_info() -> None:
