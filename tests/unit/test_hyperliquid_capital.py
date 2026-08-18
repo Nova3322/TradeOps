@@ -86,6 +86,27 @@ def test_bridge_deposit_is_fixed_to_native_usdc_and_official_bridge() -> None:
     assert mismatched_bridge.value.code == "HYPERLIQUID_BRIDGE_UNTRUSTED"
 
 
+def test_arbitrum_usdc_balance_reads_exact_native_usdc_balance() -> None:
+    def rpc_fetcher(
+        _url: str, method: str, params: list[object], _timeout: float
+    ) -> object:
+        assert method == "eth_call"
+        call = params[0]
+        assert isinstance(call, dict)
+        assert call["to"] == ARBITRUM_NATIVE_USDC_ADDRESS
+        assert str(call["data"]).startswith("0x70a08231")
+        assert params[1] == "latest"
+        return hex(5_100_000)
+
+    balance = HyperliquidCapitalGateway(
+        rpc_fetcher=rpc_fetcher
+    ).arbitrum_usdc_balance(
+        rpc_url="https://arb.example.invalid/rpc",
+        address=MAIN,
+    )
+
+    assert balance == Decimal("5.1")
+
 def test_exact_arbitrum_usdc_transfer_is_ready_for_browser_wallet() -> None:
     artifact = HyperliquidCapitalGateway().prepare_arbitrum_usdc_transfer(
         sender=MAIN,

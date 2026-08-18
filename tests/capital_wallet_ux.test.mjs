@@ -11,6 +11,8 @@ test("capital operations open the connected wallet and record public evidence au
   for (const marker of [
     "eip6963:requestProvider",
     "eip6963:announceProvider",
+    "HUMAN_WALLET_CONFIRMATION_CANCELLED",
+    "WALLET_CONFIRMATION_CANCELLED",
     "eth_requestAccounts",
     "wallet_switchEthereumChain",
     "eth_sendTransaction",

@@ -29,6 +29,7 @@ HYPERLIQUID_BRIDGE2_ADDRESS = "0x2df1c51e09aecf9cacb7bc98cb1742757f163df7"
 ARBITRUM_NATIVE_USDC_ADDRESS = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
 USDC_DECIMALS = 6
 ERC20_TRANSFER_SELECTOR = "a9059cbb"
+ERC20_BALANCE_OF_SELECTOR = "70a08231"
 ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 OFFICIAL_API_HOSTS = frozenset({"api.hyperliquid.xyz", "api.hyperliquid-testnet.xyz"})
 ADDRESS_PATTERN = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -157,6 +158,26 @@ class HyperliquidCapitalGateway:
     def _info(self, base_url: str, payload: JsonObject) -> Any:
         official = _require_official_api(base_url)
         return self._info_fetcher(f"{official}/info", payload, self._timeout_seconds)
+
+    def arbitrum_usdc_balance(self, *, rpc_url: str, address: str) -> Decimal:
+        """Read the exact native-USDC balance before opening a deposit wallet request."""
+
+        trusted_rpc = _require_rpc_url(rpc_url)
+        owner = _address(address, "authorized Arbitrum wallet")
+        data = f"0x{ERC20_BALANCE_OF_SELECTOR}{owner[2:].rjust(64, '0')}"
+        raw = self._rpc_fetcher(
+            trusted_rpc,
+            "eth_call",
+            [{"to": ARBITRUM_NATIVE_USDC_ADDRESS, "data": data}, "latest"],
+            self._timeout_seconds,
+        )
+        try:
+            value = int(str(raw), 16)
+        except (TypeError, ValueError) as exc:
+            raise DomainRejected(
+                "ARBITRUM_RECEIPT_INVALID", "USDC balance response is invalid"
+            ) from exc
+        return Decimal(value) / (Decimal(10) ** USDC_DECIMALS)
 
     def _agent_relationship(
         self,

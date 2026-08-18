@@ -1410,7 +1410,6 @@ class _CapitalRoutes:
                     "HYPERLIQUID_MAIN_ACCOUNT_MISSING",
                     "a Hyperliquid main account or resolvable authorized API wallet is required",
                 )
-            path_wallet = main_account
             if path is DirectCapitalPath.VAULT_TO_HYPERLIQUID:
                 if not any(
                     isinstance(stage, dict)
@@ -1422,11 +1421,37 @@ class _CapitalRoutes:
                         "confirm the exact Safe source transfer before preparing the bridge "
                         "deposit",
                     )
+                frozen_wallet = str(context["destination_reference"] or "")
+                if frozen_wallet.lower() != main_account.lower():
+                    raise DomainRejected(
+                        "HYPERLIQUID_DEPOSIT_ACCOUNT_MISMATCH",
+                        "the frozen Safe destination is not the selected Hyperliquid main account",
+                    )
+                rpc_url = (
+                    direct_settings.capital_arbitrum_rpc_url
+                    or direct_settings.safe_spending_arbitrum_rpc_url
+                )
+                if rpc_url is None:
+                    raise DomainRejected(
+                        "HYPERLIQUID_CAPITAL_SCOPE_MISSING",
+                        "a trusted Arbitrum RPC is required before preparing the bridge deposit",
+                    )
+                required = Decimal(str(context["min_received"]))
+                balance = self.resolved_hyperliquid_capital.arbitrum_usdc_balance(
+                    rpc_url=rpc_url,
+                    address=frozen_wallet,
+                )
+                if balance < required:
+                    raise DomainRejected(
+                        "HYPERLIQUID_DEPOSIT_BALANCE_INSUFFICIENT",
+                        "the frozen Hyperliquid main wallet no longer holds the confirmed "
+                        "deposit amount",
+                    )
                 artifact = self.resolved_hyperliquid_capital.prepare_deposit(
                     base_url=direct_settings.hyperliquid_base_url,
                     main_account=main_account,
                     api_wallet_address=direct_settings.hyperliquid_api_wallet_address,
-                    owned_arbitrum_address=path_wallet,
+                    owned_arbitrum_address=frozen_wallet,
                     bridge_address=bridge,
                     amount=str(context["min_received"]),
                     now=now,
