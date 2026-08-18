@@ -1624,6 +1624,11 @@ class _CapitalRoutes:
                     "withdrawal ledger evidence does not match the recorded signed action",
                 )
             if payload.stage.endswith("LEDGER"):
+                receipt_amount = (
+                    context["min_received"]
+                    if payload.stage == "HYPERLIQUID_WITHDRAWAL_LEDGER"
+                    else artifact["amount"]
+                )
                 evidence = self.resolved_hyperliquid_capital.verify_hyperliquid_ledger(
                     base_url=direct_settings.hyperliquid_base_url,
                     main_account=main_account,
@@ -1634,7 +1639,7 @@ class _CapitalRoutes:
                         if "CLASS_TRANSFER" in payload.stage
                         else "WITHDRAWAL"
                     ),
-                    amount=str(artifact["amount"]),
+                    amount=str(receipt_amount),
                     prepared_at=prepared_at,
                     nonce=payload.nonce,
                     action_hash=payload.action_hash,
@@ -1664,7 +1669,11 @@ class _CapitalRoutes:
                         "rpc_url": rpc_url,
                         "sender": bridge,
                         "recipient": str(artifact["destination"]),
-                        "amount": str(artifact["amount"]),
+                        # withdraw3 deducts the fixed protocol fee before the
+                        # Bridge2 credit. Match the frozen net amount that can
+                        # actually arrive at the Safe/Vault, not the gross
+                        # signed amount.
+                        "amount": str(context["min_received"]),
                         "min_confirmations": direct_settings.notilt_arbitrum_min_confirmations,
                     }
                     evidence = (

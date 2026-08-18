@@ -262,8 +262,8 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 "hash": withdrawal_hash,
                 "delta": {
                     "type": "withdraw",
-                    "usdc": "100.000000000000000000",
-                    "nonce": state["nonce"],
+                    "usdc": "99.000000000000000000",
+                    "nonce": int(state["nonce"]) * 1_000,
                     "fee": "1",
                 },
             }
@@ -287,7 +287,7 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                     {
                         "address": ARBITRUM_NATIVE_USDC_ADDRESS,
                         "topics": [ERC20_TRANSFER_TOPIC, bridge_topic, safe_topic],
-                        "data": hex(100_000_000),
+                        "data": hex(99_000_000),
                     }
                 ],
             }
@@ -370,6 +370,14 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 },
             )
             assert submitted.status_code == 200, submitted.text
+            submitted_operation = next(
+                item
+                for item in submitted.json()["data"]["direct_operations"]
+                if item["operation_id"] == operation_id
+            )
+            assert "HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED" not in (
+                submitted_operation["blockers"]
+            )
             ledger = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/hyperliquid-receipt",
                 json={
@@ -381,6 +389,8 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 },
             )
             assert ledger.status_code == 200, ledger.text
+            assert ledger.json()["receipt"]["amount"] == "99.000000000000000000"
+            assert ledger.json()["receipt"]["nonce"] == artifact["nonce"] * 1_000
             arbitrum = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/hyperliquid-receipt",
                 json={
