@@ -21,6 +21,7 @@ from trading_control_plane.domain import DomainRejected
 JsonObject = dict[str, Any]
 InfoFetcher = Callable[[str, JsonObject, float], Any]
 RpcFetcher = Callable[[str, str, list[object], float], Any]
+CctpFetcher = Callable[[str, dict[str, str], float], Any]
 
 ARBITRUM_CHAIN_ID = 42161
 ARBITRUM_SIGNATURE_CHAIN_ID = "0xa4b1"
@@ -35,7 +36,23 @@ OFFICIAL_API_HOSTS = frozenset({"api.hyperliquid.xyz", "api.hyperliquid-testnet.
 ADDRESS_PATTERN = re.compile(r"^0x[0-9a-fA-F]{40}$")
 HASH_PATTERN = re.compile(r"^0x[0-9a-fA-F]{64}$")
 MINIMUM_DEPOSIT = Decimal("5")
-CURRENT_WITHDRAWAL_FEE = Decimal("1")
+LEGACY_WITHDRAWAL_FEE = Decimal("1")
+CCTP_WITHDRAWAL_FEE = Decimal("0.2")
+CCTP_DESTINATION_CHAIN_ID = 3
+CCTP_DESTINATION_SENTINEL = "0x2000000000000000000000000000000000000000"
+CCTP_INDEXER_URL = "https://indexer.api.across.to/hyperliquid-transfers"
+SEND_TO_EVM_WITH_DATA_SIGN_TYPES = [
+    {"name": "hyperliquidChain", "type": "string"},
+    {"name": "token", "type": "string"},
+    {"name": "amount", "type": "string"},
+    {"name": "sourceDex", "type": "string"},
+    {"name": "destinationRecipient", "type": "string"},
+    {"name": "addressEncoding", "type": "string"},
+    {"name": "destinationChainId", "type": "uint32"},
+    {"name": "gasLimit", "type": "uint64"},
+    {"name": "data", "type": "bytes"},
+    {"name": "nonce", "type": "uint64"},
+]
 
 
 def _reject(code: str, detail: str) -> NoReturn:
@@ -68,6 +85,11 @@ def _amount(value: str | Decimal) -> Decimal:
 
 def _raw_usdc(value: Decimal) -> int:
     return int(value * (Decimal(10) ** USDC_DECIMALS))
+
+
+def _decimal_text(value: Decimal) -> str:
+    normalized = value.normalize()
+    return format(normalized, "f")
 
 
 def _erc20_transfer_data(destination: str, raw_amount: int) -> str:
@@ -137,6 +159,21 @@ def _default_rpc_fetcher(rpc_url: str, method: str, params: list[object], timeou
     return body.get("result")
 
 
+def _default_cctp_fetcher(url: str, params: dict[str, str], timeout: float) -> Any:
+    if url != CCTP_INDEXER_URL:
+        _reject("HYPERLIQUID_CCTP_INDEXER_UNTRUSTED", "CCTP indexer URL is not trusted")
+    try:
+        response = requests.get(url, params=params, timeout=timeout)
+        response.raise_for_status()
+        body = response.json()
+    except (requests.RequestException, requests.JSONDecodeError) as exc:
+        raise DomainRejected(
+            "HYPERLIQUID_CCTP_RECEIPT_UNAVAILABLE",
+            "the official Hyperliquid CCTP receipt index is temporarily unavailable",
+        ) from exc
+    return body
+
+
 class HyperliquidCapitalGateway:
     """Signing-free Hyperliquid/Arbitrum capital boundary.
 
@@ -149,10 +186,12 @@ class HyperliquidCapitalGateway:
         *,
         info_fetcher: InfoFetcher | None = None,
         rpc_fetcher: RpcFetcher | None = None,
+        cctp_fetcher: CctpFetcher | None = None,
         timeout_seconds: float = 5,
     ) -> None:
         self._info_fetcher = info_fetcher or _default_info_fetcher
         self._rpc_fetcher = rpc_fetcher or _default_rpc_fetcher
+        self._cctp_fetcher = cctp_fetcher or _default_cctp_fetcher
         self._timeout_seconds = min(15.0, max(1.0, timeout_seconds))
 
     def _info(self, base_url: str, payload: JsonObject) -> Any:
@@ -323,6 +362,22 @@ class HyperliquidCapitalGateway:
         main = _address(main_account, "Hyperliquid main account")
         target = _address(destination, "authorized Arbitrum destination")
         value = _amount(amount)
+        routing = self._info(base_url, {"type": "usdcRouting"})
+        withdrawal_route = (
+            str(routing.get("withdrawalRoute", "")).lower()
+            if isinstance(routing, dict)
+            else ""
+        )
+        if withdrawal_route not in {"cctp", "bridge"}:
+            _reject(
+                "HYPERLIQUID_WITHDRAWAL_ROUTE_UNKNOWN",
+                "Hyperliquid did not return a supported current USDC withdrawal route",
+            )
+        protocol_fee = (
+            CCTP_WITHDRAWAL_FEE
+            if withdrawal_route == "cctp"
+            else LEGACY_WITHDRAWAL_FEE
+        )
         try:
             fee_limit = None if max_fee is None else Decimal(str(max_fee))
         except (InvalidOperation, TypeError, ValueError) as exc:
@@ -331,7 +386,7 @@ class HyperliquidCapitalGateway:
             ) from exc
         if fee_limit is not None and (not fee_limit.is_finite() or fee_limit < 0):
             _reject("HYPERLIQUID_CAPITAL_AMOUNT_INVALID", "maximum fee cannot be negative")
-        if fee_limit is not None and fee_limit < CURRENT_WITHDRAWAL_FEE:
+        if fee_limit is not None and fee_limit < protocol_fee:
             _reject(
                 "HYPERLIQUID_WITHDRAWAL_FEE_LIMIT_TOO_LOW",
                 "configured fee limit is below the current Hyperliquid withdrawal fee",
@@ -377,7 +432,51 @@ class HyperliquidCapitalGateway:
                 "HYPERLIQUID_WITHDRAWABLE_UNKNOWN",
                 "Hyperliquid returned a negative current withdrawable balance",
             )
-        if withdrawable < value + CURRENT_WITHDRAWAL_FEE:
+        transfer_check: JsonObject | None = None
+        activation_fee = Decimal("0")
+        if withdrawal_route == "cctp":
+            if value < CCTP_WITHDRAWAL_FEE * 2:
+                _reject(
+                    "HYPERLIQUID_WITHDRAWAL_BELOW_MINIMUM",
+                    "current CCTP withdrawals require at least 0.4 USDC",
+                )
+            raw_check = self._info(
+                base_url,
+                {
+                    "type": "preTransferCheck",
+                    "user": CCTP_DESTINATION_SENTINEL,
+                    "source": main,
+                },
+            )
+            if not isinstance(raw_check, dict):
+                _reject(
+                    "HYPERLIQUID_CCTP_PREFLIGHT_INVALID",
+                    "Hyperliquid did not return a valid CCTP transfer preflight",
+                )
+            transfer_check = raw_check
+            if transfer_check.get("isSanctioned") is True:
+                _reject(
+                    "HYPERLIQUID_CCTP_TRANSFER_BLOCKED",
+                    "Hyperliquid blocked the current CCTP destination during preflight",
+                )
+            try:
+                activation_fee = Decimal(str(transfer_check.get("fee", "0")))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise DomainRejected(
+                    "HYPERLIQUID_CCTP_PREFLIGHT_INVALID",
+                    "Hyperliquid returned an invalid CCTP activation fee",
+                ) from exc
+            if not activation_fee.is_finite() or activation_fee < 0:
+                _reject(
+                    "HYPERLIQUID_CCTP_PREFLIGHT_INVALID",
+                    "Hyperliquid returned an invalid CCTP activation fee",
+                )
+        required_balance = (
+            value + activation_fee
+            if withdrawal_route == "cctp"
+            else value + LEGACY_WITHDRAWAL_FEE
+        )
+        if withdrawable < required_balance:
             _reject(
                 "HYPERLIQUID_WITHDRAWABLE_INSUFFICIENT",
                 "current Hyperliquid withdrawable balance does not cover amount plus fee",
@@ -388,9 +487,68 @@ class HyperliquidCapitalGateway:
             api_wallet_address=api_wallet_address,
         )
         nonce = int(now.timestamp() * 1000)
+        hyperliquid_chain = "Mainnet" if official.endswith("hyperliquid.xyz") else "Testnet"
+        if withdrawal_route == "cctp":
+            action = {
+                "type": "sendToEvmWithData",
+                "hyperliquidChain": hyperliquid_chain,
+                "signatureChainId": ARBITRUM_SIGNATURE_CHAIN_ID,
+                "token": "USDC",
+                "amount": _decimal_text(value),
+                "sourceDex": "spot" if withdrawable_source == "UNIFIED_SPOT_USDC" else "",
+                "destinationRecipient": target,
+                "addressEncoding": "hex",
+                "destinationChainId": CCTP_DESTINATION_CHAIN_ID,
+                "gasLimit": 200_000,
+                "data": "0x",
+                "nonce": nonce,
+            }
+            typed_data = user_signed_payload(
+                "HyperliquidTransaction:SendToEvmWithData",
+                SEND_TO_EVM_WITH_DATA_SIGN_TYPES,
+                action,
+            )
+            return {
+                "kind": "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST",
+                "withdrawalRoute": "CCTP",
+                "account": main,
+                "destination": target,
+                "amount": _decimal_text(value),
+                "expectedFee": _decimal_text(protocol_fee),
+                "minReceived": _decimal_text(value - protocol_fee),
+                "activationFeeObserved": _decimal_text(activation_fee),
+                "maxFee": None if fee_limit is None else _decimal_text(fee_limit),
+                "withdrawableObserved": str(withdrawable),
+                "withdrawableSource": withdrawable_source,
+                "accountAbstraction": abstraction,
+                "preTransferCheck": {
+                    "userExists": transfer_check.get("userExists") if transfer_check else None,
+                    "userHasSentTx": (
+                        transfer_check.get("userHasSentTx") if transfer_check else None
+                    ),
+                    "isSanctioned": False,
+                },
+                "nonce": nonce,
+                "action": action,
+                "typedData": typed_data,
+                "exchangeEndpoint": f"{official}/exchange",
+                "exchangeRequestTemplate": {
+                    "action": action,
+                    "nonce": nonce,
+                    "signature": None,
+                    "isFrontend": True,
+                },
+                "agentWallet": relationship,
+                "walletBoundary": "MAIN_OR_VALID_MULTISIG",
+                "fallbackReason": "CCTP_WITHDRAWAL_REQUIRES_USER_SIGNED_ACTION",
+                "preparedAt": now.astimezone(UTC).isoformat(),
+                "expiresAt": (now + timedelta(minutes=5)).astimezone(UTC).isoformat(),
+                "signing": False,
+                "broadcast": False,
+            }
         action = {
             "type": "withdraw3",
-            "hyperliquidChain": "Mainnet" if official.endswith("hyperliquid.xyz") else "Testnet",
+            "hyperliquidChain": hyperliquid_chain,
             "signatureChainId": HYPERLIQUID_SIGNATURE_CHAIN_ID,
             "amount": str(value),
             "time": nonce,
@@ -404,7 +562,9 @@ class HyperliquidCapitalGateway:
             "account": main,
             "destination": target,
             "amount": str(value),
-            "expectedFee": str(CURRENT_WITHDRAWAL_FEE),
+            "expectedFee": str(protocol_fee),
+            "minReceived": str(value - protocol_fee),
+            "withdrawalRoute": "BRIDGE",
             "maxFee": None if fee_limit is None else str(fee_limit),
             "withdrawableObserved": str(withdrawable),
             "withdrawableSource": withdrawable_source,
@@ -417,6 +577,7 @@ class HyperliquidCapitalGateway:
                 "action": action,
                 "nonce": nonce,
                 "signature": None,
+                "isFrontend": True,
             },
             "agentWallet": relationship,
             "walletBoundary": "MAIN_OR_VALID_MULTISIG",
@@ -457,6 +618,7 @@ class HyperliquidCapitalGateway:
         expected_type = {
             "DEPOSIT": "deposit",
             "WITHDRAWAL": "withdraw",
+            "CCTP_WITHDRAWAL": "send",
             "CLASS_TRANSFER": "accountClassTransfer",
         }.get(receipt_kind)
         if expected_type is None:
@@ -473,7 +635,13 @@ class HyperliquidCapitalGateway:
             ):
                 continue
             try:
-                observed_amount = Decimal(str(delta.get("usdc")))
+                observed_amount = Decimal(
+                    str(
+                        delta.get("amount")
+                        if receipt_kind == "CCTP_WITHDRAWAL"
+                        else delta.get("usdc")
+                    )
+                )
                 raw_nonce = delta.get("nonce")
                 raw_time = entry.get("time")
                 observed_nonce = int(str(raw_nonce)) if raw_nonce is not None else None
@@ -482,13 +650,24 @@ class HyperliquidCapitalGateway:
                 continue
             if observed_amount != value:
                 continue
+            if receipt_kind == "CCTP_WITHDRAWAL" and (
+                delta.get("token") != "USDC"
+                or str(delta.get("destination", "")).lower() != CCTP_DESTINATION_SENTINEL
+            ):
+                continue
             # Hyperliquid currently exposes the signed withdraw3 timestamp in
             # milliseconds, while the corresponding non-funding ledger delta
             # can expose the same nonce in microseconds. Accept only those two
             # exact representations so the receipt stays bound to the signed
             # action without leaving it permanently pending.
-            if nonce is not None and observed_nonce not in {nonce, nonce * 1_000}:
-                continue
+            if nonce is not None:
+                valid_nonces = (
+                    {nonce}
+                    if receipt_kind == "CCTP_WITHDRAWAL"
+                    else {nonce, nonce * 1_000}
+                )
+                if observed_nonce not in valid_nonces:
+                    continue
             return {
                 "kind": f"HYPERLIQUID_{expected_type.upper()}_LEDGER_RECEIPT",
                 "hash": str(entry.get("hash", "")).lower(),
@@ -809,4 +988,66 @@ class HyperliquidCapitalGateway:
             "recipient": target,
             "token": token,
             "amount": str(value),
+        }
+
+    def find_cctp_withdrawal_credit(
+        self,
+        *,
+        rpc_url: str,
+        main_account: str,
+        nonce: int,
+        recipient: str,
+        amount: str | Decimal,
+        min_confirmations: int,
+    ) -> JsonObject:
+        """Bind a HyperCore CCTP nonce to its Arbitrum fill and exact USDC credit."""
+
+        main = _address(main_account, "Hyperliquid main account")
+        if nonce <= 0:
+            _reject("HYPERLIQUID_CCTP_RECEIPT_INVALID", "CCTP nonce is invalid")
+        raw = self._cctp_fetcher(
+            CCTP_INDEXER_URL,
+            {"direction": "out", "user": main},
+            self._timeout_seconds,
+        )
+        if not isinstance(raw, list):
+            _reject(
+                "HYPERLIQUID_CCTP_RECEIPT_UNAVAILABLE",
+                "the official Hyperliquid CCTP receipt index returned an invalid response",
+            )
+        matches: list[str] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            fill_hash = str(item.get("fillTxnRef", "")).lower()
+            if (
+                str(item.get("nonce")) == str(nonce)
+                and str(item.get("originChainId")) == "999"
+                and str(item.get("destinationChainId")) == str(ARBITRUM_CHAIN_ID)
+                and HASH_PATTERN.fullmatch(fill_hash) is not None
+            ):
+                matches.append(fill_hash)
+        unique = list(dict.fromkeys(matches))
+        if not unique:
+            _reject(
+                "ARBITRUM_RECEIPT_NOT_CONFIRMED",
+                "Hyperliquid CCTP withdrawal is not yet confirmed on Arbitrum",
+            )
+        if len(unique) > 1:
+            _reject(
+                "HYPERLIQUID_CCTP_RECEIPT_INVALID",
+                "multiple Arbitrum fills matched the signed Hyperliquid CCTP nonce",
+            )
+        evidence = self.verify_arbitrum_usdc_credit_from_any_sender(
+            rpc_url=rpc_url,
+            transaction_hash=unique[0],
+            recipient=recipient,
+            amount=amount,
+            min_confirmations=min_confirmations,
+        )
+        return {
+            **evidence,
+            "kind": "HYPERLIQUID_CCTP_ARBITRUM_CREDIT_RECEIPT",
+            "hyperliquidAccount": main,
+            "cctpNonce": nonce,
         }

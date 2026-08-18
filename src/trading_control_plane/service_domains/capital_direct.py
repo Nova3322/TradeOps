@@ -893,6 +893,7 @@ class DirectOperationCapitalService(ServiceComponent):
         if kind not in {
             "HYPERLIQUID_ARBITRUM_DEPOSIT_UNSIGNED_TRANSACTION",
             "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST",
+            "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST",
             "HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST",
         }:
             _reject(
@@ -923,6 +924,7 @@ class DirectOperationCapitalService(ServiceComponent):
                 ),
                 DirectCapitalPath.HYPERLIQUID_TO_VAULT.value: {
                     "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST",
+                    "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST",
                     "HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST",
                 },
             }.get(item.path, set())
@@ -950,11 +952,38 @@ class DirectOperationCapitalService(ServiceComponent):
                 _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
             if item.expires_at <= now:
                 _reject("CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired")
+            if kind in {
+                "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST",
+                "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST",
+            }:
+                try:
+                    expected_fee = Decimal(str(artifact["expectedFee"]))
+                    min_received = Decimal(str(artifact["minReceived"]))
+                except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+                    raise DomainRejected(
+                        "HYPERLIQUID_CAPITAL_PLAN_INVALID",
+                        "Hyperliquid withdrawal fee or net amount is invalid",
+                    ) from exc
+                if (
+                    expected_fee < 0
+                    or expected_fee > item.max_fee
+                    or min_received <= 0
+                    or min_received > item.amount
+                    or min_received != item.amount - expected_fee
+                ):
+                    _reject(
+                        "HYPERLIQUID_CAPITAL_PLAN_INVALID",
+                        "Hyperliquid withdrawal changed the frozen amount or exceeded "
+                        "the fee limit",
+                    )
+                item.min_received = min_received
             stage_code = (
                 "HYPERLIQUID_DEPOSIT_WALLET_REQUEST_READY"
                 if kind == "HYPERLIQUID_ARBITRUM_DEPOSIT_UNSIGNED_TRANSACTION"
                 else "HYPERLIQUID_CLASS_TRANSFER_WALLET_REQUEST_READY"
                 if kind == "HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST"
+                else "HYPERLIQUID_CCTP_WITHDRAWAL_WALLET_REQUEST_READY"
+                if kind == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
                 else "HYPERLIQUID_WITHDRAW3_WALLET_REQUEST_READY"
             )
             item.stages = [
@@ -978,7 +1007,11 @@ class DirectOperationCapitalService(ServiceComponent):
                     "HYPERLIQUID_WITHDRAWAL_ADAPTER_UNAVAILABLE",
                     *(
                         {"HYPERLIQUID_WITHDRAWAL_REVALIDATION_REQUIRED"}
-                        if kind == "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST"
+                        if kind
+                        in {
+                            "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST",
+                            "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST",
+                        }
                         else set()
                     ),
                 }

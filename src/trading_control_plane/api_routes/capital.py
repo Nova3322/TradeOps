@@ -1624,11 +1624,7 @@ class _CapitalRoutes:
                     "withdrawal ledger evidence does not match the recorded signed action",
                 )
             if payload.stage.endswith("LEDGER"):
-                receipt_amount = (
-                    context["min_received"]
-                    if payload.stage == "HYPERLIQUID_WITHDRAWAL_LEDGER"
-                    else artifact["amount"]
-                )
+                receipt_amount = artifact["amount"]
                 evidence = self.resolved_hyperliquid_capital.verify_hyperliquid_ledger(
                     base_url=direct_settings.hyperliquid_base_url,
                     main_account=main_account,
@@ -1637,6 +1633,9 @@ class _CapitalRoutes:
                         if "DEPOSIT" in payload.stage
                         else "CLASS_TRANSFER"
                         if "CLASS_TRANSFER" in payload.stage
+                        else "CCTP_WITHDRAWAL"
+                        if artifact.get("kind")
+                        == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
                         else "WITHDRAWAL"
                     ),
                     amount=str(receipt_amount),
@@ -1664,6 +1663,18 @@ class _CapitalRoutes:
                         amount=str(artifact["amount"]),
                         min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
                     )
+                elif (
+                    artifact.get("kind")
+                    == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
+                ):
+                    evidence = self.resolved_hyperliquid_capital.find_cctp_withdrawal_credit(
+                        rpc_url=rpc_url,
+                        main_account=main_account,
+                        nonce=int(artifact["nonce"]),
+                        recipient=str(artifact["destination"]),
+                        amount=str(artifact["minReceived"]),
+                        min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
+                    )
                 else:
                     receipt_kwargs = {
                         "rpc_url": rpc_url,
@@ -1673,7 +1684,7 @@ class _CapitalRoutes:
                         # Bridge2 credit. Match the frozen net amount that can
                         # actually arrive at the Safe/Vault, not the gross
                         # signed amount.
-                        "amount": str(context["min_received"]),
+                        "amount": str(artifact.get("minReceived", context["min_received"])),
                         "min_confirmations": direct_settings.notilt_arbitrum_min_confirmations,
                     }
                     evidence = (

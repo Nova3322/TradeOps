@@ -448,6 +448,46 @@ class BinanceCapitalGateway:
             "timestamp": row.get("timestamp"),
         }
 
+    def _probe_universal_transfer_access(
+        self, *, transfer_type: str, now: datetime
+    ) -> None:
+        """Probe the exact read-only Universal Transfer endpoint used by this path.
+
+        ``enableInternalTransfer`` is not a reliable capability signal across
+        Binance account/API-key variants.  A bounded history read is the
+        authoritative, side-effect-free permission check for the exact transfer
+        direction that will later be submitted.
+        """
+
+        try:
+            raw = self._request(
+                "GET",
+                "/sapi/v1/asset/transfer",
+                {
+                    "type": transfer_type,
+                    "startTime": max(0, int(now.timestamp() * 1000) - 60_000),
+                    "endTime": int(now.timestamp() * 1000) + 1_000,
+                    "current": 1,
+                    "size": 1,
+                },
+            )
+        except DomainRejected as exc:
+            if exc.code in {
+                "BINANCE_CAPITAL_AUTHORIZATION_REJECTED",
+                "BINANCE_CAPITAL_API_REJECTED",
+            }:
+                raise DomainRejected(
+                    "BINANCE_INTERNAL_TRANSFER_PERMISSION_DISABLED",
+                    "Binance rejected the Universal Transfer endpoint for this API key",
+                ) from exc
+            raise
+        rows = raw.get("rows") if isinstance(raw, dict) else None
+        if not isinstance(rows, list):
+            _reject(
+                "BINANCE_CAPITAL_RESPONSE_INVALID",
+                "universal transfer capability probe returned an invalid response",
+            )
+
     def _ensure_universal_transfer(
         self,
         *,
@@ -503,12 +543,7 @@ class BinanceCapitalGateway:
     def complete_deposit_to_usdm(
         self, *, amount: Decimal, prepared_at: datetime, now: datetime
     ) -> dict[str, Any]:
-        permissions = self._permissions()
-        if permissions.get("enableInternalTransfer") is not True:
-            _reject(
-                "BINANCE_INTERNAL_TRANSFER_PERMISSION_DISABLED",
-                "Binance API key must enable Permits Universal Transfer",
-            )
+        self._permissions()
         return self._ensure_universal_transfer(
             transfer_type=SPOT_TO_USDM,
             amount=amount,
@@ -563,11 +598,7 @@ class BinanceCapitalGateway:
         destination = _evm_address(expected_address, field="configured Binance deposit address")
         source = _evm_address(source_address, field="authorized source wallet")
         permissions = self._permissions()
-        if permissions.get("enableInternalTransfer") is not True:
-            _reject(
-                "BINANCE_INTERNAL_TRANSFER_PERMISSION_DISABLED",
-                "Binance API key must enable Permits Universal Transfer",
-            )
+        self._probe_universal_transfer_access(transfer_type=SPOT_TO_USDM, now=now)
         _, network = self._network()
         if network.get("depositEnable") is not True:
             _reject("BINANCE_CAPITAL_DEPOSIT_DISABLED", "USDC Arbitrum deposits are disabled")
@@ -625,11 +656,7 @@ class BinanceCapitalGateway:
                 "BINANCE_CAPITAL_WITHDRAW_PERMISSION_DISABLED",
                 "dedicated Binance API key does not have withdrawal permission",
             )
-        if permissions.get("enableInternalTransfer") is not True:
-            _reject(
-                "BINANCE_INTERNAL_TRANSFER_PERMISSION_DISABLED",
-                "Binance API key must enable Permits Universal Transfer",
-            )
+        self._probe_universal_transfer_access(transfer_type=USDM_TO_SPOT, now=now)
         coin, network = self._network()
         if network.get("withdrawEnable") is not True:
             _reject("BINANCE_CAPITAL_WITHDRAW_DISABLED", "USDC Arbitrum withdrawals are disabled")

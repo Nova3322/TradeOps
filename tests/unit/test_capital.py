@@ -225,3 +225,29 @@ def test_binance_account_managed_credentials_satisfy_plan_without_env_secrets() 
     assert "BINANCE_CAPITAL_CREDENTIALS_MISSING" not in plan.blockers
     assert "CAPITAL_MIN_RECEIVED_INVALID" not in plan.blockers
     assert plan.min_received is None
+
+
+def test_hyperliquid_withdrawal_waits_for_current_route_fee_before_min_received() -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        capital_direct_vault_id="vault-1",
+        capital_direct_vault_address="0x1111111111111111111111111111111111111111",
+        capital_direct_hyperliquid_account_id="hyperliquid-main",
+        capital_direct_hyperliquid_bridge_address=(
+            "0x2df1c51e09aecf9cacb7bc98cb1742757f163df7"
+        ),
+        capital_direct_max_amount=Decimal(100),
+        capital_direct_max_fee=Decimal(1),
+        _env_file=None,
+    )
+
+    plan = build_direct_capital_plan(
+        path=DirectCapitalPath.HYPERLIQUID_TO_VAULT,
+        amount=Decimal("0.5"),
+        settings=settings,
+        capital_transfer_gate="ENABLED",
+        now=datetime(2026, 8, 18, tzinfo=UTC),
+    )
+
+    assert "CAPITAL_MIN_RECEIVED_INVALID" not in plan.blockers
+    assert plan.min_received is None
