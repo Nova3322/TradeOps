@@ -272,6 +272,8 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
 
     def rpc_fetcher(_url: str, method: str, params: list[object], _timeout: float) -> object:
         tx_hash = str(params[0]) if params else ""
+        if method == "eth_call":
+            return hex(5_100_000)
         if method == "eth_blockNumber":
             return "0x78"
         if method == "eth_getTransactionReceipt":
@@ -473,8 +475,12 @@ def test_safe_to_hyperliquid_requires_source_receipt_then_settles_both_legs(
             }
         ]
 
+    wallet_state = {"usdc_raw": 0}
+
     def rpc_fetcher(_url: str, method: str, params: list[object], _timeout: float) -> object:
         tx_hash = str(params[0]) if params else ""
+        if method == "eth_call":
+            return hex(wallet_state["usdc_raw"])
         if method == "eth_blockNumber":
             return "0x78"
         if method == "eth_getTransactionByHash":
@@ -574,6 +580,20 @@ def test_safe_to_hyperliquid_requires_source_receipt_then_settles_both_legs(
                 },
             )
             assert source_receipt.status_code == 200, source_receipt.text
+            empty_wallet = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/hyperliquid-preview",
+                json={
+                    "expected_version": 4,
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-hyperliquid-empty-wallet",
+                },
+            )
+            assert empty_wallet.status_code == 422, empty_wallet.text
+            assert (
+                empty_wallet.json()["error"]["code"]
+                == "HYPERLIQUID_DEPOSIT_BALANCE_INSUFFICIENT"
+            )
+            wallet_state["usdc_raw"] = 5_100_000
             deposit_preview = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/hyperliquid-preview",
                 json={

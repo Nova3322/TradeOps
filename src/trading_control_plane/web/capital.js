@@ -523,9 +523,9 @@ async function executeDirectWalletAction(action) {
     if (isWalletCancellation(error)) {
       if (!submittedHashes.length) {
         await recordDirectWalletOutcome({...action, outcome:'CANCELLED'});
-        throw new Error('已取消钱包确认，资金未发送。');
+        throw capitalWalletError('WALLET_CONFIRMATION_CANCELLED', '已取消钱包确认，资金未发送。');
       }
-      throw new Error(`已取消后续钱包确认；前序交易 ${submittedHashes.at(-1)} 已提交，流程保持暂停并等待公开回执。`);
+      throw capitalWalletError('WALLET_CONFIRMATION_PARTIALLY_CANCELLED', `已取消后续钱包确认；前序交易 ${submittedHashes.at(-1)} 已提交，流程保持暂停并等待公开回执。`);
     }
     throw normalizeCapitalWalletError(error);
   }
@@ -576,10 +576,19 @@ function assertDirectWalletExecutionReady(preview, operationId, stage) {
   if (preview.data?.real_transfer_gate !== 'ENABLED') {
     throw new Error('CAPITAL_TRANSFER 当前未启用，本次钱包请求保持阻断。');
   }
-  const allowed = new Set(['HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED']);
+  const allowed = new Set([
+    'HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED',
+    // A prior wallet cancellation proves that nothing was submitted.  A fresh,
+    // explicit click must be able to reopen the exact same unsigned request.
+    'HUMAN_WALLET_CONFIRMATION_CANCELLED',
+  ]);
   if (stage === 'TREASURY_DEPOSIT') allowed.add('TREASURY_DESTINATION_RECEIPT_REQUIRED');
   const blockers = (operation?.blockers || preview.blockers || []).filter(code => !allowed.has(code));
-  if (blockers.length) throw new Error(`当前仍有 ${blockers.length} 项安全阻断：${blockers.map(formatDirectCapitalBlocker).join('；')}`);
+  if (blockers.length) {
+    const error = new Error(`当前仍有 ${blockers.length} 项安全阻断：${blockers.map(formatDirectCapitalBlocker).join('；')}`);
+    error.code = blockers[0];
+    throw error;
+  }
 }
 
 async function prepareTreasuryWalletAction({operationId, version, path, treasuryProvider}) {
@@ -1054,9 +1063,10 @@ async function renderCapitalCenter() {
     const resumable = (item.direct_operations || []).find(operation => {
       if (operation.path !== path.path || operation.treasury_provider !== 'SAFE_SPENDING_LIMIT' || operation.status === 'SETTLED') return false;
       const stages = operation.stages || [];
+      const walletCancelled = stages.some(stage => stage.code?.endsWith('_WALLET_CANCELLED'));
       const sourceSubmission = [...stages].reverse().find(stage => stage.code === 'TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET');
       const targetSubmission = stages.some(stage => stage.code === 'HYPERLIQUID_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET');
-      return Boolean(sourceSubmission?.transaction_hash && !targetSubmission && ['VAULT_TO_BINANCE','VAULT_TO_HYPERLIQUID'].includes(path.path));
+      return Boolean(sourceSubmission?.transaction_hash && !targetSubmission && !walletCancelled && ['VAULT_TO_BINANCE','VAULT_TO_HYPERLIQUID'].includes(path.path));
     });
     const sourceSubmission = resumable && [...(resumable.stages || [])].reverse().find(stage => stage.code === 'TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET');
     const resumeAttributes = resumable ? ` data-resume-capital-operation="${escapeHtml(resumable.operation_id)}" data-operation-version="${Number(resumable.version)}" data-transaction-hash="${escapeHtml(sourceSubmission.transaction_hash)}"` : '';
