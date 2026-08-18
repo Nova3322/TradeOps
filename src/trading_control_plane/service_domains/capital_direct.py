@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import InvalidOperation
+
 from trading_control_plane.service_component import ServiceComponent
 
 # The domain implementation intentionally consumes the explicit service_core export surface.
@@ -1903,11 +1905,26 @@ class DirectOperationCapitalService(ServiceComponent):
                 for blocker in item.blockers
                 if blocker
                 not in {
+                    "CAPITAL_MIN_RECEIVED_INVALID",
                     "BINANCE_CAPITAL_CREDENTIALS_MISSING",
                     "BINANCE_DEPOSIT_PREFLIGHT_REQUIRED",
                     "BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_REQUIRED",
                 }
             ]
+            if item.path == DirectCapitalPath.BINANCE_TO_VAULT.value:
+                try:
+                    min_received = Decimal(str(artifact["minReceived"]))
+                except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+                    raise DomainRejected(
+                        "BINANCE_CAPITAL_PREFLIGHT_INVALID",
+                        "Binance withdrawal preflight did not return a valid net amount",
+                    ) from exc
+                if min_received <= 0 or min_received > item.amount:
+                    _reject(
+                        "BINANCE_CAPITAL_PREFLIGHT_INVALID",
+                        "Binance withdrawal preflight returned an invalid net amount",
+                    )
+                item.min_received = min_received
             if not item.blockers:
                 item.status = "UNSIGNED_PLAN_READY"
             item.version += 1

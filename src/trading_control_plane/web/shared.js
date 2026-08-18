@@ -291,6 +291,7 @@ const apiErrorGuidance = {
   BINANCE_CAPITAL_RATE_LIMITED:'币安资金 API 当前触发限流或临时 IP 封禁，请按 Retry-After 等待后重试。',
   BINANCE_CAPITAL_IP_RESTRICTION_REQUIRED:'当前币安 API Key 未启用受限 IP。请在币安 API 管理中绑定本服务的固定出口 IP 后重试。',
   BINANCE_CAPITAL_WITHDRAW_PERMISSION_DISABLED:'当前币安 API Key 没有提现权限。请在币安 API 管理中核对权限后重试。',
+  BINANCE_INTERNAL_TRANSFER_PERMISSION_DISABLED:'币安当前返回 enableInternalTransfer=false。请在该 API Key 上启用 Permits Universal Transfer；启用前系统会在链上资金发送前保持阻断。',
   BINANCE_CAPITAL_DESTINATION_NOT_ALLOWLISTED:'当前链上金库地址未出现在币安 USDC / Arbitrum 提现地址白名单。请在币安地址管理中添加当前 Safe 或 NoTilt 金库地址，等待生效后重试。',
   BINANCE_CAPITAL_DEPOSIT_ADDRESS_MISMATCH:'币安实时返回的 USDC / Arbitrum 充值地址与资金配置不一致。请核对币安充值地址后保存新的资金配置版本。',
   BINANCE_CAPITAL_NETWORK_BUSY:'币安当前将 USDC / Arbitrum 网络标记为繁忙，资金操作保持阻断。请等待网络恢复后重试。',

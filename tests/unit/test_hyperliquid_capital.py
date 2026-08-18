@@ -25,6 +25,8 @@ def test_withdraw3_checks_agent_scope_and_falls_back_to_unsigned_human_wallet() 
 
     def fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
         requests.append(payload)
+        if payload["type"] == "userAbstraction":
+            return "default"
         if payload["type"] == "clearinghouseState":
             return {"withdrawable": "101"}
         assert payload == {"type": "userRole", "user": AGENT}
@@ -40,7 +42,11 @@ def test_withdraw3_checks_agent_scope_and_falls_back_to_unsigned_human_wallet() 
         now=NOW,
     )
 
-    assert [request["type"] for request in requests] == ["clearinghouseState", "userRole"]
+    assert [request["type"] for request in requests] == [
+        "userAbstraction",
+        "clearinghouseState",
+        "userRole",
+    ]
     assert artifact["kind"] == "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST"
     assert artifact["agentWallet"]["authorized"] is True
     assert artifact["agentWallet"]["capability"] == ("TRADING_AGENT_ONLY_MANUAL_WALLET_FALLBACK")
@@ -127,6 +133,8 @@ def test_exact_arbitrum_usdc_transfer_is_ready_for_browser_wallet() -> None:
 
 def test_withdrawable_shortfall_does_not_build_internal_class_transfer() -> None:
     def fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
+        if payload["type"] == "userAbstraction":
+            return "default"
         if payload["type"] == "clearinghouseState":
             return {"withdrawable": "20"}
         if payload["type"] == "spotClearinghouseState":
@@ -146,6 +154,40 @@ def test_withdrawable_shortfall_does_not_build_internal_class_transfer() -> None
         )
 
     assert caught.value.code == "HYPERLIQUID_WITHDRAWABLE_INSUFFICIENT"
+
+
+def test_unified_account_withdrawal_uses_available_spot_usdc() -> None:
+    requests: list[str] = []
+
+    def fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
+        request_type = str(payload["type"])
+        requests.append(request_type)
+        if request_type == "userAbstraction":
+            return "unifiedAccount"
+        if request_type == "spotClearinghouseState":
+            return {
+                "balances": [
+                    {"coin": "USDC", "total": "10.01", "hold": "0.01"},
+                    {"coin": "HYPE", "total": "2", "hold": "0"},
+                ]
+            }
+        assert request_type == "userRole"
+        return {"role": "agent", "data": {"user": MAIN}}
+
+    artifact = HyperliquidCapitalGateway(info_fetcher=fetcher).prepare_withdrawal(
+        base_url="https://api.hyperliquid.xyz",
+        main_account=MAIN,
+        api_wallet_address=AGENT,
+        destination=MAIN,
+        amount="8",
+        max_fee="1",
+        now=NOW,
+    )
+
+    assert requests == ["userAbstraction", "spotClearinghouseState", "userRole"]
+    assert artifact["withdrawableObserved"] == "10.00"
+    assert artifact["withdrawableSource"] == "UNIFIED_SPOT_USDC"
+    assert artifact["accountAbstraction"] == "unifiedAccount"
 
 
 def test_deposit_rejects_account_mismatch_minimum_and_excess_precision() -> None:

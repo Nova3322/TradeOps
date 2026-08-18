@@ -223,5 +223,5 @@ def test_binance_account_managed_credentials_satisfy_plan_without_env_secrets() 
     )
 
     assert "BINANCE_CAPITAL_CREDENTIALS_MISSING" not in plan.blockers
-    assert "CAPITAL_MIN_RECEIVED_INVALID" in plan.blockers
+    assert "CAPITAL_MIN_RECEIVED_INVALID" not in plan.blockers
     assert plan.min_received is None

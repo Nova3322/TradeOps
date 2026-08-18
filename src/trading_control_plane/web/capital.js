@@ -279,6 +279,7 @@ function formatDirectCapitalBlocker(code) {
     CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY:'所选币安账户凭据尚未通过连接验证',
     CAPITAL_ACCOUNT_ENVIRONMENT_MISMATCH:'所选币安账户与当前生产环境不一致',
     BINANCE_CAPITAL_TIME_SYNC_FAILED:'币安签名请求前的服务器时间同步失败',
+    BINANCE_INTERNAL_TRANSFER_PERMISSION_DISABLED:'币安 API Key 未启用 Permits Universal Transfer，现货与 USD-M 合约账户之间不能自动划转',
     BINANCE_DEPOSIT_PREFLIGHT_REQUIRED:'需要读取并核对币安实时充值地址与网络状态',
     BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_REQUIRED:'需要核对币安 API 权限、IP 限制、白名单、余额、额度和手续费',
     BINANCE_RESTRICTED_WITHDRAWAL_ADAPTER_UNAVAILABLE:'币安受限提现 API 尚未配置',

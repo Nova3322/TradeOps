@@ -74,6 +74,7 @@ test("exchange receipts and Binance wallet-class transfers complete automaticall
     "verifyHyperliquidWithdrawalReceipts",
     "verifyBinanceReceipt",
     "BINANCE_INTERNAL_TRANSFER_PENDING",
+    "BINANCE_INTERNAL_TRANSFER_PERMISSION_DISABLED",
     "TRANSFER_BINANCE_USDM_TO_SPOT",
     "TRANSFER_BINANCE_SPOT_TO_USDM",
     "链上确认中",

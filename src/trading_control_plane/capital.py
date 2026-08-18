@@ -156,12 +156,23 @@ def build_direct_capital_plan(
         DirectCapitalPath.BINANCE_TO_VAULT,
         DirectCapitalPath.HYPERLIQUID_TO_VAULT,
     }
+    # Binance exposes the exact current network fee during its frozen preflight.
+    # The shared configuration value is only an upper safety bound, so it must
+    # not make a small Binance withdrawal invalid before the real fee is read.
+    fee_is_known_at_plan_time = path is DirectCapitalPath.HYPERLIQUID_TO_VAULT
     invalid_min_received = (
-        fee_is_deducted_from_usdc and max_fee is not None and amount <= max_fee
+        fee_is_deducted_from_usdc
+        and fee_is_known_at_plan_time
+        and max_fee is not None
+        and amount <= max_fee
     )
     min_received = (
         None
-        if max_fee is None or invalid_min_received
+        if (
+            max_fee is None
+            or invalid_min_received
+            or path is DirectCapitalPath.BINANCE_TO_VAULT
+        )
         else amount - max_fee
         if fee_is_deducted_from_usdc
         else amount
