@@ -16,7 +16,7 @@ function notFoundView(path) {
   const context = path.startsWith('/campaigns/')
     ? {eyebrow:'交易任务', title:'该交易任务不存在', copy:'链接可能已失效，或记录不属于当前团队与环境。', href:'/campaigns', action:'返回交易任务'}
     : path.startsWith('/proposals/')
-      ? {eyebrow:'提案管理', title:'该提案不存在', copy:'链接可能已失效，或记录不属于当前团队与环境。', href:'/proposals', action:'返回提案列表'}
+      ? {eyebrow:'审核队列', title:'该提案不存在', copy:'链接可能已失效，或记录不属于当前团队与环境。', href:'/reviews?view=current', action:'返回审核队列'}
       : path.startsWith('/venues/')
         ? {eyebrow:'账户管理', title:'账户不存在或不在当前空间', copy:'请返回账户列表，选择当前身份可见的账户。', href:'/accounts', action:'返回账户列表'}
         : {eyebrow:'导航', title:'页面不存在', copy:'链接可能已失效，请从当前任务重新进入。', href:'/home', action:'返回当前任务'};
@@ -85,10 +85,21 @@ async function route() {
     else if (path === '/opportunities') await renderOpportunities();
     else if (path === '/opportunities/defaults') await renderOpportunityDefaults();
     else if (path === '/proposals/new') await renderManualProposal();
-    else if (path === '/reviews') await renderProposalList('PENDING_REVIEW', '审核队列');
+    else if (path === '/reviews') {
+      const requestedView = new URLSearchParams(location.search).get('view');
+      const defaultView = hasCapability('proposal.review') ? 'review' : 'current';
+      const view = ['review','current','history'].includes(requestedView) ? requestedView : defaultView;
+      if (view === 'review' && !hasCapability('proposal.review')) {
+        history.replaceState({}, '', '/reviews?view=current');
+        await renderProposalList(null, '当前提案');
+      } else if (view === 'history') await renderProposalList(null, '历史记录', true);
+      else if (view === 'current') await renderProposalList(null, '当前提案');
+      else await renderProposalList('PENDING_REVIEW', '审核队列');
+    }
     else if (path === '/proposals') {
       const historyMode = new URLSearchParams(location.search).get('history') === '1';
-      await renderProposalList(null, historyMode ? '历史提案' : '当前提案', historyMode);
+      history.replaceState({}, '', historyMode ? '/reviews?view=history' : '/reviews?view=current');
+      await renderProposalList(null, historyMode ? '历史记录' : '当前提案', historyMode);
     }
     else if (path === '/campaigns') await renderCampaignList();
     else if (path === '/accounts') await renderAccountManagement();
@@ -96,7 +107,8 @@ async function route() {
     else if (path === '/results') await renderActualResults();
     else if (path === '/notifications') await renderNotifications();
     else if (path === '/campaigns/alerts') await renderRuntimeAlerts();
-    else if (path === '/positions') await renderSystemStatus();
+    else if (path === '/positions') await renderCurrentPositions();
+    else if (path === '/system') await renderSystemStatus();
     else if (path === '/orders') await renderCampaignFacts('orders');
     else if (path === '/risk') await renderCampaignFacts('risk');
     else if (path === '/capital') await renderCapitalCenter();

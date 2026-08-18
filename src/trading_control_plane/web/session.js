@@ -34,13 +34,14 @@ const routeCapability = (path) => {
   if (path === '/webhook-signals') return 'signal.view';
   if (path === '/signals') return 'signal.view';
   if (path === '/proposals/new') return 'proposal.create';
-  if (path === '/reviews') return 'proposal.review';
+  if (path === '/reviews') return 'proposal.view';
   if (path === '/proposals' || path.startsWith('/proposals/')) return 'proposal.view';
   if (path === '/campaigns' || path.startsWith('/campaigns/') || path === '/orders' || path === '/exceptions') return 'operations.view';
   if (path === '/accounts') return 'venue.view';
   if (path === '/results') return 'results.view';
   if (path === '/notifications') return 'notification.view';
-  if (path === '/positions' || path === '/risk') return 'system.view';
+  if (path === '/positions') return 'venue.view';
+  if (path === '/system' || path === '/risk') return 'system.view';
   if (path === '/venues' || path.startsWith('/venues/')) return 'venue.view';
   if (path === '/admin/users') return 'access.manage';
   return 'operations.view';

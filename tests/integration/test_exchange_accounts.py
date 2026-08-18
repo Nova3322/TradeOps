@@ -4,6 +4,7 @@ import asyncio
 import base64
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID
 
 import pytest
@@ -99,6 +100,115 @@ def test_exchange_account_credentials_are_encrypted_scoped_and_never_projected(
     assert rotated["credentials"]["key_hint"] == "••••4321"
     assert rotated["connection"]["status"] == "NOT_VERIFIED"
     assert rotated["trading"]["enabled"] is False
+
+
+def test_current_positions_aggregate_visible_accounts_with_direction_and_unrealized_pnl(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("position-admin", now=now)
+    service.create_exchange_account(
+        actor_id=admin,
+        account_id="binance-position-main",
+        venue="BINANCE",
+        label="Binance Position Main",
+        credentials={"api_key": "binance-key", "api_secret": "binance-secret"},
+        idempotency_key="create-binance-position-account",
+        now=now,
+    )
+    service.create_exchange_account(
+        actor_id=admin,
+        account_id="okx-position-main",
+        venue="OKX",
+        label="OKX Position Main",
+        credentials={
+            "api_key": "okx-key",
+            "api_secret": "okx-secret",
+            "passphrase": "okx-passphrase",
+        },
+        idempotency_key="create-okx-position-account",
+        now=now,
+    )
+    binance_instrument = service.register_instrument(
+        actor_id=admin,
+        venue="BINANCE",
+        symbol="BTCUSDT",
+        tick_size=Decimal("0.1"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        contract_multiplier=Decimal("1"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        protection_supported=True,
+        now=now,
+    )
+    okx_instrument = service.register_instrument(
+        actor_id=admin,
+        venue="OKX",
+        symbol="ETH-USDT-SWAP",
+        tick_size=Decimal("0.01"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        contract_multiplier=Decimal("1"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        protection_supported=True,
+        now=now,
+    )
+    service.record_position(
+        "binance-position-main",
+        "BINANCE",
+        binance_instrument,
+        Decimal("2"),
+        Decimal("100"),
+        Decimal("110"),
+        True,
+        admin,
+        now=now,
+    )
+    service.record_position(
+        "okx-position-main",
+        "OKX",
+        okx_instrument,
+        Decimal("-3"),
+        Decimal("50"),
+        Decimal("40"),
+        True,
+        admin,
+        now=now,
+    )
+
+    projected = TradingQueries(database).current_positions(admin, "LIVE")
+    assert projected["summary"] == {
+        "position_count": 2,
+        "account_count": 2,
+        "long_count": 1,
+        "short_count": 1,
+        "unknown_count": 0,
+    }
+    by_symbol = {item["symbol"]: item for item in projected["positions"]}
+    assert by_symbol["BTCUSDT"]["direction"] == "LONG"
+    assert by_symbol["BTCUSDT"]["quantity"] == "2.000000000000000000"
+    assert Decimal(by_symbol["BTCUSDT"]["unrealized_pnl"]) == Decimal("20")
+    assert by_symbol["ETH-USDT-SWAP"]["direction"] == "SHORT"
+    assert by_symbol["ETH-USDT-SWAP"]["quantity"] == "3.000000000000000000"
+    assert Decimal(by_symbol["ETH-USDT-SWAP"]["unrealized_pnl"]) == Decimal("30")
+
+    observer = service.create_user("position-observer", admin, now=now)
+    service.assign_role(
+        observer,
+        Role.OBSERVER,
+        admin,
+        account_scope="binance-position-main",
+        venue_scope="BINANCE",
+        now=now,
+    )
+    observer_projection = TradingQueries(database).current_positions(observer, "LIVE")
+    assert [item["symbol"] for item in observer_projection["positions"]] == ["BTCUSDT"]
+    assert [item["account_id"] for item in observer_projection["accounts"]] == [
+        "binance-position-main"
+    ]
 
 
 def test_exchange_account_delete_is_fail_closed_and_can_be_reconnected(
@@ -231,7 +341,21 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
     database: Database,
 ) -> None:
     now = datetime.now(UTC)
-    TradingService(database).bootstrap_admin("api-account-admin", now=now)
+    service = TradingService(database)
+    admin = service.bootstrap_admin("api-account-admin", now=now)
+    instrument = service.register_instrument(
+        actor_id=admin,
+        venue="BINANCE",
+        symbol="BTCUSDT",
+        tick_size=Decimal("0.1"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        contract_multiplier=Decimal("1"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        protection_supported=True,
+        now=now,
+    )
     settings = Settings(
         environment="test",
         database_url=str(database.engine.url),
@@ -273,6 +397,25 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
             )
             assert created.status_code == 200, created.text
             assert "api-secret-never-return" not in created.text
+            service.record_position(
+                "binance-api-main",
+                "BINANCE",
+                instrument,
+                Decimal("-2"),
+                Decimal("100"),
+                Decimal("90"),
+                True,
+                admin,
+                now=now,
+            )
+            current_positions = await client.get(
+                "/api/positions", params={"environment": "LIVE"}
+            )
+            assert current_positions.status_code == 200, current_positions.text
+            position = current_positions.json()["data"]["positions"][0]
+            assert position["account_id"] == "binance-api-main"
+            assert position["direction"] == "SHORT"
+            assert Decimal(position["unrealized_pnl"]) == Decimal("20")
             listed = await client.get("/api/exchange-accounts")
             assert listed.status_code == 200, listed.text
             assert "api-secret-never-return" not in listed.text
@@ -294,6 +437,17 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
             )
             assert facts.status_code == 200, facts.text
             assert facts.json()["data"]["account_id"] == "binance-api-main"
+            service.record_position(
+                "binance-api-main",
+                "BINANCE",
+                instrument,
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("90"),
+                True,
+                admin,
+                now=now + timedelta(seconds=1),
+            )
             page = await client.get("/venues")
             assert page.status_code == 200
             assert "api-secret-never-return" not in page.text

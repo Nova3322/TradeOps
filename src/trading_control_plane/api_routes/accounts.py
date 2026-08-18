@@ -120,6 +120,17 @@ class _AccountsRoutes:
         return result
 
     def register_registry(self) -> None:
+        @self.app.get("/api/positions")
+        def current_positions(
+            environment: ExecutionEnvironment = ExecutionEnvironment.LIVE,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_capability(identity, "venue.view")
+            return {
+                "data": self.queries().current_positions(identity.user_id, environment.value),
+                "as_of": _now().isoformat(),
+            }
+
         @self.app.get("/api/exchange-accounts")
         def exchange_accounts(
             identity: SessionIdentity = self.identity_dependency,

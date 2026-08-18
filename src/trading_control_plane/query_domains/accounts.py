@@ -7,6 +7,119 @@ from trading_control_plane.query_core import *
 
 
 class AccountQueries(QueryComponent):
+    def current_positions(self, actor_id: UUID, environment: str) -> dict[str, Any]:
+        workspace_id, team_id = self._active_scope_ids(actor_id)
+        with self.database.session_factory() as session:
+            accounts = session.scalars(
+                select(ExchangeAccount)
+                .where(
+                    ExchangeAccount.team_id == team_id,
+                    ExchangeAccount.environment == environment,
+                    ExchangeAccount.deleted_at.is_(None),
+                )
+                .order_by(ExchangeAccount.venue, ExchangeAccount.label, ExchangeAccount.account_id)
+            ).all()
+            visible_accounts = [
+                item
+                for item in accounts
+                if self.service.can_user(
+                    actor_id,
+                    "venue.view",
+                    item.account_id,
+                    item.venue,
+                )
+            ]
+            account_by_scope = {
+                (item.account_id, item.venue): item for item in visible_accounts
+            }
+            positions = session.scalars(
+                select(Position)
+                .where(
+                    Position.team_id == team_id,
+                    Position.environment == environment,
+                    Position.quantity != Decimal(0),
+                )
+                .order_by(Position.venue, Position.account_id, Position.observed_at.desc())
+            ).all()
+            visible_positions = [
+                item
+                for item in positions
+                if (item.account_id, item.venue) in account_by_scope
+            ]
+            instrument_ids = {item.instrument_id for item in visible_positions}
+            instruments = (
+                session.scalars(
+                    select(Instrument).where(Instrument.instrument_id.in_(instrument_ids))
+                ).all()
+                if instrument_ids
+                else []
+            )
+            instrument_by_id = {item.instrument_id: item for item in instruments}
+
+            projected: list[dict[str, Any]] = []
+            for item in visible_positions:
+                instrument = instrument_by_id.get(item.instrument_id)
+                if instrument is None:
+                    continue
+                account = account_by_scope[(item.account_id, item.venue)]
+                unrealized_pnl = (
+                    None
+                    if item.fact_status != "KNOWN"
+                    else (item.mark_price - item.average_entry_price) * item.quantity
+                )
+                projected.append(
+                    {
+                        "position_id": str(item.position_id),
+                        "exchange_account_id": str(account.exchange_account_id),
+                        "account_id": item.account_id,
+                        "account_label": account.label,
+                        "account_active": account.active,
+                        "venue": item.venue,
+                        "environment": item.environment,
+                        "instrument_id": str(item.instrument_id),
+                        "symbol": instrument.symbol,
+                        "collateral_currency": instrument.collateral_currency,
+                        "direction": "LONG" if item.quantity > 0 else "SHORT",
+                        "quantity": str(abs(item.quantity)),
+                        "signed_quantity": str(item.quantity),
+                        "average_entry_price": str(item.average_entry_price),
+                        "mark_price": str(item.mark_price),
+                        "unrealized_pnl": (
+                            None if unrealized_pnl is None else str(unrealized_pnl)
+                        ),
+                        "fact_status": item.fact_status,
+                        "observed_at": _iso(item.observed_at),
+                    }
+                )
+
+            return {
+                "workspace_id": str(workspace_id),
+                "team_id": str(team_id),
+                "environment": environment,
+                "accounts": [
+                    {
+                        "exchange_account_id": str(item.exchange_account_id),
+                        "account_id": item.account_id,
+                        "label": item.label,
+                        "venue": item.venue,
+                        "active": item.active,
+                    }
+                    for item in visible_accounts
+                ],
+                "positions": projected,
+                "summary": {
+                    "position_count": len(projected),
+                    "account_count": len(
+                        {(item["account_id"], item["venue"]) for item in projected}
+                    ),
+                    "long_count": sum(item["direction"] == "LONG" for item in projected),
+                    "short_count": sum(item["direction"] == "SHORT" for item in projected),
+                    "unknown_count": sum(
+                        item["fact_status"] != "KNOWN" for item in projected
+                    ),
+                },
+            }
+
     def exchange_accounts(self, actor_id: UUID) -> dict[str, Any]:
         workspace_id, team_id = self._active_scope_ids(actor_id)
         with self.database.session_factory() as session:
