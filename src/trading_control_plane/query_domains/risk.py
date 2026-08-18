@@ -24,8 +24,8 @@ def list_exceptions(
     user_id: UUID,
     *,
     now: datetime,
-) -> list[dict[str, Any]]:
-    exceptions: list[dict[str, Any]] = []
+) -> list[dict[str, object]]:
+    exceptions: list[dict[str, object]] = []
     _workspace_id, team_id = scope.active_scope_ids(user_id)
     with scope.database.session_factory() as session:
         risk_policy = session.scalar(
@@ -280,7 +280,7 @@ def exception_projection(
     object_id: str | None = None,
     details: list[str] | None = None,
     occurred_at: str | None = None,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     return {
         "campaign_id": campaign_id,
         "object_id": object_id or campaign_id,

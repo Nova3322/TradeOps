@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 from uuid import UUID
 
 from trading_control_plane.database import Database
@@ -30,7 +29,7 @@ class TradingQueries(
 ):
     """Single projection surface composed from domain-focused query implementations."""
 
-    def list_exceptions(self, user_id: UUID, *, now: datetime) -> list[dict[str, Any]]:
+    def list_exceptions(self, user_id: UUID, *, now: datetime) -> list[dict[str, object]]:
         return list_exceptions(self, self, user_id, now=now)
 
     def __init__(self, database: Database) -> None:
