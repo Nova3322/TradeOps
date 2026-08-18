@@ -24,6 +24,7 @@ from trading_control_plane.domain import (
 )
 from trading_control_plane.hyperliquid_capital import (
     ARBITRUM_NATIVE_USDC_ADDRESS,
+    CCTP_DESTINATION_SENTINEL,
     ERC20_TRANSFER_TOPIC,
     HYPERLIQUID_BRIDGE2_ADDRESS,
     HyperliquidCapitalGateway,
@@ -248,10 +249,14 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
     safe = "0x7777777777777777777777777777777777777777"
 
     def info_fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
+        if payload["type"] == "usdcRouting":
+            return {"depositRoute": "cctp", "withdrawalRoute": "cctp"}
         if payload["type"] == "userAbstraction":
             return "default"
         if payload["type"] == "clearinghouseState":
             return {"withdrawable": "1000"}
+        if payload["type"] == "preTransferCheck":
+            return {"isSanctioned": False, "userExists": True, "fee": "0"}
         if payload["type"] == "userRole":
             assert payload["user"] == agent
             return {"role": "agent", "data": {"user": main}}
@@ -261,15 +266,18 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 "time": int(now.timestamp() * 1000),
                 "hash": withdrawal_hash,
                 "delta": {
-                    "type": "withdraw",
-                    "usdc": "99.000000000000000000",
-                    "nonce": int(state["nonce"]) * 1_000,
-                    "fee": "1",
+                    "type": "send",
+                    "token": "USDC",
+                    "destination": CCTP_DESTINATION_SENTINEL,
+                    "amount": "100",
+                    "nonce": int(state["nonce"]),
+                    "fee": "0",
                 },
             }
         ]
 
-    bridge_topic = f"0x{HYPERLIQUID_BRIDGE2_ADDRESS[2:].rjust(64, '0')}"
+    cctp_sender = "0x9999999999999999999999999999999999999999"
+    cctp_sender_topic = f"0x{cctp_sender[2:].rjust(64, '0')}"
     safe_topic = f"0x{safe[2:].rjust(64, '0')}"
 
     def rpc_fetcher(_url: str, method: str, params: list[object], _timeout: float) -> object:
@@ -286,12 +294,25 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 "logs": [
                     {
                         "address": ARBITRUM_NATIVE_USDC_ADDRESS,
-                        "topics": [ERC20_TRANSFER_TOPIC, bridge_topic, safe_topic],
-                        "data": hex(99_000_000),
+                        "topics": [ERC20_TRANSFER_TOPIC, cctp_sender_topic, safe_topic],
+                        "data": hex(99_800_000),
                     }
                 ],
             }
         raise AssertionError(method)
+
+    def cctp_fetcher(
+        _url: str, params: dict[str, str], _timeout: float
+    ) -> object:
+        assert params == {"direction": "out", "user": main}
+        return [
+            {
+                "originChainId": 999,
+                "destinationChainId": 42161,
+                "nonce": str(state["nonce"]),
+                "fillTxnRef": withdrawal_arbitrum_hash,
+            }
+        ]
 
     def safe_executor(payload: dict[str, object]) -> dict[str, object]:
         if payload["operation"] == "read-limit":
@@ -313,6 +334,7 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
             hyperliquid_capital_gateway=HyperliquidCapitalGateway(
                 info_fetcher=info_fetcher,
                 rpc_fetcher=rpc_fetcher,
+                cctp_fetcher=cctp_fetcher,
             ),
         )
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -354,6 +376,9 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
             assert preview.json()["automatic_fallback"] is True
             assert preview.json()["agent_wallet"]["authorized"] is True
             assert artifact["destination"] == safe
+            assert artifact["kind"] == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
+            assert artifact["expectedFee"] == "0.2"
+            assert artifact["minReceived"] == "99.8"
             assert artifact["signing"] is False and artifact["broadcast"] is False
             assert preview.json()["data"]["real_transfer_gate"] == "DISABLED"
 
@@ -389,8 +414,8 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 },
             )
             assert ledger.status_code == 200, ledger.text
-            assert ledger.json()["receipt"]["amount"] == "99.000000000000000000"
-            assert ledger.json()["receipt"]["nonce"] == artifact["nonce"] * 1_000
+            assert ledger.json()["receipt"]["amount"] == "100"
+            assert ledger.json()["receipt"]["nonce"] == artifact["nonce"]
             arbitrum = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/hyperliquid-receipt",
                 json={
@@ -401,6 +426,7 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 },
             )
             assert arbitrum.status_code == 200, arbitrum.text
+            assert arbitrum.json()["receipt"]["amount"] == "99.8"
             assert arbitrum.json()["settlement"] == "CONFIRMED"
             operation = next(
                 item
@@ -747,6 +773,7 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
             }
         ],
         "/sapi/v1/capital/deposit/address": {"address": destination, "tag": ""},
+        "/sapi/v1/asset/transfer": {"rows": []},
     }
 
     def binance_transport(
@@ -1429,6 +1456,9 @@ def test_binance_capital_uses_live_fee_for_small_account_managed_withdrawal(
             return "NIL"
         if path == "/sapi/v1/capital/withdraw/quota":
             return {"wdQuota": "1000", "usedWdQuota": "0"}
+        if path == "/sapi/v1/asset/transfer":
+            assert method == "GET"
+            return {"rows": []}
         raise AssertionError(path)
 
     async def scenario() -> None:

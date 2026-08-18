@@ -62,6 +62,7 @@ def responses(*, ip_restrict: bool = True, destination: str = DESTINATION) -> di
         ],
         "/sapi/v1/localentity/questionnaire-requirements": "NIL",
         "/sapi/v1/capital/withdraw/quota": {"wdQuota": "1000", "usedWdQuota": "20"},
+        "/sapi/v1/asset/transfer": {"rows": []},
     }
 
 
@@ -230,10 +231,34 @@ def test_credited_deposit_is_moved_from_spot_to_usdm_once() -> None:
     assert len([call for call in calls if call[:2] == ("POST", "/sapi/v1/asset/transfer")]) == 1
 
 
-def test_universal_transfer_permission_is_required_for_capital_paths() -> None:
+def test_false_api_restriction_flag_does_not_override_actual_transfer_endpoint() -> None:
     values = responses()
     values["/sapi/v1/account/apiRestrictions"]["enableInternalTransfer"] = False
+    calls: list[tuple[str, str, dict[str, str]]] = []
 
+    artifact = gateway(values, calls).prepare_deposit(
+        expected_address=DESTINATION,
+        amount=Decimal("10"),
+        source_address=SOURCE,
+        now=NOW,
+    )
+
+    assert artifact["kind"] == "BINANCE_ARBITRUM_DEPOSIT_PREFLIGHT"
+    probe = next(call for call in calls if call[:2] == ("GET", "/sapi/v1/asset/transfer"))
+    assert probe[2]["type"] == "MAIN_UMFUTURE"
+    assert probe[2]["size"] == "1"
+
+
+def test_actual_universal_transfer_endpoint_rejection_remains_blocked() -> None:
+    values = responses()
+
+    def reject_transfer(_method: str, _params: dict[str, str]) -> object:
+        raise DomainRejected(
+            "BINANCE_CAPITAL_AUTHORIZATION_REJECTED",
+            "fixture endpoint permission rejection",
+        )
+
+    values["/sapi/v1/asset/transfer"] = reject_transfer
     with pytest.raises(DomainRejected) as caught:
         gateway(values).prepare_deposit(
             expected_address=DESTINATION,

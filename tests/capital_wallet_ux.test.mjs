@@ -60,12 +60,17 @@ test("Safe outbound flow verifies source receipt and completes the Hyperliquid s
   for (const marker of [
     "verifyTreasuryWithdrawalReceipt",
     "continueSafeOutboundExecution",
+    "reconcilePendingSafeHyperliquidDeposits",
     "verifyHyperliquidDepositReceipts",
     "TREASURY_WITHDRAWAL_RECEIPT_CONFIRMED",
-    "继续已提取资金并充值",
+    "第一笔钱包交易已提交，正在等待授权地址到账",
+    "授权地址已到账，正在自动准备 Hyperliquid 入金钱包确认",
+    "已提交，正在自动续接入金",
+    "{attempts:200, delayMs:3000}",
   ]) {
     assert.equal(source.includes(marker), true, marker);
   }
+  assert.equal(source.includes("继续已提取资金并充值"), false);
   assert.ok(source.indexOf("verifyTreasuryWithdrawalReceipt") < source.indexOf("prepareHyperliquidWalletAction", source.indexOf("async function continueSafeOutboundExecution")));
 });
 

@@ -9,6 +9,7 @@ from trading_control_plane import hyperliquid_capital
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.hyperliquid_capital import (
     ARBITRUM_NATIVE_USDC_ADDRESS,
+    CCTP_DESTINATION_SENTINEL,
     ERC20_TRANSFER_TOPIC,
     HYPERLIQUID_BRIDGE2_ADDRESS,
     HyperliquidCapitalGateway,
@@ -20,15 +21,29 @@ HASH = "0x" + "ab" * 32
 NOW = datetime(2026, 8, 8, 8, 0, tzinfo=UTC)
 
 
-def test_withdraw3_checks_agent_scope_and_falls_back_to_unsigned_human_wallet() -> None:
+def test_cctp_withdrawal_uses_current_route_and_unsigned_human_wallet() -> None:
     requests: list[dict[str, object]] = []
 
     def fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
         requests.append(payload)
+        if payload["type"] == "usdcRouting":
+            return {"depositRoute": "cctp", "withdrawalRoute": "cctp"}
         if payload["type"] == "userAbstraction":
             return "default"
         if payload["type"] == "clearinghouseState":
-            return {"withdrawable": "101"}
+            return {"withdrawable": "100"}
+        if payload["type"] == "preTransferCheck":
+            assert payload == {
+                "type": "preTransferCheck",
+                "user": CCTP_DESTINATION_SENTINEL,
+                "source": MAIN,
+            }
+            return {
+                "isSanctioned": False,
+                "userExists": True,
+                "fee": "0",
+                "userHasSentTx": True,
+            }
         assert payload == {"type": "userRole", "user": AGENT}
         return {"role": "agent", "data": {"user": MAIN}}
 
@@ -43,18 +58,55 @@ def test_withdraw3_checks_agent_scope_and_falls_back_to_unsigned_human_wallet() 
     )
 
     assert [request["type"] for request in requests] == [
+        "usdcRouting",
         "userAbstraction",
         "clearinghouseState",
+        "preTransferCheck",
         "userRole",
     ]
-    assert artifact["kind"] == "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST"
+    assert artifact["kind"] == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
+    assert artifact["withdrawalRoute"] == "CCTP"
+    assert artifact["expectedFee"] == "0.2"
+    assert artifact["minReceived"] == "99.8"
     assert artifact["agentWallet"]["authorized"] is True
     assert artifact["agentWallet"]["capability"] == ("TRADING_AGENT_ONLY_MANUAL_WALLET_FALLBACK")
-    assert artifact["fallbackReason"] == "WITHDRAW3_REQUIRES_USER_SIGNED_ACTION"
-    assert artifact["typedData"]["primaryType"] == "HyperliquidTransaction:Withdraw"
+    assert artifact["fallbackReason"] == "CCTP_WITHDRAWAL_REQUIRES_USER_SIGNED_ACTION"
+    assert artifact["typedData"]["primaryType"] == (
+        "HyperliquidTransaction:SendToEvmWithData"
+    )
+    assert artifact["action"]["destinationChainId"] == 3
+    assert artifact["action"]["gasLimit"] == 200_000
+    assert artifact["exchangeRequestTemplate"]["isFrontend"] is True
     assert artifact["exchangeRequestTemplate"]["signature"] is None
     assert artifact["signing"] is False
     assert artifact["broadcast"] is False
+
+
+def test_legacy_withdrawal_is_used_only_when_official_route_falls_back() -> None:
+    def fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
+        if payload["type"] == "usdcRouting":
+            return {"depositRoute": "bridge", "withdrawalRoute": "bridge"}
+        if payload["type"] == "userAbstraction":
+            return "default"
+        if payload["type"] == "clearinghouseState":
+            return {"withdrawable": "11"}
+        assert payload["type"] == "userRole"
+        return {"role": "agent", "data": {"user": MAIN}}
+
+    artifact = HyperliquidCapitalGateway(info_fetcher=fetcher).prepare_withdrawal(
+        base_url="https://api.hyperliquid.xyz",
+        main_account=MAIN,
+        api_wallet_address=AGENT,
+        destination=MAIN,
+        amount="10",
+        max_fee="1",
+        now=NOW,
+    )
+
+    assert artifact["kind"] == "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST"
+    assert artifact["withdrawalRoute"] == "BRIDGE"
+    assert artifact["expectedFee"] == "1"
+    assert artifact["minReceived"] == "9"
 
 
 def test_bridge_deposit_is_fixed_to_native_usdc_and_official_bridge() -> None:
@@ -133,12 +185,16 @@ def test_exact_arbitrum_usdc_transfer_is_ready_for_browser_wallet() -> None:
 
 def test_withdrawable_shortfall_does_not_build_internal_class_transfer() -> None:
     def fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
+        if payload["type"] == "usdcRouting":
+            return {"depositRoute": "cctp", "withdrawalRoute": "cctp"}
         if payload["type"] == "userAbstraction":
             return "default"
         if payload["type"] == "clearinghouseState":
             return {"withdrawable": "20"}
         if payload["type"] == "spotClearinghouseState":
             return {"balances": [{"coin": "USDC", "total": "90", "hold": "5"}]}
+        if payload["type"] == "preTransferCheck":
+            return {"isSanctioned": False, "userExists": True, "fee": "0"}
         assert payload["type"] == "userRole"
         return {"role": "agent", "data": {"user": MAIN}}
 
@@ -162,6 +218,8 @@ def test_unified_account_withdrawal_uses_available_spot_usdc() -> None:
     def fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
         request_type = str(payload["type"])
         requests.append(request_type)
+        if request_type == "usdcRouting":
+            return {"depositRoute": "cctp", "withdrawalRoute": "cctp"}
         if request_type == "userAbstraction":
             return "unifiedAccount"
         if request_type == "spotClearinghouseState":
@@ -171,6 +229,8 @@ def test_unified_account_withdrawal_uses_available_spot_usdc() -> None:
                     {"coin": "HYPE", "total": "2", "hold": "0"},
                 ]
             }
+        if request_type == "preTransferCheck":
+            return {"isSanctioned": False, "userExists": True, "fee": "0"}
         assert request_type == "userRole"
         return {"role": "agent", "data": {"user": MAIN}}
 
@@ -184,7 +244,13 @@ def test_unified_account_withdrawal_uses_available_spot_usdc() -> None:
         now=NOW,
     )
 
-    assert requests == ["userAbstraction", "spotClearinghouseState", "userRole"]
+    assert requests == [
+        "usdcRouting",
+        "userAbstraction",
+        "spotClearinghouseState",
+        "preTransferCheck",
+        "userRole",
+    ]
     assert artifact["withdrawableObserved"] == "10.00"
     assert artifact["withdrawableSource"] == "UNIFIED_SPOT_USDC"
     assert artifact["accountAbstraction"] == "unifiedAccount"
@@ -268,6 +334,87 @@ def test_receipts_require_exact_public_ledger_and_arbitrum_evidence() -> None:
         min_confirmations=20,
     )
     assert transfer["confirmations"] == 21
+
+
+def test_cctp_receipts_bind_signed_nonce_to_exact_arbitrum_credit() -> None:
+    sender = "0x3333333333333333333333333333333333333333"
+    recipient_topic = f"0x{MAIN[2:].rjust(64, '0')}"
+    sender_topic = f"0x{sender[2:].rjust(64, '0')}"
+
+    def info_fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
+        assert payload["type"] == "userNonFundingLedgerUpdates"
+        return [
+            {
+                "time": int(NOW.timestamp() * 1000),
+                "hash": HASH,
+                "delta": {
+                    "type": "send",
+                    "token": "USDC",
+                    "destination": CCTP_DESTINATION_SENTINEL,
+                    "amount": "3",
+                    "nonce": 42,
+                    "fee": "0",
+                },
+            }
+        ]
+
+    def cctp_fetcher(
+        _url: str, params: dict[str, str], _timeout: float
+    ) -> object:
+        assert params == {"direction": "out", "user": MAIN}
+        return [
+            {
+                "originChainId": 999,
+                "destinationChainId": 42161,
+                "nonce": "42",
+                "fillTxnRef": HASH,
+            }
+        ]
+
+    def rpc_fetcher(_url: str, method: str, _params: list[object], _timeout: float) -> object:
+        if method == "eth_getTransactionReceipt":
+            return {
+                "status": "0x1",
+                "blockNumber": "0x64",
+                "logs": [
+                    {
+                        "address": ARBITRUM_NATIVE_USDC_ADDRESS,
+                        "topics": [ERC20_TRANSFER_TOPIC, sender_topic, recipient_topic],
+                        "data": hex(2_800_000),
+                    }
+                ],
+            }
+        assert method == "eth_blockNumber"
+        return "0x78"
+
+    gateway = HyperliquidCapitalGateway(
+        info_fetcher=info_fetcher,
+        rpc_fetcher=rpc_fetcher,
+        cctp_fetcher=cctp_fetcher,
+    )
+    ledger = gateway.verify_hyperliquid_ledger(
+        base_url="https://api.hyperliquid.xyz",
+        main_account=MAIN,
+        receipt_kind="CCTP_WITHDRAWAL",
+        amount="3",
+        prepared_at=NOW,
+        nonce=42,
+        action_hash=HASH,
+        now=NOW,
+    )
+    credit = gateway.find_cctp_withdrawal_credit(
+        rpc_url="https://rpc.example.invalid",
+        main_account=MAIN,
+        nonce=42,
+        recipient=MAIN,
+        amount="2.8",
+        min_confirmations=20,
+    )
+
+    assert ledger["kind"] == "HYPERLIQUID_SEND_LEDGER_RECEIPT"
+    assert credit["kind"] == "HYPERLIQUID_CCTP_ARBITRUM_CREDIT_RECEIPT"
+    assert credit["amount"] == "2.8"
+    assert credit["cctpNonce"] == 42
 
 
 def test_withdrawal_credit_matches_bridge_transfer_log() -> None:

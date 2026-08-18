@@ -537,7 +537,7 @@ const DIRECT_CAPITAL_PATHS = [
   {path:'VAULT_TO_BINANCE', from:'链上金库', to:'币安', badge:'二选一', action:'检查转入币安条件', copy:'选择 NoTilt Vault 或 Safe Spending Limits，再按对应额度规则转入币安。', steps:['选择链上金库','实时额度预检','人控确认','进入币安']},
   {path:'VAULT_TO_HYPERLIQUID', from:'链上金库', to:'Hyperliquid', badge:'二选一', action:'检查转入 Hyperliquid 条件', copy:'选择 NoTilt Vault 或 Safe Spending Limits，先到授权自有地址，再进入 Hyperliquid。', steps:['选择链上金库','额度预检','到达自有地址','合约入金']},
   {path:'BINANCE_TO_VAULT', from:'币安', to:'链上金库', badge:'二选一', action:'检查币安回流条件', copy:'回流到用户选择的 NoTilt Vault 或 Safe Smart Account。', steps:['提现预检','授权地址','目标入金','回执验证']},
-  {path:'HYPERLIQUID_TO_VAULT', from:'Hyperliquid', to:'链上金库', badge:'二选一', action:'检查 Hyperliquid 回流条件', copy:'Safe 通过 Hyperliquid 官方 Bridge2 直接到账；NoTilt 先到授权自有地址再入库。withdraw3 当前固定扣除 1 USDC 协议提现费。', steps:['官方提现','Arbitrum 确认','金库到账','回执验证']},
+  {path:'HYPERLIQUID_TO_VAULT', from:'Hyperliquid', to:'链上金库', badge:'二选一', action:'检查 Hyperliquid 回流条件', copy:'优先使用 Hyperliquid 当前官方 CCTP 路由，固定扣除 0.2 USDC 协议费；仅在官方路由明确回退时使用 Legacy Bridge。', steps:['官方提现','Arbitrum 确认','金库到账','回执验证']},
 ];
 let capitalTrendVisibility = {TOTAL:true};
 let capitalChartRangeValue = CAPITAL_CHART_RANGE_MAX;
