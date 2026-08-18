@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from trading_control_plane.binance_capital import (
+from trading_control_plane.adapters.binance_capital import (
     OFFICIAL_BINANCE_BASE_URLS,
     BinanceCapitalGateway,
 )

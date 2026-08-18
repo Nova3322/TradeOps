@@ -16,12 +16,12 @@ from trading_control_plane.config import Settings
 from trading_control_plane.credentials import CredentialCipher
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, Role
-from trading_control_plane.exchange_connection import ConnectionProbeResult
 from trading_control_plane.freqtrade import FreqtradeWorkerClient, FreqtradeWorkerSpec
 from trading_control_plane.models import AuditEvent, ExchangeAccount, RoleAssignment, User
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
+from trading_control_plane.service_core import ConnectionProbeResult
 
 
 def encryption_key() -> str:
@@ -433,7 +433,7 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
             assert item["connection"]["status"] == "NOT_VERIFIED"
             assert item["trading"]["enabled"] is False
             facts = await client.get(
-                "/api/venues/binance/facts", params={"account_id": "binance-api-main"}
+                f"/api/exchange-accounts/{item['exchange_account_id']}/facts"
             )
             assert facts.status_code == 200, facts.text
             assert facts.json()["data"]["account_id"] == "binance-api-main"
@@ -486,6 +486,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
     )
     second_id = service.create_exchange_account(
         actor_id=admin,
+        environment="TESTNET",
         account_id="binance-worker-b",
         venue="BINANCE",
         label="Binance Worker B",
@@ -599,6 +600,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
                         "base_url": url,
                         "username": username,
                         "password": password,
+                        "ws_token": f"worker-rpc-token-{index}-fixture",
                         "hip3_dexes": [],
                         "expected_version": 1,
                         "idempotency_key": f"configure-worker-{index}",
@@ -634,10 +636,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
             }
             assert by_account["binance-worker-a"]["execution_worker"]["live_ready"] is True
             assert by_account["binance-worker-b"]["execution_worker"]["live_ready"] is False
-            assert (
-                by_account["binance-worker-a"]["execution_worker"]["default_endpoint"]
-                == "http://127.0.0.1:8081"
-            )
+            assert "default_endpoint" not in by_account["binance-worker-a"]["execution_worker"]
             status = await client.get("/api/execution/freqtrade/status")
             assert status.status_code == 200
             assert status.json()["workers"] == []
@@ -716,6 +715,7 @@ def test_freqtrade_probe_cannot_commit_after_worker_rotation(database: Database)
         base_url="http://127.0.0.1:18081",
         username="worker-user-v1",
         password="worker-password-v1",  # noqa: S106
+        ws_token="worker-rpc-token-v1-fixture",  # noqa: S106
         hip3_dexes=(),
         expected_version=1,
         idempotency_key="worker-race-configure-v1",
@@ -736,6 +736,7 @@ def test_freqtrade_probe_cannot_commit_after_worker_rotation(database: Database)
         base_url="http://127.0.0.1:18082",
         username="worker-user-v2",
         password="worker-password-v2",  # noqa: S106
+        ws_token="worker-rpc-token-v2-fixture",  # noqa: S106
         hip3_dexes=(),
         expected_version=int(configured["version"]),
         idempotency_key="worker-race-configure-v2",
@@ -763,13 +764,19 @@ class FakeExchangeConnectionVerifier:
     def verify(
         self,
         *,
+        workspace_id: str,
+        team_id: str,
+        account_id: str,
         venue: str,
         environment: str,
+        account_mode: str,
         credentials: Mapping[str, str],
         now: datetime,
     ) -> ConnectionProbeResult:
         assert now.utcoffset() is not None
+        assert workspace_id and team_id and account_id
         assert environment in {"TESTNET", "LIVE"}
+        assert account_mode in {"STANDARD", "PORTFOLIO_MARGIN"}
         self.calls.append((venue, dict(credentials)))
         return self.outcomes[venue]
 
@@ -802,6 +809,7 @@ class WorkerProbeFixture:
                 "trading_mode": "futures",
                 "dry_run": self.dry_run,
                 "force_entry_enable": True,
+                "position_adjustment_enable": True,
                 "state": "RUNNING",
             }
         if url.endswith("/version"):
@@ -1377,6 +1385,7 @@ def test_okx_bybit_reuse_exact_account_freqtrade_eligibility(
         base_url="http://127.0.0.1:18083",
         username="control-plane",
         password="worker-fixture-password",  # noqa: S106
+        ws_token=f"{slug}-rpc-token-fixture",
         hip3_dexes=(),
         expected_version=int(runtime["version"]),
         idempotency_key=f"configure-{slug}-account-worker",

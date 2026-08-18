@@ -36,7 +36,7 @@ def register_risk_routes(context: ApiRouteContext) -> None:
         require_capability(identity, "system.view")
         return service().risk_control_status(
             identity.user_id,
-            configured_risk_scopes(),
+            configured_risk_scopes(identity.user_id),
             require_live_scope=True,
             now=_now(),
         )
@@ -70,7 +70,7 @@ def register_risk_routes(context: ApiRouteContext) -> None:
         now = _now()
         current = service().risk_control_status(
             identity.user_id,
-            configured_risk_scopes(),
+            configured_risk_scopes(identity.user_id),
             require_live_scope=True,
             now=now,
         )
@@ -88,7 +88,7 @@ def register_risk_routes(context: ApiRouteContext) -> None:
             identity.user_id,
             payload.idempotency_key,
             reason=payload.reason,
-            configured_scopes=configured_risk_scopes(),
+            configured_scopes=configured_risk_scopes(identity.user_id),
             require_live_scope=True,
             now=now,
         )
@@ -107,13 +107,13 @@ def register_risk_routes(context: ApiRouteContext) -> None:
             restore_auto_add=payload.restore_auto_add,
             change_type=payload.change_type,
             requested_policy=payload.requested_policy,
-            configured_scopes=configured_risk_scopes(),
+            configured_scopes=configured_risk_scopes(identity.user_id),
             require_live_scope=True,
             now=_now(),
         )
         return service().risk_control_status(
             identity.user_id,
-            configured_risk_scopes(),
+            configured_risk_scopes(identity.user_id),
             require_live_scope=True,
             now=_now(),
         ) | {"request_id": str(request_id)}
@@ -172,7 +172,7 @@ def register_risk_routes(context: ApiRouteContext) -> None:
             identity.user_id,
             payload.expected_version,
             payload.idempotency_key,
-            configured_risk_scopes(),
+            configured_risk_scopes(identity.user_id),
             require_live_scope=True,
             now=now,
         )

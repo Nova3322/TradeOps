@@ -47,11 +47,10 @@ def test_connection_matrix_distinguishes_one_time_checks_from_continuous_runtime
         for item in connection_capability_matrix(
             safe_settings(
                 runtime_sync_enabled=True,
-                binance_read_only_enabled=True,
-                binance_api_key="read-key",
-                binance_api_secret="read-secret",  # noqa: S106 - inert fixture
-                runtime_binance_account_id="binance-main",
-            )
+                fact_adapter_enabled=True,
+                fact_adapter_bearer_token="fact-adapter-token-fixture-0123456789",  # noqa: S106
+            ),
+            database_binding_counts={"BINANCE": 1},
         )
     }
 
@@ -61,20 +60,22 @@ def test_connection_matrix_distinguishes_one_time_checks_from_continuous_runtime
         "OKX",
         "BYBIT",
     ]
-    assert matrix["BINANCE_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
-    assert matrix["OKX_CONTINUOUS_FACTS"]["implementation"] == ("IMPLEMENTED_TEAM_ACCOUNT_BOUND")
-    assert matrix["BYBIT_CONTINUOUS_FACTS"]["implementation"] == ("IMPLEMENTED_TEAM_ACCOUNT_BOUND")
-    assert matrix["OKX_CONTINUOUS_FACTS"]["deployment_state"] == "DISABLED"
+    assert matrix["CCXT_PRO_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
+    assert matrix["CCXT_PRO_CONTINUOUS_FACTS"]["implementation"] == (
+        "IMPLEMENTED_TEAM_ACCOUNT_BOUND"
+    )
+    assert matrix["CCXT_PRO_CONTINUOUS_FACTS"]["providers"] == [
+        "BINANCE",
+        "HYPERLIQUID",
+        "OKX",
+        "BYBIT",
+    ]
     assert matrix["FREQTRADE_EXECUTION"]["providers"] == [
         "BINANCE",
         "HYPERLIQUID",
         "OKX",
         "BYBIT",
     ]
-    assert matrix["OKX_BYBIT_EXECUTION"]["implementation"] == (
-        "IMPLEMENTED_VIA_FREQTRADE_EXECUTION_UNCERTIFIED"
-    )
-    assert matrix["OKX_BYBIT_EXECUTION"]["deployment_state"] == "DISABLED"
     assert matrix["TEAM_NOTIFICATIONS"]["provider_controls"]["EMAIL"] == (
         "BLOCKED_NO_SMTP_ALLOWLIST"
     )
@@ -105,31 +106,33 @@ def test_connection_matrix_projects_database_bindings_behind_process_master_swit
     running = {
         item["capability"]: item
         for item in connection_capability_matrix(
-            safe_settings(runtime_sync_enabled=True),
+            safe_settings(
+                runtime_sync_enabled=True,
+                fact_adapter_enabled=True,
+                fact_adapter_bearer_token="fact-adapter-token-fixture-0123456789",  # noqa: S106
+            ),
             database_binding_counts={"BINANCE": 2, "OKX": 1, "BYBIT": 1},
         )
     }
 
-    assert stopped["BINANCE_CONTINUOUS_FACTS"]["deployment_state"] == ("DISABLED_CONFIGURED")
-    assert running["BINANCE_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
-    assert stopped["OKX_CONTINUOUS_FACTS"]["deployment_state"] == ("DISABLED_CONFIGURED")
-    assert running["OKX_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
-    assert running["BYBIT_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
+    assert stopped["CCXT_PRO_CONTINUOUS_FACTS"]["deployment_state"] == (
+        "DISABLED_CONFIGURED"
+    )
+    assert running["CCXT_PRO_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
 
 
 def test_connection_matrix_projects_okx_bybit_workers_without_a_second_oms() -> None:
     matrix = {
         item["capability"]: item
         for item in connection_capability_matrix(
-            safe_settings(freqtrade_live_order_send_enabled=False),
+            safe_settings(freqtrade_workers_enabled=False),
             freqtrade_binding_counts={"OKX": 1, "BYBIT": 1},
         )
     }
 
     assert matrix["FREQTRADE_EXECUTION"]["deployment_state"] == "DISABLED_CONFIGURED"
-    assert matrix["OKX_BYBIT_EXECUTION"]["deployment_state"] == "DISABLED_CONFIGURED"
-    assert matrix["OKX_BYBIT_EXECUTION"]["external_side_effect"] == "ORDER_SEND"
-    assert "never creates a second venue OMS" in matrix["OKX_BYBIT_EXECUTION"]["boundary"]
+    assert matrix["FREQTRADE_EXECUTION"]["external_side_effect"] == "ORDER_SEND"
+    assert "exact-account ELIGIBLE status" in matrix["FREQTRADE_EXECUTION"]["boundary"]
 
 
 def test_environment_template_names_every_settings_field_without_values_from_runtime() -> None:
@@ -144,8 +147,8 @@ def test_doctor_marks_enabled_but_incomplete_connection_as_blocked() -> None:
     report = build_diagnostic_report(
         safe_settings(
             runtime_sync_enabled=True,
-            hyperliquid_read_only_enabled=True,
-            runtime_hyperliquid_account_id="hyperliquid-main",
+            fact_adapter_enabled=True,
+            fact_adapter_bearer_token="fact-adapter-token-fixture-0123456789",  # noqa: S106
         ),
         database=None,
     )

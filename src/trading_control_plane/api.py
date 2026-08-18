@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from trading_control_plane.adapters.capital import (
+    CapitalAdapterFactory,
+    build_production_capital_adapter_factory,
+)
 from trading_control_plane.api_core import (
     SESSION_COOKIE,
     SUPPORTED_NOTILT_CHAINS,
@@ -9,14 +13,6 @@ from trading_control_plane.api_core import (
     Any,
     ApiClientRateLimiter,
     AsyncIterator,
-    BinanceCapitalGateway,
-    BinancePortfolioMarginClient,
-    BinancePortfolioMarginReadOnlyClient,
-    BinanceReadOnlyClient,
-    BinanceTestnetClient,
-    BinanceTestnetOrder,
-    BinanceTestnetOrderCommand,
-    BinanceTestnetProtectionCommand,
     CampaignNotification,
     CapitalNotification,
     Cookie,
@@ -25,20 +21,13 @@ from trading_control_plane.api_core import (
     Depends,
     DomainRejected,
     ExchangeConnectionVerifier,
-    ExecutionEnvironment,
+    FactAdapterConnectionProbe,
     FastAPI,
     FileResponse,
     FreqtradeWorkerClient,
     FreqtradeWorkerSpec,
     Header,
     HTTPException,
-    HyperliquidCapitalGateway,
-    HyperliquidLiveClient,
-    HyperliquidReadOnlyClient,
-    HyperliquidTestnetClient,
-    HyperliquidTestnetOrder,
-    HyperliquidTestnetOrderCommand,
-    HyperliquidTestnetProtectionCommand,
     JSONResponse,
     LoginAttemptLimiter,
     MockCapitalTransferAdapter,
@@ -52,7 +41,6 @@ from trading_control_plane.api_core import (
     ProposalNotification,
     ProposalStatus,
     ReadinessDatabase,
-    ReadOnlyExchangeConnectionVerifier,
     Request,
     ReviewDecision,
     SafeSpendingGateway,
@@ -69,7 +57,6 @@ from trading_control_plane.api_core import (
     _domain_status,
     _now,
     asynccontextmanager,
-    build_hyperliquid_signer,
     configure_logging,
     datetime,
     get_settings,
@@ -78,7 +65,6 @@ from trading_control_plane.api_core import (
     perptape_candidate_identity_is_displayable,
     perptape_legacy_candidate_id,
     quote,
-    resolve_hyperliquid_main_account,
     status,
     timedelta,
 )
@@ -122,20 +108,12 @@ def create_app(
     database: ReadinessDatabase | None = None,
     perptape_client: PerptapeClient | None = None,
     telegram_gateway: TelegramGateway | None = None,
-    binance_client: BinanceReadOnlyClient | BinancePortfolioMarginReadOnlyClient | None = None,
-    binance_live_client: BinancePortfolioMarginClient | None = None,
-    binance_testnet_client: BinanceTestnetClient | None = None,
-    binance_testnet_reader: BinanceReadOnlyClient | None = None,
-    hyperliquid_client: HyperliquidReadOnlyClient | None = None,
-    hyperliquid_live_client: HyperliquidLiveClient | None = None,
-    hyperliquid_testnet_client: HyperliquidTestnetClient | None = None,
     freqtrade_workers: tuple[FreqtradeWorkerClient, ...] | None = None,
     capital_transfer_adapter: MockCapitalTransferAdapter | None = None,
     notilt_gateway: NoTiltGateway | None = None,
     notilt_valuator: NoTiltUsdValuator | None = None,
     safe_spending_gateway: SafeSpendingGateway | None = None,
-    hyperliquid_capital_gateway: HyperliquidCapitalGateway | None = None,
-    binance_capital_gateway: BinanceCapitalGateway | None = None,
+    capital_adapter_factory: CapitalAdapterFactory | None = None,
     exchange_connection_verifier: ExchangeConnectionVerifier | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
@@ -232,130 +210,7 @@ def create_app(
         )
     else:
         resolved_telegram = MockTelegramGateway()
-    resolved_binance = binance_client or (
-        BinancePortfolioMarginReadOnlyClient(
-            base_url=resolved_settings.binance_live_base_url,
-            api_key=resolved_settings.binance_api_key,
-            api_secret=resolved_settings.binance_api_secret,
-            recv_window_ms=resolved_settings.binance_recv_window_ms,
-            request_state=binance_request_state,
-        )
-        if resolved_settings.binance_account_mode == "PORTFOLIO_MARGIN"
-        else BinanceReadOnlyClient(
-            base_url=resolved_settings.binance_futures_base_url,
-            api_key=resolved_settings.binance_api_key,
-            api_secret=resolved_settings.binance_api_secret,
-            recv_window_ms=resolved_settings.binance_recv_window_ms,
-            request_state=binance_request_state,
-        )
-    )
-    direct_execution_enabled = resolved_settings.execution_backend == "DIRECT_LEGACY"
-    resolved_binance_live = binance_live_client or BinancePortfolioMarginClient(
-        base_url=resolved_settings.binance_live_base_url,
-        api_key=(resolved_settings.binance_api_key if direct_execution_enabled else None),
-        api_secret=(resolved_settings.binance_api_secret if direct_execution_enabled else None),
-        recv_window_ms=resolved_settings.binance_recv_window_ms,
-    )
-    resolved_binance_testnet = binance_testnet_client or BinanceTestnetClient(
-        base_url=resolved_settings.binance_testnet_base_url,
-        api_key=(resolved_settings.binance_testnet_api_key if direct_execution_enabled else None),
-        api_secret=(
-            resolved_settings.binance_testnet_api_secret if direct_execution_enabled else None
-        ),
-        recv_window_ms=resolved_settings.binance_recv_window_ms,
-    )
-    resolved_binance_testnet_reader = binance_testnet_reader or BinanceReadOnlyClient(
-        base_url=resolved_settings.binance_testnet_base_url,
-        api_key=resolved_settings.binance_testnet_api_key,
-        api_secret=resolved_settings.binance_testnet_api_secret,
-        recv_window_ms=resolved_settings.binance_recv_window_ms,
-    )
-    resolved_hyperliquid = hyperliquid_client or HyperliquidReadOnlyClient(
-        base_url=resolved_settings.hyperliquid_base_url,
-        account_address=(
-            resolved_settings.hyperliquid_subaccount_address
-            or resolved_settings.hyperliquid_account_address
-        ),
-        api_wallet_address=(
-            resolved_settings.hyperliquid_api_wallet_address
-            if resolved_settings.hyperliquid_read_only_enabled
-            else None
-        ),
-        dex=resolved_settings.hyperliquid_core_dex,
-        hip3_dexes=resolved_settings.hyperliquid_hip3_dexes,
-    )
-    testnet_signer = (
-        build_hyperliquid_signer(
-            resolved_settings.hyperliquid_testnet_api_wallet_private_key,
-            api_wallet_address=None,
-            active_pool=resolved_settings.hyperliquid_subaccount_address,
-            is_mainnet=False,
-        )
-        if direct_execution_enabled
-        else None
-    )
-    resolved_hyperliquid_testnet = hyperliquid_testnet_client or HyperliquidTestnetClient(
-        base_url=resolved_settings.hyperliquid_testnet_base_url,
-        account_address=resolved_settings.hyperliquid_account_address,
-        signer=testnet_signer,
-        subaccount_address=resolved_settings.hyperliquid_subaccount_address,
-        dex=resolved_settings.hyperliquid_core_dex,
-    )
-    live_signer = (
-        build_hyperliquid_signer(
-            resolved_settings.hyperliquid_api_wallet_private_key,
-            api_wallet_address=resolved_settings.hyperliquid_api_wallet_address,
-            active_pool=resolved_settings.hyperliquid_subaccount_address,
-            is_mainnet=True,
-        )
-        if direct_execution_enabled
-        else None
-    )
-    resolved_hyperliquid_live_account = resolved_settings.hyperliquid_account_address
-    if (
-        direct_execution_enabled
-        and resolved_hyperliquid_live_account is None
-        and resolved_settings.hyperliquid_api_wallet_address is not None
-    ):
-        resolved_hyperliquid_live_account = resolve_hyperliquid_main_account(
-            base_url=resolved_settings.hyperliquid_base_url,
-            account_address=None,
-            api_wallet_address=resolved_settings.hyperliquid_api_wallet_address,
-        )
-    resolved_hyperliquid_live = hyperliquid_live_client or HyperliquidLiveClient(
-        base_url=resolved_settings.hyperliquid_live_base_url,
-        account_address=resolved_hyperliquid_live_account,
-        signer=live_signer,
-        subaccount_address=resolved_settings.hyperliquid_subaccount_address,
-        dex=resolved_settings.hyperliquid_core_dex,
-    )
-    resolved_freqtrade_workers = freqtrade_workers or (
-        FreqtradeWorkerClient(
-            FreqtradeWorkerSpec(
-                name="binance-default",
-                venue="BINANCE",
-                base_url=resolved_settings.freqtrade_binance_worker_url,
-                username=resolved_settings.freqtrade_api_username,
-                password=resolved_settings.freqtrade_api_password,
-                ws_token=resolved_settings.freqtrade_ws_token,
-            ),
-            timeout_seconds=resolved_settings.freqtrade_timeout_seconds,
-            confirmation_timeout_seconds=(resolved_settings.freqtrade_confirmation_timeout_seconds),
-        ),
-        FreqtradeWorkerClient(
-            FreqtradeWorkerSpec(
-                name="hyperliquid-default",
-                venue="HYPERLIQUID",
-                base_url=resolved_settings.freqtrade_hyperliquid_worker_url,
-                username=resolved_settings.freqtrade_api_username,
-                password=resolved_settings.freqtrade_api_password,
-                ws_token=resolved_settings.freqtrade_ws_token,
-                hip3_dexes=resolved_settings.hyperliquid_hip3_dexes,
-            ),
-            timeout_seconds=resolved_settings.freqtrade_timeout_seconds,
-            confirmation_timeout_seconds=(resolved_settings.freqtrade_confirmation_timeout_seconds),
-        ),
-    )
+    resolved_freqtrade_workers = freqtrade_workers or ()
     resolved_capital_transfer = capital_transfer_adapter or MockCapitalTransferAdapter()
     resolved_notilt = notilt_gateway or NoTiltGateway(
         timeout_seconds=resolved_settings.notilt_gateway_timeout_seconds
@@ -364,21 +219,28 @@ def create_app(
     resolved_safe_spending = safe_spending_gateway or SafeSpendingGateway(
         timeout_seconds=resolved_settings.safe_spending_gateway_timeout_seconds
     )
-    resolved_hyperliquid_capital = hyperliquid_capital_gateway or HyperliquidCapitalGateway(
-        timeout_seconds=5
+    resolved_capital_adapter_factory = (
+        capital_adapter_factory
+        or build_production_capital_adapter_factory(
+            binance_account_id=resolved_settings.binance_capital_account_id,
+            binance_api_key=resolved_settings.binance_capital_api_key,
+            binance_api_secret=resolved_settings.binance_capital_api_secret,
+            binance_base_url=resolved_settings.binance_capital_base_url,
+            binance_recv_window_ms=resolved_settings.binance_recv_window_ms,
+            binance_timeout_seconds=resolved_settings.binance_capital_timeout_seconds,
+            binance_request_state=binance_request_state,
+        )
     )
-    resolved_binance_capital = binance_capital_gateway or BinanceCapitalGateway(
-        base_url=resolved_settings.binance_capital_base_url,
-        api_key=resolved_settings.binance_capital_api_key,
-        api_secret=resolved_settings.binance_capital_api_secret,
-        recv_window_ms=resolved_settings.binance_recv_window_ms,
-        timeout_seconds=resolved_settings.binance_capital_timeout_seconds,
-        request_state=binance_request_state,
-    )
-    resolved_binance_capital.attach_request_state(binance_request_state)
     resolved_exchange_connection_verifier = (
         exchange_connection_verifier
-        or ReadOnlyExchangeConnectionVerifier(request_state=binance_request_state)
+        or FactAdapterConnectionProbe(
+            bootstrap_symbols={
+                "BINANCE": resolved_settings.runtime_binance_symbol,
+                "HYPERLIQUID": resolved_settings.runtime_hyperliquid_symbol,
+                "OKX": resolved_settings.runtime_okx_symbol,
+                "BYBIT": resolved_settings.runtime_bybit_symbol,
+            }
+        )
     )
 
     @asynccontextmanager
@@ -404,20 +266,12 @@ def create_app(
     app.state.database = resolved_database
     app.state.perptape_client = resolved_perptape
     app.state.telegram_gateway = resolved_telegram
-    app.state.binance_client = resolved_binance
-    app.state.binance_live_client = resolved_binance_live
-    app.state.binance_testnet_client = resolved_binance_testnet
-    app.state.binance_testnet_reader = resolved_binance_testnet_reader
-    app.state.hyperliquid_client = resolved_hyperliquid
-    app.state.hyperliquid_live_client = resolved_hyperliquid_live
-    app.state.hyperliquid_testnet_client = resolved_hyperliquid_testnet
     app.state.freqtrade_workers = resolved_freqtrade_workers
     app.state.capital_transfer_adapter = resolved_capital_transfer
     app.state.notilt_gateway = resolved_notilt
     app.state.notilt_valuator = resolved_notilt_valuator
     app.state.safe_spending_gateway = resolved_safe_spending
-    app.state.hyperliquid_capital_gateway = resolved_hyperliquid_capital
-    app.state.binance_capital_gateway = resolved_binance_capital
+    app.state.capital_adapter_factory = resolved_capital_adapter_factory
     app.state.exchange_connection_verifier = resolved_exchange_connection_verifier
 
     @app.exception_handler(DomainRejected)
@@ -467,26 +321,9 @@ def create_app(
     def queries() -> TradingQueries:
         return TradingQueries(business_database())
 
-    def authoritative_live_accounts() -> dict[str, str]:
-        return {
-            venue: account_id
-            for venue, account_id in (
-                (
-                    "BINANCE",
-                    resolved_settings.runtime_binance_account_id,
-                ),
-                (
-                    "HYPERLIQUID",
-                    resolved_settings.runtime_hyperliquid_account_id,
-                ),
-            )
-            if account_id
-        }
-
     def service() -> TradingService:
         return TradingService(
             business_database(),
-            authoritative_live_accounts=authoritative_live_accounts(),
             credential_encryption_key=resolved_settings.credential_encryption_key,
         )
 
@@ -573,7 +410,8 @@ def create_app(
         direct_settings, saved_config = effective_direct_capital_settings(user_id)
         binance_account_id = direct_settings.capital_direct_binance_account_id
         binance_capital_credentials_configured = bool(
-            resolved_binance_capital.configured
+            resolved_settings.binance_capital_api_key
+            and resolved_settings.binance_capital_api_secret
             and binance_account_id is not None
             and binance_account_id == resolved_settings.binance_capital_account_id
         )
@@ -666,7 +504,6 @@ def create_app(
                 )
         snapshot = queries().capital_center(
             user_id,
-            authoritative_live_accounts=authoritative_live_accounts(),
             authoritative_live_treasury_account_id=selected_treasury_account_id,
             require_authoritative_live_treasury=True,
         )
@@ -818,53 +655,8 @@ def create_app(
         if not allowed:
             raise DomainRejected("RBAC_DENIED", f"{action} is not assigned to this user")
 
-    def configured_risk_scopes() -> tuple[tuple[str, str, str], ...]:
-        scopes: set[tuple[str, str, str]] = set()
-        if (
-            resolved_settings.binance_read_only_enabled
-            and resolved_settings.binance_fact_environment == "LIVE"
-            and resolved_settings.runtime_binance_account_id
-        ):
-            scopes.add(("LIVE", resolved_settings.runtime_binance_account_id, "BINANCE"))
-        if (
-            resolved_settings.hyperliquid_read_only_enabled
-            and resolved_settings.hyperliquid_fact_environment == "LIVE"
-            and resolved_settings.runtime_hyperliquid_account_id
-        ):
-            scopes.add(("LIVE", resolved_settings.runtime_hyperliquid_account_id, "HYPERLIQUID"))
-        return tuple(sorted(scopes))
-
-    def require_default_venue_account(account_id: str, venue: str) -> None:
-        expected = (
-            resolved_settings.runtime_binance_account_id
-            if venue == "BINANCE"
-            else resolved_settings.runtime_hyperliquid_account_id
-        )
-        if expected is None:
-            raise DomainRejected(
-                "DEFAULT_ACCOUNT_NOT_CONFIGURED",
-                f"{venue} production facts require a configured default account",
-            )
-        if account_id != expected:
-            raise DomainRejected(
-                "DEFAULT_ACCOUNT_REQUIRED",
-                f"{venue} production facts are restricted to the configured default account",
-            )
-
-    def require_registered_or_default_venue_account(
-        identity: SessionIdentity,
-        account_id: str,
-        venue: str,
-    ) -> None:
-        registry = queries().exchange_accounts(identity.user_id)
-        registered = any(
-            item["account_id"] == account_id and item["venue"] == venue for item in registry["data"]
-        )
-        if not registered:
-            # Preserve the legacy single-account boundary until this venue is
-            # represented by the database-backed account registry.
-            require_default_venue_account(account_id, venue)
-        require_capability(identity, "venue.view", account_id, venue)
+    def configured_risk_scopes(actor_id: UUID) -> tuple[tuple[str, str, str], ...]:
+        return queries().configured_risk_scopes(actor_id)
 
     async def current_identity(
         trading_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
@@ -1191,159 +983,6 @@ def create_app(
             )
         )
 
-    def require_binance_live() -> None:
-        if resolved_settings.execution_backend != "DIRECT_LEGACY":
-            raise DomainRejected(
-                "DIRECT_EXECUTION_RETIRED",
-                "direct Binance sending is retired; execution belongs to the Freqtrade worker",
-            )
-        if not resolved_settings.binance_live_order_send_enabled:
-            raise DomainRejected(
-                "BINANCE_LIVE_DISABLED", "Binance LIVE order send is explicitly disabled"
-            )
-        if not resolved_binance_live.configured:
-            raise DomainRejected(
-                "BINANCE_LIVE_NOT_CONFIGURED",
-                "Binance Unified Account credentials are not configured",
-            )
-
-    def require_binance_testnet() -> None:
-        if resolved_settings.execution_backend != "DIRECT_LEGACY":
-            raise DomainRejected(
-                "DIRECT_EXECUTION_RETIRED",
-                "direct Binance sending is retired; execution belongs to the Freqtrade worker",
-            )
-        if not resolved_settings.binance_testnet_order_send_enabled:
-            raise DomainRejected(
-                "BINANCE_TESTNET_DISABLED", "Binance testnet order send is explicitly disabled"
-            )
-        if binance_testnet_client is not None and not resolved_binance_testnet.configured:
-            raise DomainRejected(
-                "BINANCE_TESTNET_NOT_CONFIGURED", "Binance testnet credentials are not configured"
-            )
-
-    def require_hyperliquid_live() -> None:
-        if resolved_settings.execution_backend != "DIRECT_LEGACY":
-            raise DomainRejected(
-                "DIRECT_EXECUTION_RETIRED",
-                "direct Hyperliquid sending is retired; execution belongs to the Freqtrade worker",
-            )
-        if not resolved_settings.hyperliquid_live_order_send_enabled:
-            raise DomainRejected(
-                "HYPERLIQUID_LIVE_DISABLED",
-                "Hyperliquid LIVE order send is explicitly disabled",
-            )
-        if not resolved_hyperliquid_live.configured:
-            raise DomainRejected(
-                "HYPERLIQUID_LIVE_NOT_CONFIGURED",
-                "Hyperliquid LIVE requires the main account and API wallet signer",
-            )
-
-    def require_hyperliquid_testnet() -> None:
-        if resolved_settings.execution_backend != "DIRECT_LEGACY":
-            raise DomainRejected(
-                "DIRECT_EXECUTION_RETIRED",
-                "direct Hyperliquid sending is retired; execution belongs to the Freqtrade worker",
-            )
-        if not resolved_settings.hyperliquid_testnet_order_send_enabled:
-            raise DomainRejected(
-                "HYPERLIQUID_TESTNET_DISABLED",
-                "Hyperliquid Core testnet order send is explicitly disabled",
-            )
-        if hyperliquid_testnet_client is not None and not resolved_hyperliquid_testnet.configured:
-            raise DomainRejected(
-                "HYPERLIQUID_TESTNET_NOT_CONFIGURED",
-                "Hyperliquid testnet account and injected signer are not configured",
-            )
-
-    def database_bound_venue_facts(
-        venue: str,
-        account_id: str,
-        identity: SessionIdentity,
-    ) -> dict[str, Any]:
-        require_capability(identity, "venue.view", account_id, venue)
-        return {
-            "mode": "DATABASE_BOUND_READ_ONLY",
-            "domain": "USDT_LINEAR_PERPETUALS",
-            "data": queries().venue_facts(
-                identity.user_id,
-                account_id,
-                venue,
-                ExecutionEnvironment.LIVE.value,
-            ),
-            "as_of": _now().isoformat(),
-        }
-
-    def rejected_testnet_order(
-        command: BinanceTestnetOrderCommand, now: datetime
-    ) -> BinanceTestnetOrder:
-        return BinanceTestnetOrder(
-            order_id=f"REJECTED:{command.client_order_id}",
-            client_order_id=command.client_order_id,
-            status="REJECTED",
-            side=command.side,
-            order_type="MARKET",
-            ordered_quantity=command.quantity,
-            filled_quantity=Decimal(0),
-            stop_price=Decimal(0),
-            reduce_only=command.reduce_only,
-            close_position=False,
-            observed_at=now,
-        )
-
-    def unknown_testnet_protection(
-        command: BinanceTestnetProtectionCommand, now: datetime
-    ) -> BinanceTestnetOrder:
-        return BinanceTestnetOrder(
-            order_id=f"UNKNOWN:{command.client_order_id}",
-            client_order_id=command.client_order_id,
-            status="UNKNOWN",
-            side=command.side,
-            order_type="STOP_MARKET",
-            ordered_quantity=Decimal(0),
-            filled_quantity=Decimal(0),
-            stop_price=command.trigger_price,
-            reduce_only=False,
-            close_position=True,
-            observed_at=now,
-        )
-
-    def rejected_hyperliquid_order(
-        command: HyperliquidTestnetOrderCommand, now: datetime
-    ) -> HyperliquidTestnetOrder:
-        return HyperliquidTestnetOrder(
-            order_id=f"REJECTED:{command.client_order_id}",
-            client_order_id=command.client_order_id,
-            status="REJECTED",
-            side=command.side,
-            order_type="IOC_LIMIT",
-            ordered_quantity=command.quantity,
-            filled_quantity=Decimal(0),
-            limit_price=command.limit_price,
-            stop_price=Decimal(0),
-            reduce_only=command.reduce_only,
-            close_position=False,
-            observed_at=now,
-        )
-
-    def unknown_hyperliquid_protection(
-        command: HyperliquidTestnetProtectionCommand, now: datetime
-    ) -> HyperliquidTestnetOrder:
-        return HyperliquidTestnetOrder(
-            order_id=f"UNKNOWN:{command.client_order_id}",
-            client_order_id=command.client_order_id,
-            status="UNKNOWN",
-            side=command.side,
-            order_type="TRIGGER_MARKET",
-            ordered_quantity=command.quantity,
-            filled_quantity=Decimal(0),
-            limit_price=command.limit_price,
-            stop_price=command.trigger_price,
-            reduce_only=True,
-            close_position=False,
-            observed_at=now,
-        )
-
     def configured_notilt_scope(chain_id: int) -> tuple[str, str]:
         if chain_id not in SUPPORTED_NOTILT_CHAINS:
             raise DomainRejected(
@@ -1456,10 +1095,24 @@ def create_app(
         agent, vault = configured_notilt_scope(chain_id)
         snapshot = resolved_notilt.read_vault(chain_id, vault, agent)
         valuations = {
-            budget.asset: resolved_notilt_valuator.value(
-                budget.asset,
-                budget.balance,
-                now=now,
+            budget.asset: (
+                resolved_notilt_valuator.value(
+                    budget.asset,
+                    budget.balance,
+                    now=now,
+                    mark_price=None if mark is None else mark[0],
+                    mark_observed_at=None if mark is None else mark[1],
+                )
+                if (
+                    mark := queries().native_asset_mark(actor_id, budget.asset)
+                )
+                is not None
+                or budget.asset.upper() in {"USD", "USDC", "USDT", "USDT0"}
+                else resolved_notilt_valuator.value(
+                    budget.asset,
+                    budget.balance,
+                    now=now,
+                )
             )
             for budget in snapshot.budgets
         }
@@ -1471,21 +1124,17 @@ def create_app(
         )
         return len(fact_ids), capital_snapshot(actor_id)
 
-    def require_freqtrade_live_enabled() -> None:
-        if (
-            resolved_settings.execution_backend != "FREQTRADE"
-            or not resolved_settings.freqtrade_workers_enabled
-            or not resolved_settings.freqtrade_live_order_send_enabled
-        ):
+    def require_freqtrade_enabled() -> None:
+        if not resolved_settings.freqtrade_workers_enabled:
             raise DomainRejected(
-                "FREQTRADE_LIVE_DISABLED",
-                "Freqtrade LIVE order send is explicitly disabled",
+                "FREQTRADE_EXECUTION_DISABLED",
+                "Freqtrade execution is explicitly disabled",
             )
 
-    def require_freqtrade_live_worker(
+    def require_freqtrade_worker(
         binding: PreparedFreqtradeWorkerBinding,
     ) -> FreqtradeWorkerClient:
-        require_freqtrade_live_enabled()
+        require_freqtrade_enabled()
         return freqtrade_client_for_binding(binding)
 
     def handle_real_telegram_action(
@@ -1537,21 +1186,8 @@ def create_app(
         ),
         accounts=AccountRouteDependencies(
             common=authenticated_dependencies,
-            database_bound_venue_facts=database_bound_venue_facts,
             freqtrade_client_for_binding=freqtrade_client_for_binding,
-            require_binance_testnet=require_binance_testnet,
-            require_default_venue_account=require_default_venue_account,
-            require_registered_or_default_venue_account=(
-                require_registered_or_default_venue_account
-            ),
-            binance=resolved_binance,
-            binance_live=resolved_binance_live,
-            binance_testnet=resolved_binance_testnet,
-            binance_testnet_reader=resolved_binance_testnet_reader,
             exchange_connection_verifier=resolved_exchange_connection_verifier,
-            hyperliquid=resolved_hyperliquid,
-            hyperliquid_live=resolved_hyperliquid_live,
-            hyperliquid_testnet=resolved_hyperliquid_testnet,
         ),
         signals=SignalRouteDependencies(
             common=authenticated_dependencies,
@@ -1576,26 +1212,11 @@ def create_app(
             current_perptape_candidate=current_perptape_candidate,
             current_perptape_candidates=current_perptape_candidates,
             notify_campaign=notify_campaign,
-            rejected_hyperliquid_order=rejected_hyperliquid_order,
-            rejected_testnet_order=rejected_testnet_order,
-            require_binance_live=require_binance_live,
-            require_binance_testnet=require_binance_testnet,
-            require_freqtrade_live_enabled=require_freqtrade_live_enabled,
-            require_freqtrade_live_worker=require_freqtrade_live_worker,
-            require_hyperliquid_live=require_hyperliquid_live,
-            require_hyperliquid_testnet=require_hyperliquid_testnet,
-            binance_live=resolved_binance_live,
-            binance_testnet=resolved_binance_testnet,
-            binance_testnet_uses_database_credentials=(binance_testnet_client is None),
+            require_freqtrade_enabled=require_freqtrade_enabled,
+            require_freqtrade_worker=require_freqtrade_worker,
             freqtrade_workers=resolved_freqtrade_workers,
-            hyperliquid=resolved_hyperliquid,
-            hyperliquid_live=resolved_hyperliquid_live,
-            hyperliquid_testnet=resolved_hyperliquid_testnet,
-            hyperliquid_testnet_uses_database_credentials=(hyperliquid_testnet_client is None),
             notilt=resolved_notilt,
             telegram=resolved_telegram,
-            unknown_hyperliquid_protection=unknown_hyperliquid_protection,
-            unknown_testnet_protection=unknown_testnet_protection,
         ),
         capital=CapitalRouteDependencies(
             common=authenticated_dependencies,
@@ -1604,9 +1225,8 @@ def create_app(
             effective_direct_capital_settings=effective_direct_capital_settings,
             notify_capital=notify_capital,
             notilt_chain_id_for_network=notilt_chain_id_for_network,
-            binance_capital=resolved_binance_capital,
+            capital_adapter_resolver=resolved_capital_adapter_factory,
             capital_transfer=resolved_capital_transfer,
-            hyperliquid_capital=resolved_hyperliquid_capital,
             notilt=resolved_notilt,
             safe_spending=resolved_safe_spending,
             sync_configured_notilt_vault=sync_configured_notilt_vault,

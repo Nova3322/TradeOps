@@ -4,7 +4,6 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from subprocess import TimeoutExpired
 from typing import Any
-from urllib.error import URLError
 
 import pytest
 
@@ -332,92 +331,68 @@ def test_gateway_fails_closed_for_incomplete_protocol_responses() -> None:
         )
 
 
-def test_usd_valuator_uses_par_for_stables_and_fixed_public_marks_for_native_assets() -> None:
-    calls: list[str] = []
-
-    def fetcher(url: str, _timeout: float) -> dict[str, Any]:
-        calls.append(url)
-        return {
-            "symbol": "ETHUSDT",
-            "markPrice": "3000",
-            "time": 1_785_480_000_000,
-        }
-
-    valuator = NoTiltUsdValuator(fetcher)
+def test_usd_valuator_uses_par_for_stables_and_persisted_account_marks() -> None:
+    valuator = NoTiltUsdValuator()
     now = datetime.fromtimestamp(1_785_480_010, UTC)
+    observed_at = datetime.fromtimestamp(1_785_480_000, UTC)
 
     stable = valuator.value("USDC", Decimal("25"), now=now)
-    native = valuator.value("ETH", Decimal("0.01"), now=now)
+    native = valuator.value(
+        "ETH",
+        Decimal("0.01"),
+        now=now,
+        mark_price=Decimal("3000"),
+        mark_observed_at=observed_at,
+    )
     zero_native = valuator.value("BNB", Decimal(0), now=now)
 
     assert stable.price == Decimal(1)
     assert stable.value == Decimal(25)
     assert native.price == Decimal(3000)
     assert native.value == Decimal(30)
+    assert native.observed_at == observed_at
     assert zero_native.value == Decimal(0)
-    assert len(calls) == 1
-    assert "symbol=ETHUSDT" in calls[0]
 
 
-def test_usd_valuator_fails_closed_for_unknown_or_invalid_prices() -> None:
+def test_usd_valuator_fails_closed_for_unknown_missing_or_invalid_marks() -> None:
     now = datetime.fromtimestamp(1_785_480_010, UTC)
-    valuator = NoTiltUsdValuator(
-        lambda _url, _timeout: {
-            "symbol": "ETHUSDT",
-            "markPrice": "0",
-            "time": 1_785_480_000_000,
-        }
-    )
+    valuator = NoTiltUsdValuator()
 
     with pytest.raises(DomainRejected, match="NOTILT_VALUATION_UNSUPPORTED"):
         valuator.value("UNKNOWN", Decimal(1), now=now)
-    with pytest.raises(DomainRejected, match="NOTILT_VALUATION_INVALID"):
+    with pytest.raises(DomainRejected, match="NOTILT_VALUATION_UNAVAILABLE"):
         valuator.value("ETH", Decimal(1), now=now)
+    with pytest.raises(DomainRejected, match="NOTILT_VALUATION_INVALID"):
+        valuator.value(
+            "ETH",
+            Decimal(1),
+            now=now,
+            mark_price=Decimal(0),
+            mark_observed_at=now,
+        )
     with pytest.raises(DomainRejected, match="NOTILT_VALUATION_INVALID"):
         valuator.value("USDC", Decimal("-1"), now=now)
 
 
-class FakeHttpResponse:
-    def __init__(self, body: bytes) -> None:
-        self.body = body
-
-    def __enter__(self) -> FakeHttpResponse:
-        return self
-
-    def __exit__(self, *_args: object) -> None:
-        return None
-
-    def read(self) -> bytes:
-        return self.body
-
-
-def test_default_price_transport_maps_json_and_fails_closed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_persisted_marks_must_be_recent_and_not_from_the_future() -> None:
     now = datetime.fromtimestamp(1_785_480_010, UTC)
-    monkeypatch.setattr(
-        notilt_module.urllib.request,
-        "urlopen",
-        lambda _request, timeout: FakeHttpResponse(
-            b'{"symbol":"ETHUSDT","markPrice":"3000","time":1785480000000}'
-        ),
-    )
-    assert NoTiltUsdValuator().value("ETH", Decimal("0.01"), now=now).value == Decimal("30")
-
-    monkeypatch.setattr(
-        notilt_module.urllib.request,
-        "urlopen",
-        lambda _request, timeout: FakeHttpResponse(b"[]"),
-    )
+    valuator = NoTiltUsdValuator()
     with pytest.raises(DomainRejected, match="NOTILT_VALUATION_INVALID"):
-        NoTiltUsdValuator().value("ETH", Decimal("0.01"), now=now)
-
-    def unavailable(_request: object, timeout: float) -> FakeHttpResponse:
-        raise URLError("offline")
-
-    monkeypatch.setattr(notilt_module.urllib.request, "urlopen", unavailable)
-    with pytest.raises(DomainRejected, match="NOTILT_VALUATION_UNAVAILABLE"):
-        NoTiltUsdValuator().value("ETH", Decimal("0.01"), now=now)
+        valuator.value(
+            "ETH",
+            Decimal("0.01"),
+            now=now,
+            mark_price=Decimal("3000"),
+            mark_observed_at=datetime.fromtimestamp(1_785_479_709, UTC),
+        )
+    with pytest.raises(DomainRejected, match="NOTILT_VALUATION_INVALID"):
+        valuator.value(
+            "ETH",
+            Decimal("0.01"),
+            now=now,
+            mark_price=Decimal("3000"),
+            mark_observed_at=datetime.fromtimestamp(1_785_480_041, UTC),
+        )
 
 
 def test_subprocess_gateway_maps_success_and_failure_contracts(

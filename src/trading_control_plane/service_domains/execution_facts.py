@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# This service is composed with account and execution helpers by TradingService.
+# mypy: disable-error-code=attr-defined
 from trading_control_plane.service_component import ServiceComponent
 
 # The domain implementation intentionally consumes the explicit service_core export surface.
@@ -35,48 +37,6 @@ class FactIngestionExecutionService(ServiceComponent):
             runtime_binding=runtime_binding,
             now=now,
         )
-
-    def binance_history_cursors(
-        self,
-        account_id: str,
-        actor_id: UUID,
-        *,
-        environment: ExecutionEnvironment,
-    ) -> dict[str, dict[str, datetime | None]]:
-        """Return persisted per-symbol overlap cursors for incremental Binance history."""
-
-        with self.database.session_factory() as session:
-            team = self.transactions._require_role(
-                session, actor_id, "venue.record", account_id, "BINANCE"
-            )
-            fills = session.execute(
-                select(Instrument.symbol, func.max(VenueFill.executed_at))
-                .join(Instrument, Instrument.instrument_id == VenueFill.instrument_id)
-                .where(
-                    VenueFill.team_id == team.team_id,
-                    VenueFill.environment == environment.value,
-                    VenueFill.account_id == account_id,
-                    VenueFill.venue == "BINANCE",
-                )
-                .group_by(Instrument.symbol)
-            ).all()
-            funding = session.execute(
-                select(Instrument.symbol, func.max(FundingPayment.paid_at))
-                .join(Instrument, Instrument.instrument_id == FundingPayment.instrument_id)
-                .where(
-                    FundingPayment.team_id == team.team_id,
-                    FundingPayment.environment == environment.value,
-                    FundingPayment.account_id == account_id,
-                    FundingPayment.venue == "BINANCE",
-                )
-                .group_by(Instrument.symbol)
-            ).all()
-        result: dict[str, dict[str, datetime | None]] = {}
-        for symbol, executed_at in fills:
-            result.setdefault(str(symbol), {"fills": None, "funding": None})["fills"] = executed_at
-        for symbol, paid_at in funding:
-            result.setdefault(str(symbol), {"fills": None, "funding": None})["funding"] = paid_at
-        return result
 
     def record_position(
         self,
@@ -473,141 +433,11 @@ class FactIngestionExecutionService(ServiceComponent):
             session.flush()
             return payment.funding_payment_id
 
-    def ingest_binance_read_only_snapshot(
-        self,
-        account_id: str,
-        actor_id: UUID,
-        snapshot: BinanceReadOnlySnapshot,
-        *,
-        environment: ExecutionEnvironment,
-        now: datetime,
-    ) -> dict[str, Any]:
-        """Persist one Binance USER_DATA snapshot without any venue-side mutation."""
-
-        return self._ingest_read_only_snapshot(
-            account_id,
-            actor_id,
-            snapshot,
-            venue="BINANCE",
-            environment=environment,
-            now=now,
-        )
-
-    def ingest_hyperliquid_read_only_snapshot(
-        self,
-        account_id: str,
-        actor_id: UUID,
-        snapshot: HyperliquidReadOnlySnapshot,
-        *,
-        environment: ExecutionEnvironment,
-        now: datetime,
-    ) -> dict[str, Any]:
-        """Persist one Hyperliquid Core Info snapshot without Exchange actions."""
-
-        return self._ingest_read_only_snapshot(
-            account_id,
-            actor_id,
-            snapshot,
-            venue="HYPERLIQUID",
-            environment=environment,
-            now=now,
-        )
-
-    def ingest_binance_read_only_account_snapshot(
-        self,
-        account_id: str,
-        actor_id: UUID,
-        snapshots: tuple[BinanceReadOnlySnapshot, ...],
-        *,
-        environment: ExecutionEnvironment,
-        runtime_binding: PreparedRuntimeAccountBinding | None = None,
-        now: datetime,
-    ) -> dict[str, Any]:
-        """Persist a fully parsed Binance account snapshot and cover absent positions."""
-
-        return self._ingest_read_only_account_snapshot(
-            account_id,
-            actor_id,
-            snapshots,
-            venue="BINANCE",
-            environment=environment,
-            runtime_binding=runtime_binding,
-            now=now,
-        )
-
-    def ingest_hyperliquid_read_only_account_snapshot(
-        self,
-        account_id: str,
-        actor_id: UUID,
-        snapshots: tuple[HyperliquidReadOnlySnapshot, ...],
-        *,
-        environment: ExecutionEnvironment,
-        runtime_binding: PreparedRuntimeAccountBinding | None = None,
-        now: datetime,
-    ) -> dict[str, Any]:
-        """Persist a fully parsed Hyperliquid account snapshot and cover absent positions."""
-
-        return self._ingest_read_only_account_snapshot(
-            account_id,
-            actor_id,
-            snapshots,
-            venue="HYPERLIQUID",
-            environment=environment,
-            runtime_binding=runtime_binding,
-            now=now,
-        )
-
-    def ingest_okx_read_only_account_snapshot(
-        self,
-        account_id: str,
-        actor_id: UUID,
-        snapshots: tuple[VenueReadOnlySnapshot, ...],
-        *,
-        environment: ExecutionEnvironment,
-        runtime_binding: PreparedRuntimeAccountBinding | None = None,
-        now: datetime,
-    ) -> dict[str, Any]:
-        """Persist one complete normalized OKX USDT linear SWAP account read."""
-
-        return self._ingest_read_only_account_snapshot(
-            account_id,
-            actor_id,
-            snapshots,
-            venue="OKX",
-            environment=environment,
-            runtime_binding=runtime_binding,
-            now=now,
-        )
-
-    def ingest_bybit_read_only_account_snapshot(
-        self,
-        account_id: str,
-        actor_id: UUID,
-        snapshots: tuple[VenueReadOnlySnapshot, ...],
-        *,
-        environment: ExecutionEnvironment,
-        runtime_binding: PreparedRuntimeAccountBinding | None = None,
-        now: datetime,
-    ) -> dict[str, Any]:
-        """Persist one complete normalized Bybit Unified USDT linear account read."""
-
-        return self._ingest_read_only_account_snapshot(
-            account_id,
-            actor_id,
-            snapshots,
-            venue="BYBIT",
-            environment=environment,
-            runtime_binding=runtime_binding,
-            now=now,
-        )
-
     def _ingest_read_only_account_snapshot(
         self,
         account_id: str,
         actor_id: UUID,
-        snapshots: tuple[
-            BinanceReadOnlySnapshot | HyperliquidReadOnlySnapshot | VenueReadOnlySnapshot, ...
-        ],
+        snapshots: tuple[VenueReadOnlySnapshot, ...],
         *,
         venue: str,
         environment: ExecutionEnvironment,
@@ -817,29 +647,56 @@ class FactIngestionExecutionService(ServiceComponent):
                         object_version=1,
                         now=now,
                     )
+            unresolved_orders = session.scalars(
+                select(VenueOrder)
+                .where(
+                    VenueOrder.team_id == team.team_id,
+                    VenueOrder.environment == environment.value,
+                    VenueOrder.account_id == account_id,
+                    VenueOrder.venue == venue,
+                    VenueOrder.status.in_(
+                        {
+                            VenueOrderStatus.SENT.value,
+                            VenueOrderStatus.PARTIALLY_FILLED.value,
+                            VenueOrderStatus.UNKNOWN.value,
+                        }
+                    ),
+                )
+                .with_for_update()
+            ).all()
+            for order in unresolved_orders:
+                if order.venue_order_id in observed_order_ids:
+                    continue
+                fills = session.scalars(
+                    select(VenueFill).where(
+                        VenueFill.team_id == team.team_id,
+                        VenueFill.environment == environment.value,
+                        VenueFill.account_id == account_id,
+                        VenueFill.venue == venue,
+                        VenueFill.order_intent_id == order.order_intent_id,
+                    )
+                ).all()
+                confirmed_quantity = sum((item.quantity for item in fills), Decimal(0))
+                if (
+                    order.order_intent_id is not None
+                    and confirmed_quantity >= order.ordered_quantity
+                ):
+                    order.status = VenueOrderStatus.FILLED.value
+                    order.filled_quantity = min(confirmed_quantity, order.ordered_quantity)
+                else:
+                    # Absence from an account-wide open-order snapshot is not proof
+                    # of cancellation.  Keep the terminal state unknown until a
+                    # fill or Freqtrade query confirms the outcome.
+                    order.status = VenueOrderStatus.UNKNOWN.value
+                order.observed_at = now
+                order.updated_at = now
             return closed, covered
-
-    @staticmethod
-    def _intent_id_from_client_order(venue: str, client_order_id: str) -> UUID | None:
-        raw: str | None = None
-        if venue == "BINANCE" and client_order_id.startswith("tcp-"):
-            raw = client_order_id.removeprefix("tcp-")
-        elif venue == "HYPERLIQUID" and client_order_id.startswith("0x"):
-            raw = client_order_id.removeprefix("0x")
-        if raw is None:
-            return None
-        try:
-            if venue == "BINANCE" and len(raw) == 22:
-                return UUID(bytes=base64.urlsafe_b64decode(f"{raw}=="))
-            return _as_uuid(raw)
-        except (binascii.Error, ValueError):
-            return None
 
     def _ingest_read_only_snapshot(
         self,
         account_id: str,
         actor_id: UUID,
-        snapshot: BinanceReadOnlySnapshot | HyperliquidReadOnlySnapshot | VenueReadOnlySnapshot,
+        snapshot: VenueReadOnlySnapshot,
         *,
         venue: str,
         environment: ExecutionEnvironment,
@@ -996,23 +853,6 @@ class FactIngestionExecutionService(ServiceComponent):
             order_count = 0
             for external_order in snapshot.orders:
                 intent: OrderIntent | None = None
-                candidate = self._intent_id_from_client_order(venue, external_order.client_order_id)
-                if candidate is not None:
-                    intent = session.get(OrderIntent, candidate)
-                if intent is not None:
-                    campaign = session.get(Campaign, intent.campaign_id)
-                    if (
-                        campaign is None
-                        or campaign.team_id != team.team_id
-                        or campaign.account_id != account_id
-                        or campaign.venue != venue
-                        or campaign.environment != environment.value
-                        or campaign.instrument_id != instrument.instrument_id
-                    ):
-                        _reject(
-                            f"{venue}_ORDER_BINDING_INVALID",
-                            "client order identity does not match its internal scope",
-                        )
                 current_order = session.scalar(
                     select(VenueOrder)
                     .where(
@@ -1036,6 +876,22 @@ class FactIngestionExecutionService(ServiceComponent):
                         )
                         .with_for_update()
                     )
+                if current_order is not None and current_order.order_intent_id is not None:
+                    intent = session.get(OrderIntent, current_order.order_intent_id)
+                    campaign = None if intent is None else session.get(Campaign, intent.campaign_id)
+                    if (
+                        intent is None
+                        or campaign is None
+                        or campaign.team_id != team.team_id
+                        or campaign.account_id != account_id
+                        or campaign.venue != venue
+                        or campaign.environment != environment.value
+                        or campaign.instrument_id != instrument.instrument_id
+                    ):
+                        _reject(
+                            f"{venue}_ORDER_BINDING_INVALID",
+                            "persisted order identity does not match its internal scope",
+                        )
                 if current_order is None:
                     current_order = VenueOrder(
                         team_id=team.team_id,

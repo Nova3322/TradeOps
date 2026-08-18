@@ -12,12 +12,10 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, func, select
 from test_m7_capital_center import build_app, login, seed
 
-from trading_control_plane.binance_execution import BinancePortfolioMarginClient
 from trading_control_plane.capital import MockCapitalTransferAdapter
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, ExecutionEnvironment, Role
 from trading_control_plane.freqtrade import FreqtradeWorkerClient
-from trading_control_plane.hyperliquid_execution import HyperliquidLiveClient
 from trading_control_plane.models import (
     AccountEquityObservation,
     AnalyticsReport,
@@ -266,16 +264,6 @@ def test_testnet_report_apis_are_offline_idempotent_and_persist_real_artifacts(
                 }
                 with (
                     patch.object(
-                        BinancePortfolioMarginClient,
-                        "ensure_order",
-                        side_effect=AssertionError("exchange write"),
-                    ) as binance_write,
-                    patch.object(
-                        HyperliquidLiveClient,
-                        "ensure_order",
-                        side_effect=AssertionError("exchange write"),
-                    ) as hyperliquid_write,
-                    patch.object(
                         FreqtradeWorkerClient,
                         "force_enter",
                         side_effect=AssertionError("exchange write"),
@@ -311,8 +299,6 @@ def test_testnet_report_apis_are_offline_idempotent_and_persist_real_artifacts(
                 replay = await client.post("/api/results/reports", json=payload)
                 assert replay.status_code == 201
                 assert replay.json()["data"]["report_id"] == report_id
-                assert binance_write.call_count == 0
-                assert hyperliquid_write.call_count == 0
                 assert freqtrade_write.call_count == 0
                 assert freqtrade_exit.call_count == 0
                 assert capital_write.call_count == 0

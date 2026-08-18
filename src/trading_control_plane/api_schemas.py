@@ -240,6 +240,7 @@ class ExchangeAccountCreateRequest(BaseModel):
     environment: Literal["TESTNET", "LIVE"] = "LIVE"
     account_id: str = Field(min_length=1, max_length=120)
     venue: VenueScope
+    account_mode: Literal["STANDARD", "PORTFOLIO_MARGIN"] = "STANDARD"
     label: str | None = Field(default=None, min_length=1, max_length=120)
     credentials: ExchangeCredentialRequest
     idempotency_key: str = Field(min_length=1, max_length=160)
@@ -1176,30 +1177,8 @@ class ReconciliationReasonRequest(BaseModel):
     reason: str = Field(min_length=2, max_length=1_000)
 
 
-class BinanceReadOnlySyncRequest(BaseModel):
-    account_id: str = Field(min_length=1, max_length=120)
-    symbol: str = Field(min_length=1, max_length=64, pattern=r"^[A-Z0-9_]+$")
-
-
-class HyperliquidReadOnlySyncRequest(BaseModel):
-    account_id: str = Field(min_length=1, max_length=120)
-    symbol: str = Field(min_length=1, max_length=64, pattern=r"^[A-Z0-9]+$")
-
-
-class BinanceTestnetActionRequest(BaseModel):
+class FreqtradeActionRequest(BaseModel):
     execution_scope: str = Field(min_length=3, max_length=255)
     owner_id: str = Field(min_length=1, max_length=255)
     fencing_token: int = Field(ge=1)
-
-
-class FreqtradeLiveActionRequest(BinanceTestnetActionRequest):
     idempotency_key: str = Field(min_length=1, max_length=160)
-
-
-class BinanceTestnetProtectionRequest(BinanceTestnetActionRequest):
-    trigger_price: Decimal = Field(gt=0)
-
-
-class HyperliquidTestnetProtectionRequest(BinanceTestnetActionRequest):
-    trigger_price: Decimal = Field(gt=0)
-    limit_price: Decimal = Field(gt=0)

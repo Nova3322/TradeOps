@@ -24,13 +24,6 @@ from trading_control_plane.agent import (
     issue_api_client_token,
     parse_api_client_token,
 )
-from trading_control_plane.binance import BinanceInstrument, BinanceReadOnlySnapshot
-from trading_control_plane.binance_execution import (
-    BinanceTestnetOrder,
-    BinanceTestnetOrderCommand,
-    BinanceTestnetProtectionCommand,
-    ProtectionCancelCommand,
-)
 from trading_control_plane.capital import (
     CapitalTransferCommand,
     CapitalTransferSubmission,
@@ -85,20 +78,16 @@ from trading_control_plane.domain import (
     evaluate_risk,
     select_target_position,
 )
-from trading_control_plane.exchange_connection import ConnectionProbeResult
 from trading_control_plane.freqtrade import (
     FreqtradeEntryCommand,
     FreqtradeExitCommand,
+    FreqtradeRpcMessage,
     FreqtradeTrade,
+    freqtrade_active_stop_order,
+    freqtrade_execution_order,
     freqtrade_pair,
     parse_hip3_dexes,
     validate_worker_url,
-)
-from trading_control_plane.hyperliquid import HyperliquidInstrument, HyperliquidReadOnlySnapshot
-from trading_control_plane.hyperliquid_execution import (
-    HyperliquidTestnetOrder,
-    HyperliquidTestnetOrderCommand,
-    HyperliquidTestnetProtectionCommand,
 )
 from trading_control_plane.metrics import (
     FENCING_REJECTIONS,
@@ -274,6 +263,7 @@ RISK_RESTORE_TTL = timedelta(hours=24)
 @dataclass(frozen=True, slots=True)
 class PreparedExchangeConnectionVerification:
     exchange_account_id: UUID
+    workspace_id: UUID
     team_id: UUID
     account_id: str
     venue: str
@@ -281,6 +271,14 @@ class PreparedExchangeConnectionVerification:
     account_version: int
     credential_version: int
     credentials: dict[str, str] = field(repr=False)
+    account_mode: str = "STANDARD"
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionProbeResult:
+    success: bool
+    error_code: str | None
+    diagnostics: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,20 +294,8 @@ class PreparedRuntimeAccountBinding:
     account_version: int
     credential_version: int
     credentials: dict[str, str] = field(repr=False)
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedExecutionAccountBinding:
-    """Version-pinned account credentials for one exact environment adapter."""
-
-    exchange_account_id: UUID
-    team_id: UUID
-    account_id: str
-    venue: str
-    environment: str
-    account_version: int
-    credential_version: int
-    credentials: dict[str, str] = field(repr=False)
+    account_mode: str = "STANDARD"
+    hip3_dexes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +305,7 @@ class PreparedFreqtradeWorkerBinding:
     team_id: UUID
     account_id: str
     venue: str
+    environment: str
     account_version: int
     worker_name: str
     worker_url: str
@@ -329,6 +316,7 @@ class PreparedFreqtradeWorkerBinding:
     password: str = field(repr=False)
     hip3_dexes: tuple[str, ...] = ()
     ws_token: str | None = field(default=None, repr=False)
+    service_principal_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +324,7 @@ class PreparedFreqtradeDispatch:
     mode: str
     external_trade_id: str | None
     intent_version: int
+    started_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -653,11 +642,6 @@ __all__ = [
     "ApiClientState",
     "Approval",
     "AuditEvent",
-    "BinanceInstrument",
-    "BinanceReadOnlySnapshot",
-    "BinanceTestnetOrder",
-    "BinanceTestnetOrderCommand",
-    "BinanceTestnetProtectionCommand",
     "Campaign",
     "CampaignStatus",
     "CapabilityGate",
@@ -683,13 +667,9 @@ __all__ = [
     "FactStatus",
     "FreqtradeEntryCommand",
     "FreqtradeExitCommand",
+    "FreqtradeRpcMessage",
     "FreqtradeTrade",
     "FundingPayment",
-    "HyperliquidInstrument",
-    "HyperliquidReadOnlySnapshot",
-    "HyperliquidTestnetOrder",
-    "HyperliquidTestnetOrderCommand",
-    "HyperliquidTestnetProtectionCommand",
     "IdempotencyConflict",
     "Instrument",
     "IntentCreation",
@@ -707,7 +687,6 @@ __all__ = [
     "PnlBreakdown",
     "Position",
     "PreparedExchangeConnectionVerification",
-    "PreparedExecutionAccountBinding",
     "PreparedFreqtradeDispatch",
     "PreparedFreqtradeWorkerBinding",
     "PreparedPerptapeRuntimeBinding",
@@ -717,7 +696,6 @@ __all__ = [
     "ProposalDefaultConfig",
     "ProposalSource",
     "ProposalStatus",
-    "ProtectionCancelCommand",
     "ProtectionOrder",
     "ProtectionStatus",
     "ReconciliationRun",
@@ -788,6 +766,8 @@ __all__ = [
     "evaluate_capital_automation",
     "evaluate_risk",
     "fact_is_stale",
+    "freqtrade_active_stop_order",
+    "freqtrade_execution_order",
     "freqtrade_pair",
     "func",
     "hashlib",

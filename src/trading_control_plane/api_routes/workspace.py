@@ -668,7 +668,7 @@ class _WorkspaceRoutes:
             elif payload.action == "risk.restore.direct":
                 status_detail = self.service().risk_control_status(
                     identity.user_id,
-                    self.configured_risk_scopes(),
+                    self.configured_risk_scopes(identity.user_id),
                     require_live_scope=True,
                     now=_now(),
                 )

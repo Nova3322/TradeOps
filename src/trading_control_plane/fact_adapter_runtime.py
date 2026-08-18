@@ -26,10 +26,20 @@ from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, ExecutionEnvironment
 from trading_control_plane.fact_adapter_api import create_fact_adapter_app
 from trading_control_plane.fact_adapter_ingestion import normalize_fact_adapter_snapshot
-from trading_control_plane.freqtrade import freqtrade_pair
+from trading_control_plane.freqtrade import (
+    FreqtradeRpcMessage,
+    FreqtradeTrade,
+    FreqtradeWorkerClient,
+    FreqtradeWorkerSpec,
+    freqtrade_pair,
+)
 from trading_control_plane.logging import configure_logging
 from trading_control_plane.models import Instrument
-from trading_control_plane.service import PreparedRuntimeAccountBinding, TradingService
+from trading_control_plane.service import (
+    PreparedFreqtradeWorkerBinding,
+    PreparedRuntimeAccountBinding,
+    TradingService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +47,12 @@ BindingProvider = Callable[[], Sequence[PreparedRuntimeAccountBinding]]
 SymbolProvider = Callable[[str], Sequence[str]]
 ExchangeFactory = Callable[[FactAdapterScope, Mapping[str, str], Mapping[str, Any]], Any]
 SnapshotConsumer = Callable[[PreparedRuntimeAccountBinding, ExchangeFactSnapshot], None]
+FreqtradeBindingProvider = Callable[[], Sequence[PreparedFreqtradeWorkerBinding]]
+FreqtradeEventConsumer = Callable[
+    [PreparedFreqtradeWorkerBinding, FreqtradeRpcMessage, FreqtradeTrade | None],
+    None,
+]
+FreqtradeClientFactory = Callable[[PreparedFreqtradeWorkerBinding], FreqtradeWorkerClient]
 
 
 @dataclass(slots=True)
@@ -76,7 +92,7 @@ class FactAdapterRuntime:
                 pair = freqtrade_pair(
                     binding.venue,
                     symbol,
-                    hip3_dexes=self.settings.hyperliquid_hip3_dexes,
+                    hip3_dexes=binding.hip3_dexes,
                 )
             except DomainRejected:
                 continue
@@ -94,11 +110,7 @@ class FactAdapterRuntime:
             venue=cast(Venue, binding.venue),
             environment=cast(Environment, binding.environment),
             symbols=tuple(pairs),
-            account_mode=(
-                self.settings.binance_account_mode
-                if binding.venue == "BINANCE"
-                else "STANDARD"
-            ),
+            account_mode=binding.account_mode,
         )
 
     async def _start_binding(self, binding: PreparedRuntimeAccountBinding) -> str:
@@ -207,6 +219,184 @@ class FactAdapterRuntime:
         await self.registry.close()
 
 
+@dataclass(slots=True)
+class _RunningFreqtradeRpc:
+    version: tuple[int, int]
+    task: asyncio.Task[None]
+
+
+class FreqtradeRpcRuntime:
+    """Supervise one RPC lifecycle stream for each exact account-bound worker."""
+
+    _TRANSACTION_EVENTS = frozenset({
+        "entry",
+        "entry_fill",
+        "entry_cancel",
+        "exit",
+        "exit_fill",
+        "exit_cancel",
+        "protection_trigger",
+        "protection_trigger_global",
+    })
+
+    def __init__(
+        self,
+        *,
+        binding_provider: FreqtradeBindingProvider,
+        event_consumer: FreqtradeEventConsumer,
+        client_factory: FreqtradeClientFactory,
+        refresh_seconds: float,
+    ) -> None:
+        self.binding_provider = binding_provider
+        self.event_consumer = event_consumer
+        self.client_factory = client_factory
+        self.refresh_seconds = refresh_seconds
+        self._running: dict[str, _RunningFreqtradeRpc] = {}
+        self._stop = asyncio.Event()
+        self._reconcile_task: asyncio.Task[None] | None = None
+
+    @staticmethod
+    def _payload_trade_id(message: FreqtradeRpcMessage) -> str | None:
+        payload: Mapping[str, Any] = message.payload
+        nested = payload.get("trade")
+        candidates: list[Any] = [
+            payload.get("trade_id"),
+            payload.get("tradeid"),
+            payload.get("id"),
+        ]
+        if isinstance(nested, dict):
+            candidates.extend((nested.get("trade_id"), nested.get("tradeid"), nested.get("id")))
+        for value in candidates:
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return None
+
+    async def _record_recovery_trades(
+        self,
+        binding: PreparedFreqtradeWorkerBinding,
+        client: FreqtradeWorkerClient,
+    ) -> None:
+        trades = await asyncio.to_thread(client.open_trades)
+        for trade in trades:
+            message = FreqtradeRpcMessage(
+                event_type="reconcile",
+                payload={"trade_id": trade.trade_id, "is_open": trade.is_open},
+                observed_at=datetime.now(UTC),
+            )
+            await asyncio.to_thread(self.event_consumer, binding, message, trade)
+
+    async def _consume_binding(self, binding: PreparedFreqtradeWorkerBinding) -> None:
+        delay = 1.0
+        expected_mode = cast(Any, binding.worker_mode)
+        while not self._stop.is_set():
+            client = self.client_factory(binding)
+            try:
+                await asyncio.to_thread(client.probe, expected_mode=expected_mode)
+                await self._record_recovery_trades(binding, client)
+                delay = 1.0
+                async for message in client.rpc_messages():
+                    trade: FreqtradeTrade | None = None
+                    if message.event_type in self._TRANSACTION_EVENTS:
+                        trade_id = self._payload_trade_id(message)
+                        if trade_id is not None:
+                            try:
+                                trade = await asyncio.to_thread(client.trade, trade_id)
+                            except DomainRejected:
+                                trade = None
+                    await asyncio.to_thread(self.event_consumer, binding, message, trade)
+                    if self._stop.is_set():
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Freqtrade RPC stream disconnected; query-only recovery will retry",
+                    extra={
+                        "event": "freqtrade_rpc_disconnected",
+                        "component": "fact-adapter",
+                        "exchange_account_id": str(binding.exchange_account_id),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=delay)
+                except TimeoutError:
+                    delay = min(delay * 2, 30.0)
+
+    async def reconcile_once(self) -> None:
+        bindings = tuple(await asyncio.to_thread(self.binding_provider))
+        desired: dict[str, PreparedFreqtradeWorkerBinding] = {}
+        for binding in bindings:
+            key = str(binding.exchange_account_id)
+            if key in desired:
+                raise DomainRejected(
+                    "FREQTRADE_RPC_SCOPE_CONFLICT",
+                    "database bindings contain duplicate workers for one exchange account",
+                )
+            desired[key] = binding
+        for key in tuple(self._running):
+            current = desired.get(key)
+            running = self._running[key]
+            version = None if current is None else (current.account_version, current.auth_version)
+            if version != running.version or running.task.done():
+                running.task.cancel()
+                await asyncio.gather(running.task, return_exceptions=True)
+                self._running.pop(key, None)
+        for key, binding in desired.items():
+            if key not in self._running:
+                task = asyncio.create_task(
+                    self._consume_binding(binding),
+                    name=f"freqtrade-rpc:{key}",
+                )
+                self._running[key] = _RunningFreqtradeRpc(
+                    version=(binding.account_version, binding.auth_version),
+                    task=task,
+                )
+
+    async def _reconcile_forever(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await self.reconcile_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "Freqtrade RPC binding reconciliation failed",
+                    extra={
+                        "event": "freqtrade_rpc_binding_reconciliation_failed",
+                        "component": "fact-adapter",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.refresh_seconds)
+            except TimeoutError:
+                continue
+
+    async def start(self) -> None:
+        if self._reconcile_task is not None:
+            return
+        await self.reconcile_once()
+        self._reconcile_task = asyncio.create_task(
+            self._reconcile_forever(),
+            name="freqtrade-rpc:binding-reconciliation",
+        )
+
+    async def close(self) -> None:
+        self._stop.set()
+        if self._reconcile_task is not None:
+            self._reconcile_task.cancel()
+            await asyncio.gather(self._reconcile_task, return_exceptions=True)
+            self._reconcile_task = None
+        for running in self._running.values():
+            running.task.cancel()
+        await asyncio.gather(
+            *(running.task for running in self._running.values()),
+            return_exceptions=True,
+        )
+        self._running.clear()
+
+
 def _database_symbol_provider(database: Database, settings: Settings) -> SymbolProvider:
     bootstrap = {
         "BINANCE": settings.runtime_binance_symbol,
@@ -272,6 +462,47 @@ def create_runtime_app(
         exchange_factory=exchange_factory,
         snapshot_consumer=persist_snapshot,
     )
+    rpc_runtime: FreqtradeRpcRuntime | None = None
+    if resolved_settings.freqtrade_workers_enabled:
+
+        def freqtrade_client(binding: PreparedFreqtradeWorkerBinding) -> FreqtradeWorkerClient:
+            return FreqtradeWorkerClient(
+                FreqtradeWorkerSpec(
+                    name=binding.worker_name,
+                    venue=cast(Any, binding.venue),
+                    base_url=binding.worker_url,
+                    username=binding.username,
+                    password=binding.password,
+                    ws_token=binding.ws_token,
+                    hip3_dexes=binding.hip3_dexes,
+                    exchange_account_id=str(binding.exchange_account_id),
+                    team_id=str(binding.team_id),
+                    account_id=binding.account_id,
+                ),
+                timeout_seconds=resolved_settings.freqtrade_timeout_seconds,
+                confirmation_timeout_seconds=(
+                    resolved_settings.freqtrade_confirmation_timeout_seconds
+                ),
+            )
+
+        def consume_freqtrade_event(
+            binding: PreparedFreqtradeWorkerBinding,
+            message: FreqtradeRpcMessage,
+            trade: FreqtradeTrade | None,
+        ) -> None:
+            service.record_freqtrade_rpc_event(
+                binding,
+                message,
+                trade,
+                now=datetime.now(UTC),
+            )
+
+        rpc_runtime = FreqtradeRpcRuntime(
+            binding_provider=service.runtime_freqtrade_worker_bindings,
+            event_consumer=consume_freqtrade_event,
+            client_factory=freqtrade_client,
+            refresh_seconds=resolved_settings.fact_adapter_binding_refresh_seconds,
+        )
     app = create_fact_adapter_app(
         registry=registry,
         bearer_token=resolved_settings.fact_adapter_bearer_token,
@@ -281,9 +512,13 @@ def create_runtime_app(
     @app.on_event("startup")
     async def start_runtime() -> None:
         await runtime.start()
+        if rpc_runtime is not None:
+            await rpc_runtime.start()
 
     @app.on_event("shutdown")
     async def close_runtime() -> None:
+        if rpc_runtime is not None:
+            await rpc_runtime.close()
         await runtime.close()
         if database is None:
             resolved_database.engine.dispose()
@@ -294,6 +529,7 @@ def create_runtime_app(
 
     app.state.fact_adapter_registry = registry
     app.state.fact_adapter_runtime = runtime
+    app.state.freqtrade_rpc_runtime = rpc_runtime
     return app
 
 

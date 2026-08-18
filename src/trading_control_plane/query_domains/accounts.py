@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# AccountQueries is composed with shared query scope methods by TradingQueries.
+# mypy: disable-error-code=attr-defined
 from trading_control_plane.query_component import QueryComponent
 
 # ruff: noqa: F403, F405
@@ -7,6 +9,192 @@ from trading_control_plane.query_core import *
 
 
 class AccountQueries(QueryComponent):
+    def native_asset_mark(
+        self,
+        actor_id: UUID,
+        asset: str,
+    ) -> tuple[Decimal, datetime] | None:
+        """Read the active team's newest persisted USD perpetual mark for an asset."""
+
+        _workspace_id, team_id = self._active_scope_ids(actor_id)
+        normalized = asset.upper()
+        symbols = (
+            f"{normalized}USDT",
+            f"{normalized}-USDT-SWAP",
+            normalized,
+        )
+        with self.database.session_factory() as session:
+            row = session.execute(
+                select(Position.mark_price, Position.observed_at)
+                .join(Instrument, Instrument.instrument_id == Position.instrument_id)
+                .where(
+                    Position.team_id == team_id,
+                    Position.fact_status == "KNOWN",
+                    Position.mark_price > 0,
+                    Instrument.symbol.in_(symbols),
+                )
+                .order_by(Position.observed_at.desc())
+                .limit(1)
+            ).first()
+        return None if row is None else (Decimal(row[0]), row[1])
+
+    def configured_risk_scopes(self, actor_id: UUID) -> tuple[tuple[str, str, str], ...]:
+        """Return the active team's registered LIVE account scopes.
+
+        Risk configuration follows the same database registry as facts and
+        execution; deployment-wide venue defaults are not account identities.
+        """
+
+        _workspace_id, team_id = self._active_scope_ids(actor_id)
+        with self.database.session_factory() as session:
+            rows = session.execute(
+                select(
+                    ExchangeAccount.environment,
+                    ExchangeAccount.account_id,
+                    ExchangeAccount.venue,
+                )
+                .where(
+                    ExchangeAccount.team_id == team_id,
+                    ExchangeAccount.environment == "LIVE",
+                    ExchangeAccount.active.is_(True),
+                    ExchangeAccount.deleted_at.is_(None),
+                )
+                .order_by(ExchangeAccount.account_id, ExchangeAccount.venue)
+            ).all()
+        return tuple((str(row[0]), str(row[1]), str(row[2])) for row in rows)
+
+    def capital_account_scope(
+        self,
+        actor_id: UUID,
+        account_id: str,
+        venue: str,
+        environment: str = "LIVE",
+    ) -> dict[str, str]:
+        """Resolve one capital account without depending on venue-listing RBAC."""
+
+        workspace_id, team_id = self._active_scope_ids(actor_id)
+        if not self.service.can_user(actor_id, "capital.view", account_id, venue):
+            raise DomainRejected(
+                "RBAC_DENIED",
+                "capital account is outside the current assignment scope",
+            )
+        with self.database.session_factory() as session:
+            accounts = session.scalars(
+                select(ExchangeAccount).where(
+                    ExchangeAccount.team_id == team_id,
+                    ExchangeAccount.account_id == account_id,
+                    ExchangeAccount.venue == venue,
+                    ExchangeAccount.environment == environment,
+                    ExchangeAccount.active.is_(True),
+                    ExchangeAccount.deleted_at.is_(None),
+                )
+            ).all()
+        if len(accounts) != 1:
+            raise DomainRejected(
+                "CAPITAL_ACCOUNT_SCOPE_MISMATCH",
+                "capital operation is outside one exact active account",
+            )
+        account = accounts[0]
+        return {
+            "workspace_id": str(workspace_id),
+            "team_id": str(team_id),
+            "exchange_account_id": str(account.exchange_account_id),
+            "account_id": account.account_id,
+            "venue": account.venue,
+            "environment": account.environment,
+            "account_mode": str(
+                (account.credential_metadata or {}).get("account_mode", "STANDARD")
+            ),
+        }
+
+    def _exchange_account_scope(
+        self,
+        actor_id: UUID,
+        exchange_account_id: UUID,
+    ) -> tuple[UUID, UUID, str, str, str]:
+        workspace_id, team_id = self._active_scope_ids(actor_id)
+        with self.database.session_factory() as session:
+            account = session.scalar(
+                select(ExchangeAccount).where(
+                    ExchangeAccount.exchange_account_id == exchange_account_id,
+                    ExchangeAccount.team_id == team_id,
+                    ExchangeAccount.deleted_at.is_(None),
+                )
+            )
+            if account is None:
+                raise DomainRejected(
+                    "EXCHANGE_ACCOUNT_NOT_FOUND",
+                    "exchange account is outside the active team or does not exist",
+                )
+            if not self.service.can_user(
+                actor_id,
+                "venue.view",
+                account.account_id,
+                account.venue,
+            ):
+                raise DomainRejected("RBAC_DENIED", "account facts are outside the current scope")
+            return (
+                workspace_id,
+                team_id,
+                account.account_id,
+                account.venue,
+                account.environment,
+            )
+
+    def exchange_account_facts(
+        self,
+        actor_id: UUID,
+        exchange_account_id: UUID,
+    ) -> dict[str, Any]:
+        _workspace_id, _team_id, account_id, venue, environment = (
+            self._exchange_account_scope(actor_id, exchange_account_id)
+        )
+        return self.venue_facts(actor_id, account_id, venue, environment)
+
+    def exchange_account_fact_health(
+        self,
+        actor_id: UUID,
+        exchange_account_id: UUID,
+        *,
+        stale_after_seconds: int,
+        now: datetime,
+    ) -> dict[str, Any]:
+        workspace_id, team_id, account_id, venue, environment = (
+            self._exchange_account_scope(actor_id, exchange_account_id)
+        )
+        with self.database.session_factory() as session:
+            source = session.scalar(
+                select(RuntimeSourceHealth).where(
+                    RuntimeSourceHealth.team_id == team_id,
+                    RuntimeSourceHealth.source_name == venue,
+                    RuntimeSourceHealth.environment == environment,
+                    RuntimeSourceHealth.account_id == account_id,
+                    RuntimeSourceHealth.venue == venue,
+                )
+            )
+        if source is None or source.last_success_at is None:
+            data_status = "UNKNOWN"
+        elif now - source.last_success_at > timedelta(seconds=stale_after_seconds):
+            data_status = "STALE"
+        elif source.status == "SUCCESS":
+            data_status = "CURRENT"
+        else:
+            data_status = "UNKNOWN"
+        return {
+            "workspace_id": str(workspace_id),
+            "team_id": str(team_id),
+            "exchange_account_id": str(exchange_account_id),
+            "account_id": account_id,
+            "venue": venue,
+            "environment": environment,
+            "source": "CCXT_PRO",
+            "data_status": data_status,
+            "runtime_status": None if source is None else source.status,
+            "checked_at": None if source is None else _iso(source.checked_at),
+            "last_success_at": None if source is None else _iso(source.last_success_at),
+            "error_code": None if source is None else source.error_code,
+        }
+
     def current_positions(self, actor_id: UUID, environment: str) -> dict[str, Any]:
         workspace_id, team_id = self._active_scope_ids(actor_id)
         with self.database.session_factory() as session:
@@ -233,6 +421,7 @@ class AccountQueries(QueryComponent):
             "account_id": item.account_id,
             "venue": item.venue,
             "environment": item.environment,
+            "account_mode": str(metadata.get("account_mode") or "STANDARD"),
             "label": item.label,
             "registration_source": item.registration_source,
             "active": item.active,

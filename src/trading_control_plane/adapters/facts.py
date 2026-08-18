@@ -13,6 +13,7 @@ from typing import Any, Literal, Protocol, cast
 from uuid import uuid4
 
 from trading_control_plane.domain import DomainRejected
+from trading_control_plane.service_core import ConnectionProbeResult
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,14 @@ class FactAdapterScope:
                 raise ValueError(f"fact adapter {name} is invalid")
         if not self.symbols or len(self.symbols) != len(set(self.symbols)):
             raise ValueError("fact adapter symbols must be a non-empty unique tuple")
+        allowed_modes = (
+            {"STANDARD", "PORTFOLIO_MARGIN"} if self.venue == "BINANCE" else {"STANDARD"}
+        )
+        if self.account_mode not in allowed_modes:
+            raise DomainRejected(
+                "FACT_ADAPTER_ACCOUNT_MODE_UNSUPPORTED",
+                "the account mode is not supported for the selected exchange",
+            )
 
     @property
     def key(self) -> str:
@@ -130,9 +139,7 @@ class FactAdapterScope:
         }
 
 
-ExchangeFactory = Callable[
-    [FactAdapterScope, Mapping[str, str], Mapping[str, Any]], Any
-]
+ExchangeFactory = Callable[[FactAdapterScope, Mapping[str, str], Mapping[str, Any]], Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +395,20 @@ class CcxtProFactAdapter:
                 metadata={"missing": missing},
             )
 
+    def validate_exchange_mapping(self) -> None:
+        expected = {
+            "BINANCE": "binanceusdm",
+            "HYPERLIQUID": "hyperliquid",
+            "OKX": "okx",
+            "BYBIT": "bybit",
+        }[self.scope.venue]
+        exchange_id = getattr(self._exchange, "id", None)
+        if exchange_id != expected:
+            raise DomainRejected(
+                "FACT_ADAPTER_EXCHANGE_MAPPING_INVALID",
+                "the CCXT exchange does not match the exact account venue",
+            )
+
     @property
     def watch_channels(self) -> tuple[EventKind, ...]:
         return tuple(
@@ -417,9 +438,7 @@ class CcxtProFactAdapter:
                 "FACT_ADAPTER_CAPABILITY_CONTRACT_INVALID",
                 f"CCXT advertised {capability} without its callable contract",
             )
-        self._metrics.rest_requests[capability] = (
-            self._metrics.rest_requests.get(capability, 0) + 1
-        )
+        self._metrics.rest_requests[capability] = self._metrics.rest_requests.get(capability, 0) + 1
         return await cast(Callable[..., Awaitable[Any]], method)(*args)
 
     async def _load_markets(self) -> Mapping[str, Any]:
@@ -555,7 +574,12 @@ class CcxtProFactAdapter:
                 raise DomainRejected(
                     "FACT_ADAPTER_RESPONSE_INVALID", "CCXT position symbol is invalid"
                 )
-            contracts = _decimal(item.get("contracts"), default=Decimal(0)) or Decimal(0)
+            contracts = _decimal(item.get("contracts"))
+            if contracts is None:
+                raise DomainRejected(
+                    "FACT_ADAPTER_RESPONSE_INCOMPLETE",
+                    "CCXT position quantity is unknown",
+                )
             size = contracts * self._contract_size(markets, symbol)
             side = str(item.get("side") or "").lower()
             if side == "short":
@@ -602,6 +626,13 @@ class CcxtProFactAdapter:
                     "FACT_ADAPTER_RESPONSE_INVALID", "CCXT open-order row is invalid"
                 )
             symbol = str(item.get("symbol") or "")
+            amount = _decimal(item.get("amount"))
+            filled = _decimal(item.get("filled"))
+            if not symbol or amount is None or filled is None:
+                raise DomainRejected(
+                    "FACT_ADAPTER_RESPONSE_INCOMPLETE",
+                    "CCXT open-order quantity is unknown",
+                )
             size = self._contract_size(markets, symbol)
             rows.append(
                 {
@@ -613,16 +644,14 @@ class CcxtProFactAdapter:
                     "side": item.get("side"),
                     "type": item.get("type"),
                     "quantity": _decimal_text(
-                        (_decimal(item.get("amount"), default=Decimal(0)) or Decimal(0)) * size,
+                        amount * size,
                         default="0",
                     ),
                     "filled_quantity": _decimal_text(
-                        (_decimal(item.get("filled"), default=Decimal(0)) or Decimal(0)) * size,
+                        filled * size,
                         default="0",
                     ),
-                    "trigger_price": _decimal_text(
-                        item.get("triggerPrice", item.get("stopPrice"))
-                    ),
+                    "trigger_price": _decimal_text(item.get("triggerPrice", item.get("stopPrice"))),
                     "reduce_only": bool(item.get("reduceOnly")),
                     "observed_at": _timestamp(
                         item.get("lastTradeTimestamp", item.get("timestamp")),
@@ -641,16 +670,19 @@ class CcxtProFactAdapter:
         if raw is None:
             return ()
         if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
-            raise DomainRejected(
-                "FACT_ADAPTER_RESPONSE_INVALID", "CCXT fills response is invalid"
-            )
+            raise DomainRejected("FACT_ADAPTER_RESPONSE_INVALID", "CCXT fills response is invalid")
         rows: list[JsonObject] = []
         for item in raw:
             if not isinstance(item, Mapping) or item.get("id") is None:
-                raise DomainRejected(
-                    "FACT_ADAPTER_RESPONSE_INVALID", "CCXT fill row is invalid"
-                )
+                raise DomainRejected("FACT_ADAPTER_RESPONSE_INVALID", "CCXT fill row is invalid")
             symbol = str(item.get("symbol") or "")
+            amount = _decimal(item.get("amount"))
+            price = _decimal(item.get("price"))
+            if not symbol or amount is None or price is None:
+                raise DomainRejected(
+                    "FACT_ADAPTER_RESPONSE_INCOMPLETE",
+                    "CCXT fill quantity or price is unknown",
+                )
             fee = item.get("fee")
             fee_mapping = fee if isinstance(fee, Mapping) else {}
             size = self._contract_size(markets, symbol)
@@ -662,10 +694,10 @@ class CcxtProFactAdapter:
                     "native_symbol": self._market_id(markets, symbol),
                     "side": item.get("side"),
                     "quantity": _decimal_text(
-                        (_decimal(item.get("amount"), default=Decimal(0)) or Decimal(0)) * size,
+                        amount * size,
                         default="0",
                     ),
-                    "price": _decimal_text(item.get("price")),
+                    "price": format(price, "f"),
                     "fee": _decimal_text(fee_mapping.get("cost"), default="0"),
                     "fee_currency": fee_mapping.get("currency"),
                     "executed_at": _timestamp(item.get("timestamp"), fallback=observed_at),
@@ -813,9 +845,7 @@ class CcxtProFactAdapter:
             balance, positions, orders = await asyncio.gather(
                 balance_task, positions_task, orders_task
             )
-            optional = {
-                name: await task for name, task in optional_tasks.items()
-            }
+            optional = {name: await task for name, task in optional_tasks.items()}
         except Exception as exc:
             for task in (*optional_tasks.values(),):
                 task.cancel()
@@ -960,9 +990,7 @@ class CcxtProFactAdapter:
             payload = {"balances": list(self._balances(raw, observed_at))}
         elif kind == "MARK":
             payload = {
-                "marks": list(
-                    self._marks(raw, markets, observed_at, sorted(self._tracked_symbols))
-                )
+                "marks": list(self._marks(raw, markets, observed_at, sorted(self._tracked_symbols)))
             }
         else:
             payload = {"status": raw}
@@ -977,13 +1005,113 @@ class CcxtProFactAdapter:
             await cast(Callable[[], Awaitable[Any]], close)()
 
 
+class FactAdapterConnectionProbe:
+    """One-shot account-scoped read-only verification using the production adapter."""
+
+    def __init__(
+        self,
+        *,
+        bootstrap_symbols: Mapping[str, str],
+        exchange_factory: ExchangeFactory = _default_exchange_factory,
+    ) -> None:
+        self._bootstrap_symbols = dict(bootstrap_symbols)
+        self._exchange_factory = exchange_factory
+
+    async def _verify(
+        self,
+        *,
+        workspace_id: str,
+        team_id: str,
+        account_id: str,
+        venue: str,
+        environment: str,
+        account_mode: str,
+        credentials: Mapping[str, str],
+    ) -> ConnectionProbeResult:
+        adapter: CcxtProFactAdapter | None = None
+        try:
+            symbol = self._bootstrap_symbols.get(venue)
+            if symbol is None:
+                raise DomainRejected(
+                    "EXCHANGE_VENUE_UNSUPPORTED",
+                    "the exchange venue is unsupported",
+                )
+            scope = FactAdapterScope(
+                workspace_id=workspace_id,
+                team_id=team_id,
+                account_id=account_id,
+                venue=cast(Venue, venue),
+                environment=cast(Environment, environment),
+                symbols=(symbol,),
+                account_mode=account_mode,
+            )
+            adapter = CcxtProFactAdapter(
+                scope,
+                credentials=credentials,
+                exchange_factory=self._exchange_factory,
+            )
+            adapter.validate_exchange_mapping()
+            adapter.validate_capabilities()
+            snapshot = await adapter.snapshot(reason="INITIAL")
+            if snapshot.scope != scope or snapshot.data_status != "CURRENT":
+                raise DomainRejected(
+                    "FACT_ADAPTER_PROBE_SCOPE_MISMATCH",
+                    "the read-only snapshot did not confirm the exact account scope",
+                )
+            return ConnectionProbeResult(success=True, error_code=None)
+        except DomainRejected as exc:
+            return ConnectionProbeResult(
+                success=False,
+                error_code=exc.code,
+                diagnostics=None if exc.metadata is None else dict(exc.metadata),
+            )
+        except (KeyError, TypeError, ValueError):
+            return ConnectionProbeResult(
+                success=False,
+                error_code="FACT_ADAPTER_CONNECTION_CONFIGURATION_INVALID",
+            )
+        except Exception as exc:
+            return ConnectionProbeResult(
+                success=False,
+                error_code="FACT_ADAPTER_CONNECTION_FAILED",
+                diagnostics={"error_type": type(exc).__name__},
+            )
+        finally:
+            if adapter is not None:
+                await adapter.close()
+
+    def verify(
+        self,
+        *,
+        workspace_id: str,
+        team_id: str,
+        account_id: str,
+        venue: str,
+        environment: str,
+        account_mode: str,
+        credentials: Mapping[str, str],
+        now: datetime,
+    ) -> ConnectionProbeResult:
+        del now
+        return asyncio.run(
+            self._verify(
+                workspace_id=workspace_id,
+                team_id=team_id,
+                account_id=account_id,
+                venue=venue,
+                environment=environment,
+                account_mode=account_mode,
+                credentials=credentials,
+            )
+        )
+
+
 @dataclass(slots=True)
 class _RegistryState:
     adapter: ExchangeFactAdapter
     snapshot: ExchangeFactSnapshot | None = None
     stream_id: str = field(default_factory=lambda: str(uuid4()))
     sequence: int = 0
-    expected_external_sequence: int | None = None
     fingerprints: deque[str] = field(default_factory=deque)
     fingerprint_set: set[str] = field(default_factory=set)
     subscribers: set[asyncio.Queue[ExchangeFactEvent]] = field(default_factory=set)
@@ -1143,6 +1271,12 @@ class FactAdapterRegistry:
             row_key = key(row)
             if append_only and row_key in merged:
                 continue
+            current = merged.get(row_key)
+            if current is not None:
+                current_time = str(current.get("observed_at") or "")
+                incoming_time = str(row.get("observed_at") or "")
+                if current_time and incoming_time and incoming_time < current_time:
+                    continue
             merged[row_key] = dict(row)
         return tuple(merged[item] for item in sorted(merged))
 
@@ -1231,41 +1365,6 @@ class FactAdapterRegistry:
                 raise
             return event
 
-    async def consume_external(self, event: ExchangeFactEvent) -> Literal["APPLIED", "DUPLICATE"]:
-        """Consume a versioned event idempotently and detect gaps/out-of-order delivery."""
-
-        async with self._lock:
-            state = self._states.get(event.scope.key)
-            if state is None:
-                raise DomainRejected(
-                    "FACT_ADAPTER_SCOPE_NOT_FOUND", "the fact adapter scope is not registered"
-                )
-            if event.fingerprint in state.fingerprint_set:
-                metrics = getattr(state.adapter, "_metrics", None)
-                if isinstance(metrics, _MutableMetrics):
-                    metrics.duplicate_events += 1
-                return "DUPLICATE"
-            expected = state.expected_external_sequence
-            if expected is not None and event.sequence < expected:
-                metrics = getattr(state.adapter, "_metrics", None)
-                if isinstance(metrics, _MutableMetrics):
-                    metrics.out_of_order_events += 1
-                raise DomainRejected(
-                    "FACT_EVENT_OUT_OF_ORDER", "an older fact event cannot overwrite newer state"
-                )
-            if expected is not None and event.sequence > expected:
-                metrics = getattr(state.adapter, "_metrics", None)
-                if isinstance(metrics, _MutableMetrics):
-                    metrics.sequence_gaps += 1
-                raise DomainRejected(
-                    "FACT_EVENT_SEQUENCE_GAP",
-                    "a fact event sequence gap requires REST snapshot compensation",
-                    metadata={"expected": expected, "received": event.sequence},
-                )
-            self._remember_fingerprint(state, event.fingerprint)
-            state.expected_external_sequence = event.sequence + 1
-            return "APPLIED"
-
     async def latest(self, scope_key: str, *, stale_after: timedelta) -> ExchangeFactSnapshot:
         async with self._lock:
             state = self._states.get(scope_key)
@@ -1295,9 +1394,7 @@ class FactAdapterRegistry:
         )
 
     async def subscribe(self, scope_key: str) -> AsyncGenerator[ExchangeFactEvent, None]:
-        queue: asyncio.Queue[ExchangeFactEvent] = asyncio.Queue(
-            maxsize=self._subscriber_queue_size
-        )
+        queue: asyncio.Queue[ExchangeFactEvent] = asyncio.Queue(maxsize=self._subscriber_queue_size)
         async with self._lock:
             state = self._states.get(scope_key)
             if state is None:
@@ -1344,13 +1441,10 @@ class FactAdapterRegistry:
         stale = sorted(
             key
             for key, state in states
-            if state.snapshot is not None
-            and now - state.snapshot.observed_at > stale_after
+            if state.snapshot is not None and now - state.snapshot.observed_at > stale_after
         )
         stopped = sorted(
-            key
-            for key, state in states
-            if state.task is not None and state.task.done()
+            key for key, state in states if state.task is not None and state.task.done()
         )
         return {
             "status": "ready" if not (unknown or stale or stopped) else "not_ready",
@@ -1367,9 +1461,7 @@ class FactAdapterRegistry:
         for state in states:
             if state.task is not None:
                 state.task.cancel()
-        await asyncio.gather(
-            *(state.adapter.close() for state in states), return_exceptions=True
-        )
+        await asyncio.gather(*(state.adapter.close() for state in states), return_exceptions=True)
 
 
 class FactStreamSupervisor:
@@ -1387,6 +1479,7 @@ class FactStreamSupervisor:
         max_reconnect_attempts: int = 8,
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
         snapshot_callback: Callable[[ExchangeFactSnapshot], Awaitable[None]] | None = None,
+        persistence_coalesce_seconds: float = 1.0,
     ) -> None:
         if not 30 <= reconciliation_seconds <= 3_600:
             raise ValueError("fact reconciliation interval is outside its bounded range")
@@ -1396,6 +1489,8 @@ class FactStreamSupervisor:
             raise ValueError("fact reconnect bounds are invalid")
         if not 1 <= max_reconnect_attempts <= 20:
             raise ValueError("fact reconnect attempts are outside their bounded range")
+        if not 0 <= persistence_coalesce_seconds <= 5:
+            raise ValueError("fact persistence coalescing is outside its bounded range")
         self.registry = registry
         self.adapter = adapter
         self.reconciliation_seconds = reconciliation_seconds
@@ -1405,17 +1500,59 @@ class FactStreamSupervisor:
         self.max_reconnect_attempts = max_reconnect_attempts
         self.sleeper = sleeper
         self.snapshot_callback = snapshot_callback
+        self.persistence_coalesce_seconds = persistence_coalesce_seconds
         self._stop = asyncio.Event()
+        self._callback_task: asyncio.Task[None] | None = None
+        self._last_callback_at = 0.0
+
+    async def _persist_current(self) -> None:
+        if self.snapshot_callback is None:
+            return
+        current = await self.registry.latest(
+            self.adapter.scope.key,
+            stale_after=timedelta(days=1),
+        )
+        await self.snapshot_callback(current)
+        self._last_callback_at = asyncio.get_running_loop().time()
+
+    async def _flush_callback(self) -> None:
+        if self._callback_task is not None:
+            self._callback_task.cancel()
+            await asyncio.gather(self._callback_task, return_exceptions=True)
+            self._callback_task = None
+        await self._persist_current()
+
+    async def _schedule_callback(self) -> None:
+        if self.snapshot_callback is None:
+            return
+        if self._callback_task is not None:
+            if not self._callback_task.done():
+                return
+            await self._callback_task
+            self._callback_task = None
+        loop = asyncio.get_running_loop()
+        delay = max(
+            0.0,
+            self.persistence_coalesce_seconds - (loop.time() - self._last_callback_at),
+        )
+        if delay == 0:
+            await self._persist_current()
+            return
+
+        async def persist_later() -> None:
+            await asyncio.sleep(delay)
+            await self._persist_current()
+
+        self._callback_task = asyncio.create_task(
+            persist_later(),
+            name=f"fact-persist:{self.adapter.scope.key}",
+        )
 
     async def _snapshot(self, reason: SnapshotReason) -> None:
         snapshot = await self.adapter.snapshot(reason=reason)
         await self.registry.publish_snapshot(snapshot)
         if self.snapshot_callback is not None:
-            current = await self.registry.latest(
-                self.adapter.scope.key,
-                stale_after=timedelta(days=1),
-            )
-            await self.snapshot_callback(current)
+            await self._flush_callback()
 
     async def _watch_channel(
         self,
@@ -1437,10 +1574,7 @@ class FactStreamSupervisor:
             self.adapter.scope.key,
             stale_after=timedelta(days=1),
         )
-        known = {
-            str(row.get("native_symbol") or "")
-            for row in current.instruments
-        }
+        known = {str(row.get("native_symbol") or "") for row in current.instruments}
         field = "positions" if kind == "POSITION" else "orders"
         rows = payload.get(field)
         if not isinstance(rows, list):
@@ -1505,11 +1639,7 @@ class FactStreamSupervisor:
                     continue
                 event = await self.registry.publish(self.adapter.scope.key, kind, payload)
                 if event is not None and self.snapshot_callback is not None:
-                    current = await self.registry.latest(
-                        self.adapter.scope.key,
-                        stale_after=timedelta(days=1),
-                    )
-                    await self.snapshot_callback(current)
+                    await self._schedule_callback()
                 if loop.time() >= next_reconciliation:
                     await self._snapshot("PERIODIC_RECONCILIATION")
                     next_reconciliation = loop.time() + self.reconciliation_seconds
@@ -1522,6 +1652,9 @@ class FactStreamSupervisor:
                 *(tasks + ([] if queue_task is None else [queue_task])),
                 return_exceptions=True,
             )
+            if self._callback_task is not None:
+                await self._callback_task
+                self._callback_task = None
 
     async def run(self) -> None:
         await self._snapshot("INITIAL")
@@ -1571,6 +1704,7 @@ __all__ = [
     "ExchangeFactAdapter",
     "ExchangeFactEvent",
     "ExchangeFactSnapshot",
+    "FactAdapterConnectionProbe",
     "FactAdapterMetrics",
     "FactAdapterRegistry",
     "FactAdapterScope",
