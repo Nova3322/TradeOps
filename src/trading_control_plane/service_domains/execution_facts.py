@@ -1,12 +1,84 @@
 from __future__ import annotations
 
-# This service is composed with account and execution helpers by TradingService.
-# mypy: disable-error-code=attr-defined
 from trading_control_plane.service_component import ServiceComponent
+from trading_control_plane.service_core import (
+    CAPITAL_HISTORY_MIN_INTERVAL,
+    INTENT_TRANSITIONS,
+    MAX_FACT_CLOCK_SKEW,
+    PROTECTION_ISSUES,
+    SUPPORTED_EXCHANGE_VENUES,
+    USD_STABLE_ASSETS,
+    UUID,
+    AbstractContextManager,
+    AccountEquity,
+    AccountEquityObservation,
+    Any,
+    Campaign,
+    CampaignStatus,
+    Decimal,
+    ExecutionEnvironment,
+    FactStatus,
+    FundingPayment,
+    IdempotencyConflict,
+    Instrument,
+    IntentKind,
+    OrderIntent,
+    OrderIntentStatus,
+    Position,
+    PreparedRuntimeAccountBinding,
+    ProtectionOrder,
+    ProtectionStatus,
+    ReservationStatus,
+    RiskReservation,
+    Session,
+    TeamExecutionMode,
+    TradingAuthorization,
+    VenueFill,
+    VenueOrder,
+    VenueOrderStatus,
+    VenueReadOnlySnapshot,
+    _reject,
+    datetime,
+    nullcontext,
+    select,
+    timedelta,
+    uuid4,
+)
+from trading_control_plane.service_domains.accounts import (
+    ensure_exchange_account_reference,
+    lock_runtime_account_binding,
+)
+from trading_control_plane.service_domains.execution_intent import consume_add_unit
 
-# The domain implementation intentionally consumes the explicit service_core export surface.
-# ruff: noqa: F403, F405
-from trading_control_plane.service_core import *
+
+def release_zero_fill_in_session(
+    session: Session,
+    intent: OrderIntent,
+    terminal_status: OrderIntentStatus,
+    confirmed_external: bool = False,
+    *,
+    now: datetime,
+) -> None:
+    reservation = (
+        session.get(RiskReservation, intent.reservation_id, with_for_update=True)
+        if intent.reservation_id is not None
+        else None
+    )
+    if reservation is not None and reservation.status != ReservationStatus.RELEASED.value:
+        if reservation.status == ReservationStatus.UNKNOWN.value and not confirmed_external:
+            _reject("RISK_RESERVATION_UNKNOWN", "unknown risk cannot be released")
+        reservation.status = ReservationStatus.RELEASED.value
+        reservation.updated_at = now
+        reservation.version += 1
+        authorization = session.get(
+            TradingAuthorization, intent.authorization_id, with_for_update=True
+        )
+        if authorization is None or authorization.used_quantity < intent.quantity:
+            _reject("AUTHORIZATION_USAGE_INVALID", "authorization usage is inconsistent")
+        authorization.used_quantity -= intent.quantity
+    intent.status = terminal_status.value
+    intent.updated_at = now
+    intent.version += 1
 
 
 class FactIngestionExecutionService(ServiceComponent):
@@ -75,7 +147,7 @@ class FactIngestionExecutionService(ServiceComponent):
                     "position environment must match the server-owned team current mode",
                 )
             environment = actual_environment
-            self._ensure_exchange_account_reference(
+            ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
@@ -305,7 +377,7 @@ class FactIngestionExecutionService(ServiceComponent):
                     "equity environment must match the server-owned team current mode",
                 )
             environment = actual_environment
-            self._ensure_exchange_account_reference(
+            ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
@@ -494,7 +566,7 @@ class FactIngestionExecutionService(ServiceComponent):
 
         with self.database.session_factory.begin() as session:
             if runtime_binding is not None:
-                self._lock_runtime_account_binding(session, runtime_binding)
+                lock_runtime_account_binding(session, runtime_binding)
             persisted: dict[str, Any] = {}
             for snapshot in sorted(snapshots, key=lambda item: item.symbol):
                 persisted[snapshot.symbol] = self._ingest_read_only_snapshot(
@@ -714,7 +786,7 @@ class FactIngestionExecutionService(ServiceComponent):
             team = self.transactions._require_role(
                 session, actor_id, "venue.record", account_id, venue
             )
-            self._ensure_exchange_account_reference(
+            ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
@@ -1141,7 +1213,7 @@ class FactIngestionExecutionService(ServiceComponent):
                 if filled > bound_order.filled_quantity:
                     bound_order.filled_quantity = filled
                 if filled > 0:
-                    self._consume_add_unit(session, bound_intent)
+                    consume_add_unit(session, bound_intent)
                 previous = bound_intent.status
                 release_updated_intent = False
                 terminal = {
@@ -1160,7 +1232,7 @@ class FactIngestionExecutionService(ServiceComponent):
                             reservation.version += 1
                     bound_campaign.status = CampaignStatus.UNKNOWN.value
                 elif bound_order.status in terminal and filled == 0:
-                    self._release_zero_fill_in_session(
+                    release_zero_fill_in_session(
                         session,
                         bound_intent,
                         terminal[bound_order.status],

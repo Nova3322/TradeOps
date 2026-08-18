@@ -6,9 +6,26 @@ from trading_control_plane.service_component import ServiceComponent
 # The domain implementation intentionally consumes the explicit service_core export surface.
 # ruff: noqa: F403, F405
 from trading_control_plane.service_core import *
+from trading_control_plane.service_domains.accounts import require_exchange_account_live_ready
+
+
+def consume_add_unit(session: Session, intent: OrderIntent) -> None:
+    if intent.kind != IntentKind.ADD.value or intent.add_unit_consumed:
+        return
+    authorization = session.get(TradingAuthorization, intent.authorization_id, with_for_update=True)
+    if authorization is None or authorization.used_adds >= authorization.allowed_adds:
+        _reject(
+            "AUTHORIZATION_ADD_LIMIT_INVALID",
+            "positive Add execution exceeds the authorized AddUnit count",
+        )
+    authorization.used_adds += 1
+    intent.add_unit_consumed = True
 
 
 class IntentExecutionService(ServiceComponent):
+    _consume_add_unit = staticmethod(consume_add_unit)
+    _require_exchange_account_live_ready = staticmethod(require_exchange_account_live_ready)
+
     def create_order_intent(
         self,
         authorization_id: UUID,
@@ -374,21 +391,6 @@ class IntentExecutionService(ServiceComponent):
                 intent_id=intent.intent_id,
             )
 
-    @staticmethod
-    def _consume_add_unit(session: Session, intent: OrderIntent) -> None:
-        if intent.kind != IntentKind.ADD.value or intent.add_unit_consumed:
-            return
-        authorization = session.get(
-            TradingAuthorization, intent.authorization_id, with_for_update=True
-        )
-        if authorization is None or authorization.used_adds >= authorization.allowed_adds:
-            _reject(
-                "AUTHORIZATION_ADD_LIMIT_INVALID",
-                "positive Add execution exceeds the authorized AddUnit count",
-            )
-        authorization.used_adds += 1
-        intent.add_unit_consumed = True
-
     def mark_intent_unknown(
         self,
         intent_id: UUID,
@@ -737,16 +739,14 @@ class IntentExecutionService(ServiceComponent):
         fencing_token: int,
         now: datetime,
     ) -> None:
-        _scope_parts(execution_scope)
-        lease = session.get(SenderLease, (team_id, execution_scope))
-        if (
-            lease is None
-            or lease.owner_id != owner_id
-            or lease.fencing_token != fencing_token
-            or lease.expires_at <= now
-        ):
-            FENCING_REJECTIONS.inc()
-            _reject("FENCING_TOKEN_REJECTED", "sender lease is stale, expired, or superseded")
+        self.transactions._validate_sender_lease(
+            session,
+            team_id,
+            execution_scope,
+            owner_id,
+            fencing_token,
+            now,
+        )
 
     def validate_sender(
         self,
@@ -769,58 +769,3 @@ class IntentExecutionService(ServiceComponent):
                 fencing_token,
                 now,
             )
-
-    def _require_exchange_account_live_ready(
-        self,
-        session: Session,
-        *,
-        team_id: UUID,
-        account_id: str,
-        venue: str,
-    ) -> ExchangeAccount:
-        account = session.scalar(
-            select(ExchangeAccount).where(
-                ExchangeAccount.team_id == team_id,
-                ExchangeAccount.environment == "LIVE",
-                ExchangeAccount.account_id == account_id,
-                ExchangeAccount.venue == venue,
-            )
-        )
-        if account is None or not account.active or account.trading_status != "ELIGIBLE":
-            _reject(
-                "EXCHANGE_ACCOUNT_TRADING_DISABLED",
-                "LIVE venue action requires exact account trading eligibility",
-            )
-        if (
-            account.connection_status != "VERIFIED"
-            or account.credentials_ciphertext is None
-            or account.credential_version < 1
-            or not account.runtime_sync_enabled
-            or account.runtime_service_principal_id is None
-        ):
-            _reject(
-                "EXCHANGE_ACCOUNT_TRADING_NOT_READY",
-                "LIVE venue action requires current account connection and runtime binding",
-            )
-        team = session.get(Team, team_id)
-        if (
-            team is None
-            or not team.trading_enabled
-            or team.execution_mode != TeamExecutionMode.LIVE.value
-        ):
-            _reject(
-                "TEAM_LIVE_MODE_REQUIRED",
-                "LIVE venue action requires an active LIVE team",
-            )
-        assert account.runtime_service_principal_id is not None
-        self._require_exact_runtime_principal(
-            session,
-            principal_id=account.runtime_service_principal_id,
-            team=team,
-            role=Role.OPERATOR,
-            account_id=account.account_id,
-            venue=account.venue,
-            error_code="EXCHANGE_ACCOUNT_TRADING_NOT_READY",
-            error_message="LIVE venue action requires the exact active read-only principal",
-        )
-        return account

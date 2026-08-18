@@ -1,12 +1,55 @@
 from __future__ import annotations
 
-# AccountService is composed with execution boundary methods by TradingService.
-# mypy: disable-error-code=attr-defined
 from trading_control_plane.service_component import ServiceComponent
-
-# The domain implementation intentionally consumes the explicit service_core export surface.
-# ruff: noqa: F403, F405
-from trading_control_plane.service_core import *
+from trading_control_plane.service_core import (
+    CONNECTION_ERROR_CODE_PATTERN,
+    INTENT_TRANSITIONS,
+    SUPPORTED_EXCHANGE_VENUES,
+    UTC,
+    UUID,
+    Any,
+    Campaign,
+    CapabilityGate,
+    CapabilityStatus,
+    ConnectionProbeResult,
+    DomainRejected,
+    ExchangeAccount,
+    ExecutionEnvironment,
+    FreqtradeEntryCommand,
+    FreqtradeExitCommand,
+    OrderIntent,
+    OrderIntentStatus,
+    PreparedExchangeConnectionVerification,
+    PreparedFreqtradeDispatch,
+    PreparedFreqtradeWorkerBinding,
+    PreparedPerptapeRuntimeBinding,
+    PreparedRuntimeAccountBinding,
+    PrincipalType,
+    Role,
+    RoleAssignment,
+    ServicePrincipalKind,
+    Session,
+    SignalSourceMode,
+    Team,
+    TeamExecutionMode,
+    TeamMembership,
+    TeamSignalSource,
+    User,
+    WorkspaceMembership,
+    WorkspaceRole,
+    _advisory_lock_key,
+    _reject,
+    _scope_key,
+    _scope_parts,
+    datetime,
+    json,
+    parse_hip3_dexes,
+    re,
+    select,
+    text,
+    uuid4,
+    validate_worker_url,
+)
 from trading_control_plane.service_domains.account_registry import (
     delete_exchange_account,
     exchange_account_definition,
@@ -15,57 +58,217 @@ from trading_control_plane.service_domains.account_registry import (
 )
 
 
+def ensure_exchange_account_reference(
+    session: Session,
+    *,
+    team: Team,
+    actor_id: UUID,
+    account_id: str,
+    venue: str,
+    environment: str = "LIVE",
+    now: datetime,
+) -> ExchangeAccount:
+    del actor_id, now
+    normalized_account_id, normalized_venue, _label = exchange_account_definition(
+        account_id, venue, account_id
+    )
+    normalized_environment = environment.strip().upper()
+    if normalized_environment not in {"TESTNET", "LIVE"}:
+        _reject("EXCHANGE_ACCOUNT_INVALID", "account environment is unsupported")
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(:key)"),
+        {
+            "key": _advisory_lock_key(
+                str(team.team_id),
+                "exchange-account-reference",
+                f"{normalized_environment}:{normalized_account_id}:{normalized_venue}",
+            )
+        },
+    )
+    account = session.scalar(
+        select(ExchangeAccount).where(
+            ExchangeAccount.team_id == team.team_id,
+            ExchangeAccount.environment == normalized_environment,
+            ExchangeAccount.account_id == normalized_account_id,
+            ExchangeAccount.venue == normalized_venue,
+        )
+    )
+    if account is not None:
+        if not account.active:
+            _reject("EXCHANGE_ACCOUNT_INACTIVE", "exchange account is inactive")
+        if account.environment != normalized_environment:
+            _reject("EXCHANGE_ACCOUNT_ENVIRONMENT_CONFLICT", "account environment conflict")
+        return account
+    _reject(
+        "EXCHANGE_ACCOUNT_NOT_FOUND",
+        "select an enabled account configured for the team current environment",
+    )
+
+
+def require_exact_runtime_principal(
+    session: Session,
+    *,
+    principal_id: UUID,
+    team: Team,
+    role: Role,
+    account_id: str | None,
+    venue: str | None,
+    error_code: str,
+    error_message: str,
+    lock: bool = False,
+    allow_inactive: bool = False,
+) -> User:
+    principal_statement = select(User).where(User.user_id == principal_id)
+    workspace_membership_statement = select(WorkspaceMembership).where(
+        WorkspaceMembership.workspace_id == team.workspace_id,
+        WorkspaceMembership.user_id == principal_id,
+        WorkspaceMembership.active,
+    )
+    team_membership_statement = select(TeamMembership).where(
+        TeamMembership.team_id == team.team_id,
+        TeamMembership.user_id == principal_id,
+        TeamMembership.active,
+    )
+    assignments_statement = select(RoleAssignment).where(RoleAssignment.user_id == principal_id)
+    if lock:
+        principal_statement = principal_statement.with_for_update()
+        workspace_membership_statement = workspace_membership_statement.with_for_update()
+        team_membership_statement = team_membership_statement.with_for_update()
+        assignments_statement = assignments_statement.with_for_update()
+    principal = session.scalar(principal_statement)
+    workspace_membership = session.scalar(workspace_membership_statement)
+    team_membership = session.scalar(team_membership_statement)
+    assignments = session.scalars(assignments_statement).all()
+    exact_assignment = (
+        len(assignments) == 1
+        and assignments[0].team_id == team.team_id
+        and assignments[0].role == role.value
+        and assignments[0].account_scope == account_id
+        and assignments[0].venue_scope == venue
+    )
+    if (
+        principal is None
+        or principal.principal_type != PrincipalType.SERVICE.value
+        or principal.service_kind != ServicePrincipalKind.INTERNAL.value
+        or (not principal.active and not allow_inactive)
+        or principal.active_workspace_id != team.workspace_id
+        or principal.active_team_id != team.team_id
+        or workspace_membership is None
+        or team_membership is None
+        or not exact_assignment
+    ):
+        _reject(error_code, error_message)
+    return principal
+
+
+def require_exchange_account_live_ready(
+    session: Session,
+    *,
+    team_id: UUID,
+    account_id: str,
+    venue: str,
+) -> ExchangeAccount:
+    account = session.scalar(
+        select(ExchangeAccount).where(
+            ExchangeAccount.team_id == team_id,
+            ExchangeAccount.environment == "LIVE",
+            ExchangeAccount.account_id == account_id,
+            ExchangeAccount.venue == venue,
+        )
+    )
+    if account is None or not account.active or account.trading_status != "ELIGIBLE":
+        _reject(
+            "EXCHANGE_ACCOUNT_TRADING_DISABLED",
+            "LIVE venue action requires exact account trading eligibility",
+        )
+    if (
+        account.connection_status != "VERIFIED"
+        or account.credentials_ciphertext is None
+        or account.credential_version < 1
+        or not account.runtime_sync_enabled
+        or account.runtime_service_principal_id is None
+    ):
+        _reject(
+            "EXCHANGE_ACCOUNT_TRADING_NOT_READY",
+            "LIVE venue action requires current account connection and runtime binding",
+        )
+    team = session.get(Team, team_id)
+    if (
+        team is None
+        or not team.trading_enabled
+        or team.execution_mode != TeamExecutionMode.LIVE.value
+    ):
+        _reject(
+            "TEAM_LIVE_MODE_REQUIRED",
+            "LIVE venue action requires an active LIVE team",
+        )
+    assert account.runtime_service_principal_id is not None
+    require_exact_runtime_principal(
+        session,
+        principal_id=account.runtime_service_principal_id,
+        team=team,
+        role=Role.OPERATOR,
+        account_id=account.account_id,
+        venue=account.venue,
+        error_code="EXCHANGE_ACCOUNT_TRADING_NOT_READY",
+        error_message="LIVE venue action requires the exact active read-only principal",
+    )
+    return account
+
+
+def lock_runtime_account_binding(
+    session: Session,
+    binding: PreparedRuntimeAccountBinding,
+) -> ExchangeAccount:
+    account = session.scalar(
+        select(ExchangeAccount)
+        .where(ExchangeAccount.exchange_account_id == binding.exchange_account_id)
+        .with_for_update()
+    )
+    if (
+        account is None
+        or account.team_id != binding.team_id
+        or account.account_id != binding.account_id
+        or account.venue != binding.venue
+        or account.environment != binding.environment
+        or not account.runtime_sync_enabled
+        or account.runtime_service_principal_id != binding.service_principal_id
+        or account.version != binding.account_version
+        or account.credential_version != binding.credential_version
+    ):
+        _reject(
+            "RUNTIME_BINDING_CHANGED",
+            "the database-bound runtime account changed during synchronization",
+        )
+    team = session.get(Team, binding.team_id)
+    if team is None or not team.active:
+        _reject(
+            "RUNTIME_BINDING_CHANGED",
+            "the database-bound runtime account changed during synchronization",
+        )
+    require_exact_runtime_principal(
+        session,
+        principal_id=binding.service_principal_id,
+        team=team,
+        role=Role.OPERATOR,
+        account_id=binding.account_id,
+        venue=binding.venue,
+        error_code="RUNTIME_BINDING_CHANGED",
+        error_message="the database-bound runtime account changed during synchronization",
+        lock=True,
+    )
+    return account
+
+
 class AccountService(ServiceComponent):
     _exchange_account_definition = staticmethod(exchange_account_definition)
+    _ensure_exchange_account_reference = staticmethod(ensure_exchange_account_reference)
+    _require_exact_runtime_principal = staticmethod(require_exact_runtime_principal)
+    _require_exchange_account_live_ready = staticmethod(require_exchange_account_live_ready)
+    _lock_runtime_account_binding = staticmethod(lock_runtime_account_binding)
     delete_exchange_account = delete_exchange_account
     update_exchange_account = update_exchange_account
     set_exchange_account_state = set_exchange_account_state
-
-    def _ensure_exchange_account_reference(
-        self,
-        session: Session,
-        *,
-        team: Team,
-        actor_id: UUID,
-        account_id: str,
-        venue: str,
-        environment: str = "LIVE",
-        now: datetime,
-    ) -> ExchangeAccount:
-        normalized_account_id, normalized_venue, _label = self._exchange_account_definition(
-            account_id, venue, account_id
-        )
-        normalized_environment = environment.strip().upper()
-        if normalized_environment not in {"TESTNET", "LIVE"}:
-            _reject("EXCHANGE_ACCOUNT_INVALID", "account environment is unsupported")
-        session.execute(
-            text("SELECT pg_advisory_xact_lock(:key)"),
-            {
-                "key": _advisory_lock_key(
-                    str(team.team_id),
-                    "exchange-account-reference",
-                    f"{normalized_environment}:{normalized_account_id}:{normalized_venue}",
-                )
-            },
-        )
-        account = session.scalar(
-            select(ExchangeAccount).where(
-                ExchangeAccount.team_id == team.team_id,
-                ExchangeAccount.environment == normalized_environment,
-                ExchangeAccount.account_id == normalized_account_id,
-                ExchangeAccount.venue == normalized_venue,
-            )
-        )
-        if account is not None:
-            if not account.active:
-                _reject("EXCHANGE_ACCOUNT_INACTIVE", "exchange account is inactive")
-            if account.environment != normalized_environment:
-                _reject("EXCHANGE_ACCOUNT_ENVIRONMENT_CONFLICT", "account environment conflict")
-            return account
-        _reject(
-            "EXCHANGE_ACCOUNT_NOT_FOUND",
-            "select an enabled account configured for the team current environment",
-        )
 
     def create_exchange_account(
         self,
@@ -388,62 +591,6 @@ class AccountService(ServiceComponent):
         if principal.active != active:
             principal.active = active
             principal.auth_version += 1
-
-    @staticmethod
-    def _require_exact_runtime_principal(
-        session: Session,
-        *,
-        principal_id: UUID,
-        team: Team,
-        role: Role,
-        account_id: str | None,
-        venue: str | None,
-        error_code: str,
-        error_message: str,
-        lock: bool = False,
-        allow_inactive: bool = False,
-    ) -> User:
-        principal_statement = select(User).where(User.user_id == principal_id)
-        workspace_membership_statement = select(WorkspaceMembership).where(
-            WorkspaceMembership.workspace_id == team.workspace_id,
-            WorkspaceMembership.user_id == principal_id,
-            WorkspaceMembership.active,
-        )
-        team_membership_statement = select(TeamMembership).where(
-            TeamMembership.team_id == team.team_id,
-            TeamMembership.user_id == principal_id,
-            TeamMembership.active,
-        )
-        assignments_statement = select(RoleAssignment).where(RoleAssignment.user_id == principal_id)
-        if lock:
-            principal_statement = principal_statement.with_for_update()
-            workspace_membership_statement = workspace_membership_statement.with_for_update()
-            team_membership_statement = team_membership_statement.with_for_update()
-            assignments_statement = assignments_statement.with_for_update()
-        principal = session.scalar(principal_statement)
-        workspace_membership = session.scalar(workspace_membership_statement)
-        team_membership = session.scalar(team_membership_statement)
-        assignments = session.scalars(assignments_statement).all()
-        exact_assignment = (
-            len(assignments) == 1
-            and assignments[0].team_id == team.team_id
-            and assignments[0].role == role.value
-            and assignments[0].account_scope == account_id
-            and assignments[0].venue_scope == venue
-        )
-        if (
-            principal is None
-            or principal.principal_type != PrincipalType.SERVICE.value
-            or principal.service_kind != ServicePrincipalKind.INTERNAL.value
-            or (not principal.active and not allow_inactive)
-            or principal.active_workspace_id != team.workspace_id
-            or principal.active_team_id != team.team_id
-            or workspace_membership is None
-            or team_membership is None
-            or not exact_assignment
-        ):
-            _reject(error_code, error_message)
-        return principal
 
     @staticmethod
     def _ensure_account_runtime_service_principal(
@@ -1313,7 +1460,7 @@ class AccountService(ServiceComponent):
             team = self.transactions._require_role(
                 session, actor_id, "venue.record", account_id, venue
             )
-            self._validate_sender(
+            self.transactions._validate_sender_lease(
                 session,
                 team.team_id,
                 execution_scope,
@@ -1351,7 +1498,7 @@ class AccountService(ServiceComponent):
                     venue=venue,
                 )
             else:
-                account = session.scalar(
+                testnet_account = session.scalar(
                     select(ExchangeAccount).where(
                         ExchangeAccount.team_id == team.team_id,
                         ExchangeAccount.environment == environment.value,
@@ -1360,16 +1507,17 @@ class AccountService(ServiceComponent):
                     )
                 )
                 if (
-                    account is None
-                    or not account.active
-                    or account.connection_status != "VERIFIED"
-                    or account.trading_status != "ELIGIBLE"
-                    or not account.runtime_sync_enabled
+                    testnet_account is None
+                    or not testnet_account.active
+                    or testnet_account.connection_status != "VERIFIED"
+                    or testnet_account.trading_status != "ELIGIBLE"
+                    or not testnet_account.runtime_sync_enabled
                 ):
                     _reject(
                         "EXCHANGE_ACCOUNT_TRADING_NOT_READY",
                         "TESTNET execution requires an exact verified account binding",
                     )
+                account = testnet_account
                 if (
                     not team.trading_enabled
                     or team.execution_mode != TeamExecutionMode.TESTNET.value
@@ -1493,7 +1641,7 @@ class AccountService(ServiceComponent):
                 campaign.venue,
                 team_id=campaign.team_id,
             )
-            self._validate_sender(
+            self.transactions._validate_sender_lease(
                 session,
                 campaign.team_id,
                 execution_scope,
@@ -1515,7 +1663,7 @@ class AccountService(ServiceComponent):
                     venue=campaign.venue,
                 )
             else:
-                account = session.scalar(
+                testnet_account = session.scalar(
                     select(ExchangeAccount).where(
                         ExchangeAccount.team_id == campaign.team_id,
                         ExchangeAccount.environment == environment.value,
@@ -1525,15 +1673,16 @@ class AccountService(ServiceComponent):
                     )
                 )
                 if (
-                    account is None
-                    or account.connection_status != "VERIFIED"
-                    or account.trading_status != "ELIGIBLE"
-                    or not account.runtime_sync_enabled
+                    testnet_account is None
+                    or testnet_account.connection_status != "VERIFIED"
+                    or testnet_account.trading_status != "ELIGIBLE"
+                    or not testnet_account.runtime_sync_enabled
                 ):
                     _reject(
                         "EXCHANGE_ACCOUNT_TRADING_NOT_READY",
                         "TESTNET execution requires an exact verified account binding",
                     )
+                account = testnet_account
             if (
                 binding.exchange_account_id != account.exchange_account_id
                 or binding.team_id != account.team_id
@@ -1916,50 +2065,6 @@ class AccountService(ServiceComponent):
                     "SIGNAL_RUNTIME_BINDING_CHANGED",
                     "the team Perptape binding changed during synchronization",
                 )
-
-    @staticmethod
-    def _lock_runtime_account_binding(
-        session: Session,
-        binding: PreparedRuntimeAccountBinding,
-    ) -> ExchangeAccount:
-        account = session.scalar(
-            select(ExchangeAccount)
-            .where(ExchangeAccount.exchange_account_id == binding.exchange_account_id)
-            .with_for_update()
-        )
-        if (
-            account is None
-            or account.team_id != binding.team_id
-            or account.account_id != binding.account_id
-            or account.venue != binding.venue
-            or account.environment != binding.environment
-            or not account.runtime_sync_enabled
-            or account.runtime_service_principal_id != binding.service_principal_id
-            or account.version != binding.account_version
-            or account.credential_version != binding.credential_version
-        ):
-            _reject(
-                "RUNTIME_BINDING_CHANGED",
-                "the database-bound runtime account changed during synchronization",
-            )
-        team = session.get(Team, binding.team_id)
-        if team is None or not team.active:
-            _reject(
-                "RUNTIME_BINDING_CHANGED",
-                "the database-bound runtime account changed during synchronization",
-            )
-        AccountService._require_exact_runtime_principal(
-            session,
-            principal_id=binding.service_principal_id,
-            team=team,
-            role=Role.OPERATOR,
-            account_id=binding.account_id,
-            venue=binding.venue,
-            error_code="RUNTIME_BINDING_CHANGED",
-            error_message=("the database-bound runtime account changed during synchronization"),
-            lock=True,
-        )
-        return account
 
     @staticmethod
     def _lock_perptape_runtime_binding(

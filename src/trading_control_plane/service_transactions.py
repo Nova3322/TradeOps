@@ -27,6 +27,26 @@ class TransactionService:
             },
         )
 
+    @staticmethod
+    def _validate_sender_lease(
+        session: Session,
+        team_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        now: datetime,
+    ) -> None:
+        _scope_parts(execution_scope)
+        lease = session.get(SenderLease, (team_id, execution_scope))
+        if (
+            lease is None
+            or lease.owner_id != owner_id
+            or lease.fencing_token != fencing_token
+            or lease.expires_at <= now
+        ):
+            FENCING_REJECTIONS.inc()
+            _reject("FENCING_TOKEN_REJECTED", "sender lease is stale, expired, or superseded")
+
     def _audit(
         self,
         session: Session,

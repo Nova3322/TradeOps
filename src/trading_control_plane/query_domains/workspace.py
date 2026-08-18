@@ -7,14 +7,6 @@ from trading_control_plane.query_core import *
 
 
 class WorkspaceQueries(QueryComponent):
-    def _active_scope_ids(self, user_id: UUID) -> tuple[UUID, UUID]:
-        context = self.user_context(user_id)
-        workspace = context.get("active_workspace")
-        team = context.get("active_team")
-        if not isinstance(workspace, dict) or not isinstance(team, dict):
-            raise DomainRejected("TEAM_CONTEXT_REQUIRED", "select an active team")
-        return UUID(str(workspace["workspace_id"])), UUID(str(team["team_id"]))
-
     def user_by_username(self, username: str) -> User:
         with self.database.session_factory() as session:
             user = session.scalar(select(User).where(User.username == username))

@@ -1,13 +1,66 @@
 from __future__ import annotations
 
-# TradingService composes this domain with the account/risk/transaction domains.
-# mypy: disable-error-code=attr-defined
 from trading_control_plane.repositories.execution import find_position_for_scope
 from trading_control_plane.service_component import ServiceComponent
-
-# The domain implementation intentionally consumes the explicit service_core export surface.
-# ruff: noqa: F403, F405
-from trading_control_plane.service_core import *
+from trading_control_plane.service_core import (
+    DEFAULT_FREQTRADE_LEVERAGE,
+    INTENT_TRANSITIONS,
+    UUID,
+    AccountEquity,
+    Any,
+    Campaign,
+    CampaignStatus,
+    CapabilityGate,
+    CapabilityStatus,
+    Decimal,
+    ExchangeAccount,
+    ExecutionEnvironment,
+    FactStatus,
+    FreqtradeEntryCommand,
+    FreqtradeExitCommand,
+    FreqtradeRpcMessage,
+    FreqtradeTrade,
+    Instrument,
+    IntentKind,
+    OrderIntent,
+    OrderIntentStatus,
+    PreparedFreqtradeWorkerBinding,
+    Proposal,
+    ProtectionOrder,
+    ProtectionStatus,
+    ReservationStatus,
+    RiskPolicy,
+    RiskReservation,
+    Role,
+    RoleAssignment,
+    RuntimeSourceHealth,
+    Session,
+    SystemRiskState,
+    TargetUrgency,
+    Team,
+    TradingAuthorization,
+    VenueFill,
+    VenueOrder,
+    VenueOrderStatus,
+    _reject,
+    _scope_key,
+    _scope_parts,
+    datetime,
+    fact_is_stale,
+    freqtrade_active_stop_order,
+    freqtrade_execution_order,
+    freqtrade_pair,
+    hashlib,
+    select,
+    timedelta,
+    uuid4,
+)
+from trading_control_plane.service_domains.accounts import (
+    require_exact_runtime_principal,
+    require_exchange_account_live_ready,
+)
+from trading_control_plane.service_domains.execution_intent import consume_add_unit
+from trading_control_plane.service_domains.risk_policy import PolicyRiskService
 
 
 class FreqtradeRecoveryExecutionService(ServiceComponent):
@@ -180,7 +233,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                     "FREQTRADE_WORKER_BINDING_CHANGED",
                     "the exact account-bound Freqtrade RPC binding changed",
                 )
-            self._require_exact_runtime_principal(
+            require_exact_runtime_principal(
                 session,
                 principal_id=binding.service_principal_id,
                 team=team,
@@ -315,7 +368,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
         if campaign is None:
             _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
         environment, account_id, venue = _scope_parts(execution_scope)
-        self._validate_sender(
+        self.transactions._validate_sender_lease(
             session,
             campaign.team_id,
             execution_scope,
@@ -346,7 +399,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                     "LIVE_ORDER_SEND_DISABLED",
                     "LIVE order send requires the explicit capability gate",
                 )
-            self._require_exchange_account_live_ready(
+            require_exchange_account_live_ready(
                 session,
                 team_id=campaign.team_id,
                 account_id=campaign.account_id,
@@ -420,13 +473,13 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
             if (
                 position is None
                 or position.fact_status != FactStatus.KNOWN.value
-                or self._fact_is_stale(position.observed_at, now, max_age)
+                or fact_is_stale(position.observed_at, now, max_age)
             ):
                 _reject("POSITION_UNKNOWN", "new-risk execution requires a fresh position")
             if (
                 equity is None
                 or equity.fact_status != FactStatus.KNOWN.value
-                or self._fact_is_stale(equity.observed_at, now, max_age)
+                or fact_is_stale(equity.observed_at, now, max_age)
             ):
                 _reject("EQUITY_UNKNOWN", "new-risk execution requires fresh equity")
             source_health = session.scalar(
@@ -441,13 +494,13 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
             if (
                 source_health is None
                 or source_health.status != "SUCCESS"
-                or self._fact_is_stale(source_health.checked_at, now, max_age)
+                or fact_is_stale(source_health.checked_at, now, max_age)
             ):
                 _reject(
                     "READ_ONLY_SOURCE_UNAVAILABLE",
                     "new-risk execution requires current account facts",
                 )
-            capital_known, managed_capital_usd, _, _ = self._managed_capital_context(
+            capital_known, managed_capital_usd, _, _ = PolicyRiskService._managed_capital_context(
                 session,
                 team_id=campaign.team_id,
                 environment=campaign.environment,
@@ -459,8 +512,8 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                     "MANAGED_CAPITAL_UNKNOWN",
                     "new-risk execution requires fresh total managed capital",
                 )
-            occupied_risk = self._occupied_risk(session, campaign.team_id)
-            occupied_account_risk = self._occupied_risk(
+            occupied_risk = PolicyRiskService._occupied_risk(session, campaign.team_id)
+            occupied_account_risk = PolicyRiskService._occupied_risk(
                 session,
                 campaign.team_id,
                 account_id=campaign.account_id,
@@ -488,7 +541,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                     or protection.status != ProtectionStatus.ACTIVE.value
                     or not protection.fully_covered
                     or protection.quantity < abs(position.quantity)
-                    or self._fact_is_stale(protection.observed_at, now, max_age)
+                    or fact_is_stale(protection.observed_at, now, max_age)
                 ):
                     _reject("PROTECTION_UNKNOWN", "Add execution requires current protection")
             if (
@@ -586,7 +639,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
             campaign = None if intent is None else session.get(Campaign, intent.campaign_id)
             if intent is None or campaign is None:
                 _reject("ORDER_INTENT_NOT_FOUND", "Freqtrade intent campaign is unavailable")
-            self._validate_sender(
+            self.transactions._validate_sender_lease(
                 session,
                 campaign.team_id,
                 execution_scope,
@@ -716,7 +769,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                 fact.observed_at = observed_at
                 fact.updated_at = now
             if filled_quantity > 0:
-                self._consume_add_unit(session, intent)
+                consume_add_unit(session, intent)
             previous = intent.status
             intent.status = intent_status
             intent.updated_at = now
@@ -775,7 +828,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
             campaign = None if intent is None else session.get(Campaign, intent.campaign_id)
             if intent is None or campaign is None:
                 _reject("ORDER_INTENT_NOT_FOUND", "Freqtrade intent campaign is unavailable")
-            self._validate_sender(
+            self.transactions._validate_sender_lease(
                 session,
                 campaign.team_id,
                 execution_scope,
@@ -882,7 +935,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
-            self._validate_sender(
+            self.transactions._validate_sender_lease(
                 session,
                 campaign.team_id,
                 execution_scope,
@@ -1096,7 +1149,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                 or position is None
                 or position.fact_status != FactStatus.KNOWN.value
                 or position.quantity != 0
-                or self._fact_is_stale(
+                or fact_is_stale(
                     position.observed_at,
                     now,
                     timedelta(seconds=policy.max_fact_age_seconds),
