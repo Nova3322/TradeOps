@@ -869,7 +869,68 @@ p, li, dd, td { font-size: 14px; }
 .capital-activity-disclosure > summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 48px; padding: 11px 15px; cursor: pointer; font-weight: 650; }
 .capital-activity-disclosure > summary small { color: var(--muted); font-weight: 500; }
 .capital-activity-disclosure > div { padding: 18px; border-top: 1px solid var(--line); }
+.capital-operation-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 14px; }
+.capital-operation-heading h2 { margin: 0; }
+.capital-operation-heading p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+.capital-operation-table table { min-width: 1320px; table-layout: fixed; }
+.capital-operation-table th:nth-child(1) { width: 10%; }
+.capital-operation-table th:nth-child(2) { width: 15%; }
+.capital-operation-table th:nth-child(3) { width: 31%; }
+.capital-operation-table th:nth-child(4) { width: 13%; }
+.capital-operation-table th:nth-child(5) { width: 31%; }
+.capital-operation-assurance { min-width: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 9px; align-items: center; }
+.capital-assurance-state { width: max-content; padding: 4px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--panel-soft); font-size: 11px; font-weight: 700; letter-spacing: .02em; }
+.capital-operation-assurance.is-blocked .capital-assurance-state { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, var(--panel)); }
+.capital-operation-assurance.is-pending .capital-assurance-state { border-color: color-mix(in srgb, var(--warning) 38%, var(--line)); color: var(--warning); background: color-mix(in srgb, var(--warning) 8%, var(--panel)); }
+.capital-operation-assurance.is-ready .capital-assurance-state { border-color: color-mix(in srgb, var(--success) 34%, var(--line)); color: var(--success); background: color-mix(in srgb, var(--success) 7%, var(--panel)); }
+.capital-operation-assurance > small { min-width: 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.capital-operation-details { grid-column: 1 / -1; min-width: 0; margin-top: 5px; border: 1px solid var(--line); border-radius: 3px; background: color-mix(in srgb, var(--panel-soft) 42%, var(--panel)); overflow: hidden; }
+.capital-operation-details > summary { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; cursor: pointer; list-style: none; color: var(--ink); font-size: 12px; font-weight: 650; }
+.capital-operation-details > summary::-webkit-details-marker { display: none; }
+.capital-operation-details > summary:hover { background: var(--panel-soft); }
+.capital-operation-details > summary:focus { outline: none; }
+.capital-operation-details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 2px; }
+.capital-operation-details > summary i { width: 7px; height: 7px; flex: 0 0 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg) translateY(-2px); transition: transform .16s ease; }
+.capital-operation-details[open] > summary { border-bottom: 1px solid var(--line); background: var(--panel-soft); }
+.capital-operation-details[open] > summary i { transform: rotate(225deg) translate(-1px, -1px); }
+.capital-operation-details > div { display: grid; gap: 10px; padding: 10px; }
+.capital-operation-blocker-panel { padding: 10px 11px; border-left: 3px solid var(--warning); background: color-mix(in srgb, var(--warning) 7%, var(--panel)); }
+.capital-operation-blocker-panel b { font-size: 12px; }
+.capital-operation-blocker-panel ul { display: grid; gap: 5px; margin: 7px 0 0; padding-left: 17px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.capital-handoff-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.capital-handoff-card { min-width: 0; padding: 11px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); }
+.capital-handoff-card header { display: grid; gap: 2px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.capital-handoff-card header span { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.capital-handoff-card header b { font-size: 12px; line-height: 1.4; }
+.capital-handoff-card dl { display: grid; gap: 6px; margin: 9px 0 0; }
+.capital-handoff-card dl > div { min-width: 0; display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px; }
+.capital-handoff-card dt { color: var(--muted); font-size: 10px; }
+.capital-handoff-card dd { min-width: 0; margin: 0; color: var(--ink); font-size: 11px; overflow-wrap: anywhere; }
+.capital-handoff-card dd.is-mono { font-family: var(--font-mono); font-size: 10px; }
+.capital-handoff-card p { margin: 9px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.capital-operation-pagination { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.capital-operation-pagination > div, .capital-operation-pagination label { display: flex; align-items: center; gap: 8px; }
+.capital-operation-pagination select { width: auto; min-width: 68px; min-height: 36px; padding: 6px 26px 6px 9px; }
+.capital-operation-pagination button { min-height: 36px; padding: 6px 11px; }
 .capital-testnet-empty { border: 1px solid var(--line); border-radius: 3px; }
+
+@media (max-width: 780px) {
+  .capital-handoff-grid { grid-template-columns: 1fr; }
+  .capital-operation-pagination { align-items: flex-start; flex-direction: column; }
+  .capital-operation-pagination > div { width: 100%; flex-wrap: wrap; }
+}
+
+@media (max-width: 420px) {
+  .capital-activity-disclosure > div { padding: 12px; }
+  .capital-operation-table table { min-width: 0; table-layout: auto; }
+  .capital-operation-table td[data-label="校验 / 签名"] { display: block; }
+  .capital-operation-table td[data-label="校验 / 签名"]::before { display: block; margin-bottom: 8px; }
+  .capital-operation-assurance { min-width: 0; }
+  .capital-operation-details > summary { align-items: flex-start; }
+  .capital-handoff-card dl > div { grid-template-columns: 64px minmax(0, 1fr); }
+  .capital-operation-pagination > div { display: grid; grid-template-columns: 1fr 1fr; }
+  .capital-operation-pagination label { grid-column: 1 / -1; }
+}
 
 /* Dense signal surfaces keep directional color useful without turning the page into a heatmap. */
 .signal-filter-drawer { margin: 12px 0; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); }

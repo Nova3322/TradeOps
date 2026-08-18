@@ -314,11 +314,13 @@ const apiErrorGuidance = {
   HYPERLIQUID_AGENT_NOT_AUTHORIZED:'配置的 Hyperliquid API Wallet 当前不是有效 Agent。请在 Hyperliquid 主账户重新授权后重试。',
   HYPERLIQUID_DEPOSIT_BELOW_MINIMUM:'Hyperliquid Arbitrum 入金必须至少为 5 USDC；请同时为最大费用预留空间。',
   HYPERLIQUID_DEPOSIT_BALANCE_INSUFFICIENT:'已确认转入的 Hyperliquid 主钱包当前 USDC 余额不足。本次操作已终止；请重新发起一条新路径，不会继续旧的未签名请求。',
-  HYPERLIQUID_WITHDRAWAL_FEE_LIMIT_TOO_LOW:'Hyperliquid 当前固定提现手续费为 1 USDC，高于资金配置的最大费用上限。请把最大费用上限提高到至少 1 USDC 后重试。',
-  HYPERLIQUID_WITHDRAWABLE_INSUFFICIENT:'Hyperliquid 当前可提现余额不足以覆盖划转金额和 1 USDC 提现手续费。请降低金额或补足可用余额。',
+  HYPERLIQUID_WITHDRAWAL_FEE_LIMIT_TOO_LOW:'资金配置的最大费用上限低于 Hyperliquid 当前官方路由费用。请按实时预检显示的费用调整上限后重试。',
+  HYPERLIQUID_WITHDRAWABLE_INSUFFICIENT:'Hyperliquid 当前可提现余额不足以覆盖划转金额和实时路由费用。请降低金额或补足可用余额。',
   HYPERLIQUID_MAIN_ACCOUNT_MISSING:'当前生产账户没有可核验的 Hyperliquid 主账户地址。请在账户管理中核对主账户与 API Wallet 绑定。',
   HYPERLIQUID_CAPITAL_SCOPE_MISSING:'Hyperliquid 主账户、官方 Bridge2 或 Arbitrum 钱包范围不完整，请核对资金配置。',
   HYPERLIQUID_CAPITAL_PREFLIGHT_UNAVAILABLE:'Hyperliquid 官方资金预检当前不可达，资金操作保持原位。请稍后重试。',
+  HYPERLIQUID_SPOT_METADATA_INVALID:'Hyperliquid 官方 spotMeta 没有返回有效的规范资产标识，本次签名请求未生成。请稍后重试。',
+  HYPERLIQUID_SPOT_TOKEN_UNKNOWN:'Hyperliquid 官方 spotMeta 没有唯一规范 USDC 资产，本次签名请求未生成。请稍后重试。',
   HYPERLIQUID_BROWSER_SUBMISSION_UNAVAILABLE:'钱包签名已完成，但浏览器未能连接 Hyperliquid 官方提交端点。请先核对 Hyperliquid 资金记录，确认未提交后再重试。',
   HYPERLIQUID_SUBMISSION_REJECTED:'Hyperliquid 官方端点拒绝了已签名请求。资金记录保持未确认；请核对钱包账户、金额和 Hyperliquid 当前状态。',
   WALLET_PROVIDER_NOT_AVAILABLE:'当前标签页没有检测到钱包。请允许钱包扩展访问 127.0.0.1，刷新资金页面后重试。',
@@ -400,6 +402,9 @@ const friendlyApiError = (error) => {
   if (actionErrorGuidance[error?.code]) return actionErrorGuidance[error.code];
   if (['BINANCE_CAPITAL_RATE_LIMITED','BINANCE_CONNECTION_RETRY_DEFERRED'].includes(error?.code) && error?.details) {
     return fmtBinanceConnectionDiagnostic({error_code:error.code, diagnostics:error.details});
+  }
+  if (['HYPERLIQUID_SUBMISSION_REJECTED','HYPERLIQUID_RATE_LIMITED'].includes(error?.code) && error?.message) {
+    return error.message;
   }
   if (apiErrorGuidance[error?.code]) return apiErrorGuidance[error.code];
   if (['REQUEST_TIMEOUT','REQUEST_ABORTED','NETWORK_ERROR'].includes(error?.code) && error?.message) return error.message;
