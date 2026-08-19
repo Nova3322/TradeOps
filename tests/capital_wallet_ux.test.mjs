@@ -127,6 +127,21 @@ test("operation receipts open by default and paginate at bounded 50 or 100 rows"
   assert.equal(source.includes('value="200"'), false);
 });
 
+test("expired unsubmitted capital plans are passive and require a fresh operation", () => {
+  for (const marker of [
+    "CAPITAL_DIRECT_OPERATION_EXPIRED",
+    "const operationExpired = blockerCodes.includes('CAPITAL_DIRECT_OPERATION_EXPIRED')",
+    "!operationExpired && treasuryPreview",
+    "!operationExpired && hyperliquidPreview",
+    "!operationExpired && !treasuryActionKey",
+    "!operationExpired && operation.path === 'BINANCE_TO_VAULT'",
+    "!operationExpired && nextAction",
+    "资金保持原位，请新建操作并重新读取实时状态",
+  ]) {
+    assert.equal(source.includes(marker), true, marker);
+  }
+});
+
 test("wallet and blocker details use one structured assurance panel", () => {
   for (const marker of [
     "renderCapitalOperationAssurance",
