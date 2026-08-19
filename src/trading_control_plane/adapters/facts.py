@@ -13,6 +13,7 @@ from typing import Any, Literal, Protocol, cast
 from uuid import uuid4
 
 from trading_control_plane.domain import DomainRejected
+from trading_control_plane.freqtrade_contracts import freqtrade_pair
 from trading_control_plane.runtime_contracts import ConnectionProbeResult
 
 logger = logging.getLogger(__name__)
@@ -1198,13 +1199,14 @@ class FactAdapterConnectionProbe:
                     "EXCHANGE_VENUE_UNSUPPORTED",
                     "the exchange venue is unsupported",
                 )
+            pair = symbol if "/" in symbol else freqtrade_pair(venue, symbol)
             scope = FactAdapterScope(
                 workspace_id=workspace_id,
                 team_id=team_id,
                 account_id=account_id,
                 venue=cast(Venue, venue),
                 environment=cast(Environment, environment),
-                symbols=(symbol,),
+                symbols=(pair,),
                 account_mode=account_mode,
             )
             adapter = CcxtProFactAdapter(
