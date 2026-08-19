@@ -277,7 +277,9 @@ async function renderVenueAccountDetail(requestedAccountId) {
           ? '等待上游历史接口恢复；新增风险继续保持阻断。'
           : exactHealth.status === 'SUCCESS' && !status.automatic_sync_enabled
           ? '在连接设置中启用连续只读同步。'
-          : aggregateConnection?.next_action || '检查精确账户错误代码并等待下一次有界重试。',
+          : exactHealth.status === 'SUCCESS'
+            ? '无需操作；订单、签名与资金动作仍由独立 Gate 阻断。'
+            : aggregateConnection?.next_action || '检查精确账户错误代码并等待下一次有界重试。',
       }
     : account.connection?.status === 'VERIFIED'
       ? {available:false, category:account.runtime_binding?.bound ? 'NOT_YET_VERIFIED' : 'EXPLICITLY_DISABLED', checked_at:account.connection.checked_at, last_success_at:account.connection.last_verified_at, reason:account.runtime_binding?.bound ? '凭据连接验证已通过，但连续同步尚未产出可用探针。' : '凭据连接验证已通过，但连续同步当前关闭。', owner_role:'系统管理员', next_action:account.runtime_binding?.bound ? '等待首次有界同步，期间仅使用已保存快照。' : '在连接设置中启用连续只读同步。'}
