@@ -205,6 +205,29 @@ class FakeCcxtReconnectingExchange(FakeCcxtRestOnlyExchange):
         raise AssertionError("unreachable")
 
 
+class FakeCcxtReconnectCompensationRetryExchange(FakeCcxtRestOnlyExchange):
+    def __init__(self) -> None:
+        super().__init__()
+        self.has["watchBalance"] = True
+        self.balance_calls = 0
+        self.watch_calls = 0
+
+    async def fetch_balance(self) -> Mapping[str, Any]:
+        self.balance_calls += 1
+        if self.balance_calls == 2:
+            raise OSError("fixture reconnect compensation remains rate limited")
+        return await super().fetch_balance()
+
+    async def watch_balance(self) -> Mapping[str, Any]:
+        self.watch_calls += 1
+        if self.watch_calls == 1:
+            raise OSError("fixture disconnect")
+        if self.watch_calls in {2, 4}:
+            return await FakeCcxtRestOnlyExchange.fetch_balance(self)
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
 class FakeCcxtBlockingSnapshotExchange(FakeCcxtRestOnlyExchange):
     def __init__(self, *, fail: bool = False) -> None:
         super().__init__()
@@ -1005,6 +1028,59 @@ def test_websocket_disconnect_reconnects_then_rest_compensates_before_increment(
         assert delays == [0.1]
         assert current.reason == "WEBSOCKET_INCREMENT"
         assert current.snapshot_version == 3
+        assert current.metrics.rest_compensations == 1
+        supervisor.stop()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await registry.close()
+
+    asyncio.run(scenario())
+
+
+def test_failed_reconnect_compensation_preserves_exponential_backoff() -> None:
+    async def scenario() -> None:
+        exchange = FakeCcxtReconnectCompensationRetryExchange()
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: exchange,
+            clock=lambda: _NOW,
+        )
+        registry = FactAdapterRegistry()
+        await registry.register(adapter)
+        callbacks: list[str] = []
+        recovered = asyncio.Event()
+        delays: list[float] = []
+
+        async def callback(snapshot: ExchangeFactSnapshot) -> None:
+            callbacks.append(snapshot.reason)
+            if snapshot.reason == "RECONNECT_COMPENSATION":
+                recovered.set()
+
+        async def sleeper(delay: float) -> None:
+            delays.append(delay)
+
+        supervisor = FactStreamSupervisor(
+            registry,
+            adapter,
+            reconnect_initial_seconds=0.1,
+            reconnect_max_seconds=1,
+            sleeper=sleeper,
+            snapshot_callback=callback,
+            persistence_coalesce_seconds=0,
+        )
+        task = asyncio.create_task(supervisor.run())
+        await asyncio.wait_for(recovered.wait(), timeout=1)
+        current = await registry.latest(adapter.scope.key, stale_after=timedelta(days=365))
+        assert callbacks == [
+            "INITIAL",
+            "RECONNECT_COMPENSATION",
+        ]
+        assert delays == [0.1, 0.2]
+        assert task.done() is False
+        assert current.data_status == "CURRENT"
+        assert current.metrics.snapshot_failed == 1
+        assert current.metrics.websocket_reconnects == 2
         assert current.metrics.rest_compensations == 1
         supervisor.stop()
         task.cancel()

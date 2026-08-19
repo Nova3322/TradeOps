@@ -2024,11 +2024,11 @@ class FactStreamSupervisor:
                 queue_task = None
                 requires_compensation = await self._requires_scope_compensation(kind, payload)
                 if reconnecting:
-                    self._reconnect_attempts = 0
-                    reconnecting = False
                     if not requires_compensation:
                         await self.refresh("RECONNECT_COMPENSATION")
                         next_reconciliation = loop.time() + self.reconciliation_delay_seconds
+                        self._reconnect_attempts = 0
+                        reconnecting = False
                 if requires_compensation:
                     # A position/order opened outside Freqtrade can introduce a
                     # market not present in the previous snapshot.  Rebuild the
@@ -2051,6 +2051,9 @@ class FactStreamSupervisor:
                     self._gap_compensated_at[gap_identity] = now
                     await self.refresh("SEQUENCE_GAP_COMPENSATION")
                     next_reconciliation = loop.time() + self.reconciliation_delay_seconds
+                    if reconnecting:
+                        self._reconnect_attempts = 0
+                        reconnecting = False
                     continue
                 event = await self.registry.publish(self.adapter.scope.key, kind, payload)
                 if event is not None and self.snapshot_callback is not None:
