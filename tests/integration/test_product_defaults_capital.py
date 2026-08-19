@@ -143,9 +143,7 @@ def _app(
         binance_capital_api_secret=(
             "test-binance-capital-secret" if environment_capital_credentials else None
         ),
-        binance_capital_account_id=(
-            "binance-main" if environment_capital_credentials else None
-        ),
+        binance_capital_account_id=("binance-main" if environment_capital_credentials else None),
         binance_capital_withdraw_enabled=binance_capital_withdraw_enabled,
         capital_direct_hyperliquid_account_id="hyperliquid-main",
         capital_direct_hyperliquid_bridge_address=HYPERLIQUID_BRIDGE2_ADDRESS,
@@ -209,9 +207,7 @@ def test_capital_configuration_requires_canonical_runtime_account_ids_not_displa
 
     async def scenario() -> None:
         async with AsyncClient(
-            transport=ASGITransport(
-                    app=_app(database)
-            ),
+            transport=ASGITransport(app=_app(database)),
             base_url="http://test",
         ) as client:
             await _login(client, "capital-account-selector-admin")
@@ -1498,10 +1494,7 @@ def test_binance_capital_uses_live_fee_with_dedicated_exact_account_credential(
             assert center.status_code == 200, center.text
             configuration = center.json()["data"]["direct_configuration"]
             assert configuration["binance_capital_credentials_configured"] is True
-            assert (
-                configuration["binance_capital_credentials_source"]
-                == "DEDICATED_ENVIRONMENT"
-            )
+            assert configuration["binance_capital_credentials_source"] == "DEDICATED_ENVIRONMENT"
             assert configuration["binance_capital_submission_enabled"] is True
 
             small_withdrawal = await client.post(

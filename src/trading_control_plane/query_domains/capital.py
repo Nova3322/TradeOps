@@ -99,9 +99,7 @@ class CapitalQueries(QueryComponent):
                 raise domain.DomainRejected(
                     "TEAM_SCOPE_DENIED", "transfer proposal is outside scope"
                 )
-            if not self.can_user(
-                user_id, "capital.view", proposal.account_id, proposal.venue
-            ):
+            if not self.can_user(user_id, "capital.view", proposal.account_id, proposal.venue):
                 raise domain.DomainRejected("RBAC_DENIED", "transfer proposal is outside scope")
             approvals = session.scalars(
                 select(models.Approval)
@@ -190,9 +188,7 @@ class CapitalQueries(QueryComponent):
                 raise domain.DomainRejected(
                     "TEAM_SCOPE_DENIED", "capital transfer is outside scope"
                 )
-            if not self.can_user(
-                user_id, "capital.view", transfer.account_id, transfer.venue
-            ):
+            if not self.can_user(user_id, "capital.view", transfer.account_id, transfer.venue):
                 raise domain.DomainRejected("RBAC_DENIED", "capital transfer is outside scope")
             result = self._capital_transfer_summary(transfer)
             result["workspace_id"] = str(workspace_id)
@@ -958,9 +954,7 @@ class CapitalQueries(QueryComponent):
                             "updated_at": iso_datetime(item.updated_at),
                         }
                         for item in policies
-                        if self.can_user(
-                            user_id, "capital.view", item.account_id, item.venue
-                        )
+                        if self.can_user(user_id, "capital.view", item.account_id, item.venue)
                     ],
                 },
             }

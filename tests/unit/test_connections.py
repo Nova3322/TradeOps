@@ -44,9 +44,7 @@ def test_connection_projection_uses_exact_database_bindings_and_current_probes()
     projected = project_runtime_connections(
         settings,
         health,
-        database_binding_counts={
-            venue: 1 for venue in ("BINANCE", "HYPERLIQUID", "OKX", "BYBIT")
-        },
+        database_binding_counts={venue: 1 for venue in ("BINANCE", "HYPERLIQUID", "OKX", "BYBIT")},
     )
 
     assert all(item["available"] for item in projected.values())

@@ -209,6 +209,7 @@ class ExchangeConnectionVerifier(Protocol):
         now: datetime,
     ) -> Any: ...
 
+
 logger = logging.getLogger(__name__)
 WEB_ROOT = Path(__file__).parent / "web"
 SESSION_COOKIE = "trading_session"

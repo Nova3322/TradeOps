@@ -179,9 +179,7 @@ def test_safe_outbound_gas_does_not_reduce_the_usdc_received_amount() -> None:
         capital_direct_safe_delegate_address="0x2222222222222222222222222222222222222222",
         capital_direct_owned_arbitrum_address="0x1111111111111111111111111111111111111111",
         capital_direct_hyperliquid_account_id="hyperliquid-main",
-        capital_direct_hyperliquid_bridge_address=(
-            "0x2df1c51e09aecf9cacb7bc98cb1742757f163df7"
-        ),
+        capital_direct_hyperliquid_bridge_address=("0x2df1c51e09aecf9cacb7bc98cb1742757f163df7"),
         capital_direct_max_amount=Decimal(100),
         capital_direct_max_fee=Decimal(1),
         _env_file=None,
@@ -206,9 +204,7 @@ def test_binance_account_managed_credentials_satisfy_plan_without_env_secrets() 
         capital_direct_vault_id="vault-1",
         capital_direct_vault_address="0x1111111111111111111111111111111111111111",
         capital_direct_binance_account_id="binance-main",
-        capital_direct_binance_withdrawal_address=(
-            "0x1111111111111111111111111111111111111111"
-        ),
+        capital_direct_binance_withdrawal_address=("0x1111111111111111111111111111111111111111"),
         capital_direct_max_amount=Decimal(100),
         capital_direct_max_fee=Decimal(1),
         _env_file=None,
@@ -234,9 +230,7 @@ def test_hyperliquid_withdrawal_waits_for_current_route_fee_before_min_received(
         capital_direct_vault_id="vault-1",
         capital_direct_vault_address="0x1111111111111111111111111111111111111111",
         capital_direct_hyperliquid_account_id="hyperliquid-main",
-        capital_direct_hyperliquid_bridge_address=(
-            "0x2df1c51e09aecf9cacb7bc98cb1742757f163df7"
-        ),
+        capital_direct_hyperliquid_bridge_address=("0x2df1c51e09aecf9cacb7bc98cb1742757f163df7"),
         capital_direct_max_amount=Decimal(100),
         capital_direct_max_fee=Decimal(1),
         _env_file=None,

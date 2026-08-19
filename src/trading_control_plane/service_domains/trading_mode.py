@@ -165,9 +165,7 @@ class TradingModeService(ServiceComponent):
 
     def trading_mode_status(self, *, actor_id: UUID, now: datetime) -> dict[str, Any]:
         with self.database.session_factory() as session:
-            team = self.transactions.require_role(
-                session, actor_id, "venue.view", allow_setup=True
-            )
+            team = self.transactions.require_role(session, actor_id, "venue.view", allow_setup=True)
             actor = session.get(models.User, actor_id)
             updated_by = (
                 None

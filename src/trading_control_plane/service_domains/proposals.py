@@ -105,9 +105,7 @@ def is_manual_proposal_originator(
 class ProposalService(ServiceComponent):
     def proposal_default_config(self, actor_id: UUID) -> dict[str, Any] | None:
         with self.database.session_factory() as session:
-            team = self.transactions.require_action_assignment(
-                session, actor_id, "proposal.create"
-            )
+            team = self.transactions.require_action_assignment(session, actor_id, "proposal.create")
             config = session.scalar(
                 select(models.ProposalDefaultConfig).where(
                     models.ProposalDefaultConfig.team_id == team.team_id,

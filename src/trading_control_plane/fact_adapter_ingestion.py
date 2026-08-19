@@ -120,9 +120,7 @@ def normalize_fact_adapter_snapshot(
     orders = _by_symbol(snapshot.orders)
     fills = _by_symbol(snapshot.fills)
     marks = _by_symbol(snapshot.marks)
-    funding = _by_symbol(
-        tuple(row for row in snapshot.funding if row.get("kind") == "PAYMENT")
-    )
+    funding = _by_symbol(tuple(row for row in snapshot.funding if row.get("kind") == "PAYMENT"))
     balances = {
         str(row.get("currency")): row
         for row in snapshot.balances
@@ -243,9 +241,7 @@ def normalize_fact_adapter_snapshot(
                 fills=normalized_fills,
                 position=VenuePosition(
                     quantity=(
-                        Decimal(0)
-                        if position is None
-                        else Decimal(str(position["quantity"]))
+                        Decimal(0) if position is None else Decimal(str(position["quantity"]))
                     ),
                     average_entry_price=(
                         Decimal(0)

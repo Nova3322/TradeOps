@@ -228,16 +228,18 @@ class _RunningFreqtradeRpc:
 class FreqtradeRpcRuntime:
     """Supervise one RPC lifecycle stream for each exact account-bound worker."""
 
-    _TRANSACTION_EVENTS = frozenset({
-        "entry",
-        "entry_fill",
-        "entry_cancel",
-        "exit",
-        "exit_fill",
-        "exit_cancel",
-        "protection_trigger",
-        "protection_trigger_global",
-    })
+    _TRANSACTION_EVENTS = frozenset(
+        {
+            "entry",
+            "entry_fill",
+            "entry_cancel",
+            "exit",
+            "exit_fill",
+            "exit_cancel",
+            "protection_trigger",
+            "protection_trigger_global",
+        }
+    )
 
     def __init__(
         self,

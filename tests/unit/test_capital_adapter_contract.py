@@ -202,9 +202,7 @@ def test_capital_contract_uses_the_first_explicitly_verified_fallback(
         return CallableCapitalBackend(
             name=name,  # type: ignore[arg-type]
             contracts=(
-                {("BINANCE", CapitalOperation.TRANSFER): f"{name}.transfer"}
-                if enabled
-                else {}
+                {("BINANCE", CapitalOperation.TRANSFER): f"{name}.transfer"} if enabled else {}
             ),
             executor=lambda *_args: calls.append(name) or {"id": f"{name}-1"},
         )
@@ -242,16 +240,12 @@ def test_capital_contract_rejects_unsupported_and_unidentified_results() -> None
         backends=(
             CallableCapitalBackend(
                 name="CCXT_IMPLICIT",
-                contracts={
-                    ("BINANCE", CapitalOperation.TRANSFER): "binance.sapi.asset.transfer"
-                },
+                contracts={("BINANCE", CapitalOperation.TRANSFER): "binance.sapi.asset.transfer"},
                 executor=lambda *_args: {"status": "accepted-without-id"},
             ),
             CallableCapitalBackend(
                 name="NATIVE_RESTRICTED",
-                contracts={
-                    ("BINANCE", CapitalOperation.TRANSFER): "binance.native.transfer"
-                },
+                contracts={("BINANCE", CapitalOperation.TRANSFER): "binance.native.transfer"},
                 executor=lambda *_args: fallbacks.append("native") or {"id": "native-1"},
             ),
         ),
