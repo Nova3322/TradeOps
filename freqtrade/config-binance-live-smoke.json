@@ -22,6 +22,8 @@
     "ccxt_config": {
       "options": {
         "defaultType": "swap",
+        "adjustForTimeDifference": true,
+        "recvWindow": 60000,
         "papi": true
       },
       "has": {
@@ -32,6 +34,8 @@
     "ccxt_async_config": {
       "options": {
         "defaultType": "swap",
+        "adjustForTimeDifference": true,
+        "recvWindow": 60000,
         "papi": true
       },
       "has": {

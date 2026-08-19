@@ -1705,6 +1705,29 @@ def test_database_runtime_bindings_support_same_account_in_multiple_teams(
     )
     assert all("secret" not in repr(item) for item in bindings)
 
+    stale_second_binding = by_team[second_team_id]
+    service.configure_exchange_account_freqtrade_worker(
+        second_account_id,
+        actor_id=admin,
+        mode="LIVE",
+        name="second-runtime-worker",
+        base_url="http://127.0.0.1:18083",
+        username="control-plane",
+        password="worker-fixture-password",  # noqa: S106
+        ws_token="second-runtime-rpc-token",  # noqa: S106
+        hip3_dexes=(),
+        expected_version=stale_second_binding.account_version,
+        idempotency_key="configure-second-runtime-worker",
+        now=now + timedelta(seconds=4),
+    )
+    service.record_runtime_source_health(
+        stale_second_binding.service_principal_id,
+        {"BINANCE": {"status": "SUCCESS", "items_observed": 1}},
+        scopes={"BINANCE": (stale_second_binding.account_id, "BINANCE")},
+        runtime_account_binding=stale_second_binding,
+        now=now + timedelta(seconds=4, milliseconds=100),
+    )
+
     with pytest.raises(DomainRejected, match="EXCHANGE_ACCOUNT_NOT_FOUND"):
         service.configure_exchange_account_runtime_sync(
             first_account_id,
@@ -1719,11 +1742,10 @@ def test_database_runtime_bindings_support_same_account_in_multiple_teams(
         second_account_id,
         actor_id=admin,
         credentials={"api_key": "rotated-key", "api_secret": "rotated-secret"},
-        expected_version=3,
+        expected_version=4,
         idempotency_key="rotate-second-runtime-account",
         now=now + timedelta(seconds=5),
     )
-    stale_second_binding = by_team[second_team_id]
     with pytest.raises(DomainRejected, match="RUNTIME_BINDING_CHANGED"):
         service.record_runtime_source_health(
             stale_second_binding.service_principal_id,
