@@ -7,17 +7,13 @@ from uuid import UUID
 
 from fastapi import FastAPI
 
-from trading_control_plane.adapters.capital import CapitalAdapter, CapitalScope
 from trading_control_plane.api_core import (
-    ExchangeConnectionVerifier,
     FreqtradeWorkerClient,
     LoginAttemptLimiter,
-    MockCapitalTransferAdapter,
     NoTiltGateway,
     PasswordHasher,
     PerptapeCandidate,
     ReadinessDatabase,
-    SafeSpendingGateway,
     SessionIdentity,
     Settings,
     SignedTokenService,
@@ -25,6 +21,13 @@ from trading_control_plane.api_core import (
     TradingQueries,
     TradingService,
 )
+from trading_control_plane.capital_configuration_use_cases import (
+    CapitalConfigurationUseCases,
+)
+from trading_control_plane.capital_direct_use_cases import CapitalDirectUseCases
+from trading_control_plane.capital_receipt_use_cases import CapitalReceiptUseCases
+from trading_control_plane.capital_transfer_use_cases import CapitalTransferUseCases
+from trading_control_plane.exchange_connection_verification import ExchangeConnectionVerification
 from trading_control_plane.service import PreparedFreqtradeWorkerBinding
 
 
@@ -40,19 +43,10 @@ class RequireCapability(Protocol):
 
 ServiceFactory = Callable[[], TradingService]
 QueryFactory = Callable[[], TradingQueries]
-CapitalAdapterResolver = Callable[[CapitalScope], CapitalAdapter]
 ConfiguredRiskScopes = Callable[[UUID], tuple[tuple[str, str, str], ...]]
 CurrentPerptapeCandidate = Callable[..., PerptapeCandidate]
 CurrentPerptapeCandidates = Callable[..., list[PerptapeCandidate]]
 OpportunitySnapshot = Callable[..., dict[str, Any]]
-
-
-class EffectiveDirectCapitalSettings(Protocol):
-    def __call__(
-        self,
-        user_id: UUID,
-        environment: str = "LIVE",
-    ) -> tuple[Settings, dict[str, Any] | None]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +83,7 @@ class WorkspaceRouteDependencies:
 class AccountRouteDependencies:
     common: AuthenticatedRouteDependencies
     freqtrade_client_for_binding: Callable[[PreparedFreqtradeWorkerBinding], FreqtradeWorkerClient]
-    exchange_connection_verifier: ExchangeConnectionVerifier
+    connection_verification: ExchangeConnectionVerification
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,18 +126,10 @@ class ExecutionRouteDependencies:
 @dataclass(frozen=True, slots=True)
 class CapitalRouteDependencies:
     common: AuthenticatedRouteDependencies
-    capital_snapshot: Callable[[UUID], dict[str, Any]]
-    configured_notilt_scope: Callable[[int], tuple[str, str]]
-    effective_direct_capital_settings: EffectiveDirectCapitalSettings
-    notify_capital: Callable[..., None]
-    notilt_chain_id_for_network: Callable[[str], int]
-    capital_adapter_resolver: CapitalAdapterResolver
-    capital_transfer: MockCapitalTransferAdapter
-    notilt: NoTiltGateway
-    safe_spending: SafeSpendingGateway
-    sync_configured_notilt_vault: Callable[..., tuple[int, dict[str, Any]]]
-    token_service: SignedTokenService
-    verify_live_notilt_release_budget: Callable[..., None]
+    configuration: CapitalConfigurationUseCases
+    direct: CapitalDirectUseCases
+    receipts: CapitalReceiptUseCases
+    transfers: CapitalTransferUseCases
 
 
 @dataclass(frozen=True, slots=True)

@@ -408,9 +408,7 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
                 admin,
                 now=now,
             )
-            current_positions = await client.get(
-                "/api/positions", params={"environment": "LIVE"}
-            )
+            current_positions = await client.get("/api/positions", params={"environment": "LIVE"})
             assert current_positions.status_code == 200, current_positions.text
             position = current_positions.json()["data"]["positions"][0]
             assert position["account_id"] == "binance-api-main"
@@ -432,9 +430,7 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
             }
             assert item["connection"]["status"] == "NOT_VERIFIED"
             assert item["trading"]["enabled"] is False
-            facts = await client.get(
-                f"/api/exchange-accounts/{item['exchange_account_id']}/facts"
-            )
+            facts = await client.get(f"/api/exchange-accounts/{item['exchange_account_id']}/facts")
             assert facts.status_code == 200, facts.text
             assert facts.json()["data"]["account_id"] == "binance-api-main"
             service.record_position(
@@ -1021,6 +1017,18 @@ def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enabl
             )
             assert replay.status_code == 200
             assert replay.json()["version"] == results["BINANCE"]["version"]
+            assert len(verifier.calls) == 4
+
+            cooldown_reuse = await client.post(
+                f"/api/exchange-accounts/{account_ids['BINANCE']}/connection-verifications",
+                json={
+                    "expected_version": results["BINANCE"]["version"],
+                    "idempotency_key": "verify-binance-team-account-cooldown-reuse",
+                },
+            )
+            assert cooldown_reuse.status_code == 200, cooldown_reuse.text
+            assert cooldown_reuse.json()["version"] == results["BINANCE"]["version"]
+            assert cooldown_reuse.json()["connection"] == results["BINANCE"]["connection"]
             assert len(verifier.calls) == 4
 
             for venue in {"BINANCE", "HYPERLIQUID", "BYBIT"}:
