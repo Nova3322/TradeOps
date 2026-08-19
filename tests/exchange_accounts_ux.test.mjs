@@ -10,6 +10,10 @@ const accountsSource = readFileSync(
   new URL('../src/trading_control_plane/web/accounts.js', import.meta.url),
   'utf8',
 );
+const sharedSource = readFileSync(
+  new URL('../src/trading_control_plane/web/shared.js', import.meta.url),
+  'utf8',
+);
 const routerSource = readFileSync(
   new URL('../src/trading_control_plane/web/router.js', import.meta.url),
   'utf8',
@@ -31,8 +35,14 @@ test('production account cards expose the exact-account detail workflow', () => 
   assert.match(routerSource, /venueAccountMatch = path\.match\(\/\^\\\/venues\\\/\(\[\^\/\]\+\)\$\/\)/);
   assert.match(routerSource, /renderVenueAccountDetail\(venueAccountMatch\[1\]\)/);
   assert.match(indexSource, /execution\.js\?v=193/);
-  assert.match(indexSource, /accounts\.js\?v=180/);
-  assert.match(serviceWorkerSource, /trading-shell-v226/);
+  assert.match(indexSource, /shared\.js\?v=15/);
+  assert.match(indexSource, /accounts\.js\?v=181/);
+  assert.match(serviceWorkerSource, /trading-shell-v227/);
+});
+
+test('standard Binance account mode is rendered as known product truth', () => {
+  assert.match(sharedSource, /STANDARD:'标准账户'/);
+  assert.match(accountsSource, /STANDARD:'Standard account'/);
 });
 
 test('account detail trusts fresh exact-account facts instead of API-local worker flags', () => {
