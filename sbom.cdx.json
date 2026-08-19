@@ -2,7 +2,7 @@
   "$schema": "http://cyclonedx.org/schema/bom-1.5.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:21dabb46-4487-5122-80c8-effd8b2b434e",
+  "serialNumber": "urn:uuid:70dd1f85-29d7-5d9b-b8ba-8374d047cfd8",
   "version": 1,
   "metadata": {
     "component": {
@@ -19,7 +19,7 @@
     "properties": [
       {
         "name": "tradingops:lock-sha256",
-        "value": "96e33e8d70df34735b7007e0b99db9402b74576583588824f5ffc7c7be9ea797"
+        "value": "677d6e775d2a7e674c72bb9465f693b54a2bae34943b63ea8a5b6dceba5fd6b9"
       },
       {
         "name": "tradingops:generation",
@@ -603,10 +603,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "aiohttp-3@3.14.1",
+      "bom-ref": "aiohttp-3@3.14.3",
       "name": "aiohttp",
-      "version": "3.14.1",
-      "purl": "pkg:pypi/aiohttp@3.14.1",
+      "version": "3.14.3",
+      "purl": "pkg:pypi/aiohttp@3.14.3",
       "licenses": [
         {
           "expression": "Apache-2.0 AND MIT"
@@ -819,10 +819,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "ccxt-15@4.5.70",
+      "bom-ref": "ccxt-15@4.5.74",
       "name": "ccxt",
-      "version": "4.5.70",
-      "purl": "pkg:pypi/ccxt@4.5.70",
+      "version": "4.5.74",
+      "purl": "pkg:pypi/ccxt@4.5.74",
       "licenses": [
         {
           "expression": "MIT"
@@ -1007,10 +1007,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "cryptography-25@49.0.0",
+      "bom-ref": "cryptography-25@50.0.0",
       "name": "cryptography",
-      "version": "49.0.0",
-      "purl": "pkg:pypi/cryptography@49.0.0",
+      "version": "50.0.0",
+      "purl": "pkg:pypi/cryptography@50.0.0",
       "licenses": [
         {
           "expression": "Apache-2.0 OR BSD-3-Clause"
@@ -2569,25 +2569,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "setuptools-110@83.0.0",
-      "name": "setuptools",
-      "version": "83.0.0",
-      "purl": "pkg:pypi/setuptools@83.0.0",
-      "licenses": [
-        {
-          "expression": "MIT"
-        }
-      ],
-      "properties": [
-        {
-          "name": "tradingops:ecosystem",
-          "value": "Python"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "six-111@1.17.0",
+      "bom-ref": "six-110@1.17.0",
       "name": "six",
       "version": "1.17.0",
       "purl": "pkg:pypi/six@1.17.0",
@@ -2605,7 +2587,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "soupsieve-112@2.9.2",
+      "bom-ref": "soupsieve-111@2.9.2",
       "name": "soupsieve",
       "version": "2.9.2",
       "purl": "pkg:pypi/soupsieve@2.9.2",
@@ -2623,7 +2605,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "sqlalchemy-113@2.0.51",
+      "bom-ref": "sqlalchemy-112@2.0.51",
       "name": "sqlalchemy",
       "version": "2.0.51",
       "purl": "pkg:pypi/sqlalchemy@2.0.51",
@@ -2641,7 +2623,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "stack-data-114@0.6.3",
+      "bom-ref": "stack-data-113@0.6.3",
       "name": "stack-data",
       "version": "0.6.3",
       "purl": "pkg:pypi/stack-data@0.6.3",
@@ -2659,7 +2641,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "starlette-115@1.3.1",
+      "bom-ref": "starlette-114@1.3.1",
       "name": "starlette",
       "version": "1.3.1",
       "purl": "pkg:pypi/starlette@1.3.1",
@@ -2677,7 +2659,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "tabulate-116@0.10.0",
+      "bom-ref": "tabulate-115@0.10.0",
       "name": "tabulate",
       "version": "0.10.0",
       "purl": "pkg:pypi/tabulate@0.10.0",
@@ -2695,7 +2677,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "threadpoolctl-117@3.6.0",
+      "bom-ref": "threadpoolctl-116@3.6.0",
       "name": "threadpoolctl",
       "version": "3.6.0",
       "purl": "pkg:pypi/threadpoolctl@3.6.0",
@@ -2713,7 +2695,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "toolz-118@1.1.0",
+      "bom-ref": "toolz-117@1.1.0",
       "name": "toolz",
       "version": "1.1.0",
       "purl": "pkg:pypi/toolz@1.1.0",
@@ -2735,7 +2717,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "traitlets-119@5.16.1",
+      "bom-ref": "traitlets-118@5.16.1",
       "name": "traitlets",
       "version": "5.16.1",
       "purl": "pkg:pypi/traitlets@5.16.1",
@@ -2753,7 +2735,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "typing-extensions-120@4.16.0",
+      "bom-ref": "typing-extensions-119@4.16.0",
       "name": "typing-extensions",
       "version": "4.16.0",
       "purl": "pkg:pypi/typing-extensions@4.16.0",
@@ -2771,7 +2753,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "typing-inspection-121@0.4.2",
+      "bom-ref": "typing-inspection-120@0.4.2",
       "name": "typing-inspection",
       "version": "0.4.2",
       "purl": "pkg:pypi/typing-inspection@0.4.2",
@@ -2789,7 +2771,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "tzdata-122@2026.3",
+      "bom-ref": "tzdata-121@2026.3",
       "name": "tzdata",
       "version": "2026.3",
       "purl": "pkg:pypi/tzdata@2026.3",
@@ -2807,7 +2789,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "urllib3-123@2.7.0",
+      "bom-ref": "urllib3-122@2.7.0",
       "name": "urllib3",
       "version": "2.7.0",
       "purl": "pkg:pypi/urllib3@2.7.0",
@@ -2825,7 +2807,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "uvicorn-124@0.51.0",
+      "bom-ref": "uvicorn-123@0.51.0",
       "name": "uvicorn",
       "version": "0.51.0",
       "purl": "pkg:pypi/uvicorn@0.51.0",
@@ -2843,7 +2825,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "uvloop-125@0.22.1",
+      "bom-ref": "uvloop-124@0.22.1",
       "name": "uvloop",
       "version": "0.22.1",
       "purl": "pkg:pypi/uvloop@0.22.1",
@@ -2865,7 +2847,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "watchfiles-126@1.2.0",
+      "bom-ref": "watchfiles-125@1.2.0",
       "name": "watchfiles",
       "version": "1.2.0",
       "purl": "pkg:pypi/watchfiles@1.2.0",
@@ -2883,7 +2865,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "wcwidth-127@0.8.2",
+      "bom-ref": "wcwidth-126@0.8.2",
       "name": "wcwidth",
       "version": "0.8.2",
       "purl": "pkg:pypi/wcwidth@0.8.2",
@@ -2901,7 +2883,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "websocket-client-128@1.9.0",
+      "bom-ref": "websocket-client-127@1.9.0",
       "name": "websocket-client",
       "version": "1.9.0",
       "purl": "pkg:pypi/websocket-client@1.9.0",
@@ -2919,7 +2901,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "websockets-129@16.1",
+      "bom-ref": "websockets-128@16.1",
       "name": "websockets",
       "version": "16.1",
       "purl": "pkg:pypi/websockets@16.1",
@@ -2937,7 +2919,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "winloop-130@0.6.3",
+      "bom-ref": "winloop-129@0.6.3",
       "name": "winloop",
       "version": "0.6.3",
       "purl": "pkg:pypi/winloop@0.6.3",
@@ -2959,7 +2941,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "yarl-131@1.24.2",
+      "bom-ref": "yarl-130@1.24.2",
       "name": "yarl",
       "version": "1.24.2",
       "purl": "pkg:pypi/yarl@1.24.2",
@@ -2977,7 +2959,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "yfinance-132@1.5.2",
+      "bom-ref": "yfinance-131@1.5.2",
       "name": "yfinance",
       "version": "1.5.2",
       "purl": "pkg:pypi/yfinance@1.5.2",
@@ -2995,7 +2977,7 @@
     },
     {
       "type": "library",
-      "bom-ref": "zlib-ng-133@1.0.0",
+      "bom-ref": "zlib-ng-132@1.0.0",
       "name": "zlib-ng",
       "version": "1.0.0",
       "purl": "pkg:pypi/zlib-ng@1.0.0",
@@ -3068,7 +3050,7 @@
       "ref": "aiohappyeyeballs-2@2.7.1"
     },
     {
-      "ref": "aiohttp-3@3.14.1",
+      "ref": "aiohttp-3@3.14.3",
       "dependsOn": [
         "aiohappyeyeballs-2@2.7.1",
         "aiosignal-5@1.4.0",
@@ -3076,29 +3058,29 @@
         "frozenlist-41@1.8.0",
         "multidict-62@6.7.1",
         "propcache-81@0.5.2",
-        "typing-extensions-120@4.16.0",
-        "yarl-131@1.24.2"
+        "typing-extensions-119@4.16.0",
+        "yarl-130@1.24.2"
       ]
     },
     {
       "ref": "aiohttp-fast-zlib-4@0.3.0",
       "dependsOn": [
-        "aiohttp-3@3.14.1"
+        "aiohttp-3@3.14.3"
       ]
     },
     {
       "ref": "aiosignal-5@1.4.0",
       "dependsOn": [
         "frozenlist-41@1.8.0",
-        "typing-extensions-120@4.16.0"
+        "typing-extensions-119@4.16.0"
       ]
     },
     {
       "ref": "alembic-6@1.18.5",
       "dependsOn": [
         "mako-57@1.3.12",
-        "sqlalchemy-113@2.0.51",
-        "typing-extensions-120@4.16.0"
+        "sqlalchemy-112@2.0.51",
+        "typing-extensions-119@4.16.0"
       ]
     },
     {
@@ -3111,7 +3093,7 @@
       "ref": "anyio-9@4.14.2",
       "dependsOn": [
         "idna-49@3.18",
-        "typing-extensions-120@4.16.0"
+        "typing-extensions-119@4.16.0"
       ]
     },
     {
@@ -3123,8 +3105,8 @@
     {
       "ref": "beautifulsoup4-12@4.15.0",
       "dependsOn": [
-        "soupsieve-112@2.9.2",
-        "typing-extensions-120@4.16.0"
+        "soupsieve-111@2.9.2",
+        "typing-extensions-119@4.16.0"
       ]
     },
     {
@@ -3137,10 +3119,10 @@
       ]
     },
     {
-      "ref": "ccxt-15@4.5.70",
+      "ref": "ccxt-15@4.5.74",
       "dependsOn": [
         "aiohappyeyeballs-2@2.7.1",
-        "aiohttp-3@3.14.1",
+        "aiohttp-3@3.14.3",
         "aiohttp-fast-zlib-4@0.3.0",
         "aiosignal-5@1.4.0",
         "attrs-11@26.1.0",
@@ -3148,7 +3130,7 @@
         "cffi-17@2.0.0",
         "charset-normalizer-18@3.4.7",
         "coincurve-21@21.0.0",
-        "cryptography-25@49.0.0",
+        "cryptography-25@50.0.0",
         "frozenlist-41@1.8.0",
         "idna-49@3.18",
         "multidict-62@6.7.1",
@@ -3156,13 +3138,12 @@
         "propcache-81@0.5.2",
         "pycparser-88@3.0",
         "requests-104@2.34.2",
-        "setuptools-110@83.0.0",
-        "typing-extensions-120@4.16.0",
-        "urllib3-123@2.7.0",
-        "uvloop-125@0.22.1",
-        "winloop-130@0.6.3",
-        "yarl-131@1.24.2",
-        "zlib-ng-133@1.0.0"
+        "typing-extensions-119@4.16.0",
+        "urllib3-122@2.7.0",
+        "uvloop-124@0.22.1",
+        "winloop-129@0.6.3",
+        "yarl-130@1.24.2",
+        "zlib-ng-132@1.0.0"
       ]
     },
     {
@@ -3202,7 +3183,7 @@
       "ref": "coverage-24@7.15.2"
     },
     {
-      "ref": "cryptography-25@49.0.0",
+      "ref": "cryptography-25@50.0.0",
       "dependsOn": [
         "cffi-17@2.0.0"
       ]
@@ -3220,7 +3201,7 @@
     {
       "ref": "cytoolz-28@1.1.0",
       "dependsOn": [
-        "toolz-118@1.1.0"
+        "toolz-117@1.1.0"
       ]
     },
     {
@@ -3285,7 +3266,7 @@
     {
       "ref": "eth-typing-36@6.0.0",
       "dependsOn": [
-        "typing-extensions-120@4.16.0"
+        "typing-extensions-119@4.16.0"
       ]
     },
     {
@@ -3295,7 +3276,7 @@
         "eth-hash-32@0.8.0",
         "eth-typing-36@6.0.0",
         "pydantic-90@2.13.4",
-        "toolz-118@1.1.0"
+        "toolz-117@1.1.0"
       ]
     },
     {
@@ -3310,9 +3291,9 @@
       "dependsOn": [
         "annotated-doc-7@0.0.4",
         "pydantic-90@2.13.4",
-        "starlette-115@1.3.1",
-        "typing-extensions-120@4.16.0",
-        "typing-inspection-121@0.4.2"
+        "starlette-114@1.3.1",
+        "typing-extensions-119@4.16.0",
+        "typing-inspection-120@0.4.2"
       ]
     },
     {
@@ -3356,7 +3337,7 @@
         "eth-utils-37@5.3.1",
         "msgpack-61@1.2.1",
         "requests-104@2.34.2",
-        "websocket-client-128@1.9.0"
+        "websocket-client-127@1.9.0"
       ]
     },
     {
@@ -3376,8 +3357,8 @@
         "prompt-toolkit-80@3.0.53",
         "psutil-83@7.2.2",
         "pygments-94@2.20.0",
-        "stack-data-114@0.6.3",
-        "traitlets-119@5.16.1"
+        "stack-data-113@0.6.3",
+        "traitlets-118@5.16.1"
       ]
     },
     {
@@ -3433,7 +3414,7 @@
     {
       "ref": "matplotlib-inline-60@0.2.2",
       "dependsOn": [
-        "traitlets-119@5.16.1"
+        "traitlets-118@5.16.1"
       ]
     },
     {
@@ -3451,7 +3432,7 @@
         "librt-56@0.13.0",
         "mypy-extensions-65@1.1.0",
         "pathspec-73@1.1.1",
-        "typing-extensions-120@4.16.0"
+        "typing-extensions-119@4.16.0"
       ]
     },
     {
@@ -3488,7 +3469,7 @@
         "numpy-67@2.5.2",
         "python-dateutil-98@2.9.0.post0",
         "pytz-100@2026.3.post1",
-        "tzdata-122@2026.3"
+        "tzdata-121@2026.3"
       ]
     },
     {
@@ -3527,7 +3508,7 @@
     {
       "ref": "prompt-toolkit-80@3.0.53",
       "dependsOn": [
-        "wcwidth-127@0.8.2"
+        "wcwidth-126@0.8.2"
       ]
     },
     {
@@ -3543,8 +3524,8 @@
       "ref": "psycopg-84@3.3.4",
       "dependsOn": [
         "psycopg-binary-85@3.3.4",
-        "typing-extensions-120@4.16.0",
-        "tzdata-122@2026.3"
+        "typing-extensions-119@4.16.0",
+        "tzdata-121@2026.3"
       ]
     },
     {
@@ -3567,14 +3548,14 @@
       "dependsOn": [
         "annotated-types-8@0.7.0",
         "pydantic-core-91@2.46.4",
-        "typing-extensions-120@4.16.0",
-        "typing-inspection-121@0.4.2"
+        "typing-extensions-119@4.16.0",
+        "typing-inspection-120@0.4.2"
       ]
     },
     {
       "ref": "pydantic-core-91@2.46.4",
       "dependsOn": [
-        "typing-extensions-120@4.16.0"
+        "typing-extensions-119@4.16.0"
       ]
     },
     {
@@ -3582,7 +3563,7 @@
       "dependsOn": [
         "pydantic-90@2.13.4",
         "python-dotenv-99@1.2.2",
-        "typing-inspection-121@0.4.2"
+        "typing-inspection-120@0.4.2"
       ]
     },
     {
@@ -3626,7 +3607,7 @@
     {
       "ref": "python-dateutil-98@2.9.0.post0",
       "dependsOn": [
-        "six-111@1.17.0"
+        "six-110@1.17.0"
       ]
     },
     {
@@ -3647,8 +3628,8 @@
         "python-dateutil-98@2.9.0.post0",
         "scipy-108@1.18.0",
         "seaborn-109@0.13.2",
-        "tabulate-116@0.10.0",
-        "yfinance-132@1.5.2"
+        "tabulate-115@0.10.0",
+        "yfinance-131@1.5.2"
       ]
     },
     {
@@ -3660,7 +3641,7 @@
         "certifi-16@2026.6.17",
         "charset-normalizer-18@3.4.7",
         "idna-49@3.18",
-        "urllib3-123@2.7.0"
+        "urllib3-122@2.7.0"
       ]
     },
     {
@@ -3679,7 +3660,7 @@
         "narwhals-66@2.24.0",
         "numpy-67@2.5.2",
         "scipy-108@1.18.0",
-        "threadpoolctl-117@3.6.0"
+        "threadpoolctl-116@3.6.0"
       ]
     },
     {
@@ -3697,23 +3678,20 @@
       ]
     },
     {
-      "ref": "setuptools-110@83.0.0"
+      "ref": "six-110@1.17.0"
     },
     {
-      "ref": "six-111@1.17.0"
+      "ref": "soupsieve-111@2.9.2"
     },
     {
-      "ref": "soupsieve-112@2.9.2"
-    },
-    {
-      "ref": "sqlalchemy-113@2.0.51",
+      "ref": "sqlalchemy-112@2.0.51",
       "dependsOn": [
         "greenlet-42@3.5.3",
-        "typing-extensions-120@4.16.0"
+        "typing-extensions-119@4.16.0"
       ]
     },
     {
-      "ref": "stack-data-114@0.6.3",
+      "ref": "stack-data-113@0.6.3",
       "dependsOn": [
         "asttokens-10@3.0.2",
         "executing-38@2.2.1",
@@ -3721,20 +3699,20 @@
       ]
     },
     {
-      "ref": "starlette-115@1.3.1",
+      "ref": "starlette-114@1.3.1",
       "dependsOn": [
         "anyio-9@4.14.2",
-        "typing-extensions-120@4.16.0"
+        "typing-extensions-119@4.16.0"
       ]
     },
     {
-      "ref": "tabulate-116@0.10.0"
+      "ref": "tabulate-115@0.10.0"
     },
     {
-      "ref": "threadpoolctl-117@3.6.0"
+      "ref": "threadpoolctl-116@3.6.0"
     },
     {
-      "ref": "toolz-118@1.1.0"
+      "ref": "toolz-117@1.1.0"
     },
     {
       "ref": "tradingops@0.1.0",
@@ -3750,7 +3728,7 @@
         "@scure/bip39@1.6.0",
         "abitype@1.2.3",
         "aiohappyeyeballs-2@2.7.1",
-        "aiohttp-3@3.14.1",
+        "aiohttp-3@3.14.3",
         "aiohttp-fast-zlib-4@0.3.0",
         "aiosignal-5@1.4.0",
         "alembic-6@1.18.5",
@@ -3762,7 +3740,7 @@
         "beautifulsoup4-12@4.15.0",
         "bitarray-13@3.9.2",
         "bottleneck-14@1.6.0",
-        "ccxt-15@4.5.70",
+        "ccxt-15@4.5.74",
         "certifi-16@2026.6.17",
         "cffi-17@2.0.0",
         "charset-normalizer-18@3.4.7",
@@ -3772,7 +3750,7 @@
         "colorama-22@0.4.6",
         "contourpy-23@1.3.3",
         "coverage-24@7.15.2",
-        "cryptography-25@49.0.0",
+        "cryptography-25@50.0.0",
         "curl-cffi-26@0.16.0",
         "cycler-27@0.12.1",
         "cytoolz-28@1.1.0",
@@ -3860,67 +3838,66 @@
         "scikit-learn-107@1.9.0",
         "scipy-108@1.18.0",
         "seaborn-109@0.13.2",
-        "setuptools-110@83.0.0",
-        "six-111@1.17.0",
-        "soupsieve-112@2.9.2",
-        "sqlalchemy-113@2.0.51",
-        "stack-data-114@0.6.3",
-        "starlette-115@1.3.1",
-        "tabulate-116@0.10.0",
-        "threadpoolctl-117@3.6.0",
-        "toolz-118@1.1.0",
-        "traitlets-119@5.16.1",
-        "typing-extensions-120@4.16.0",
-        "typing-inspection-121@0.4.2",
-        "tzdata-122@2026.3",
-        "urllib3-123@2.7.0",
-        "uvicorn-124@0.51.0",
-        "uvloop-125@0.22.1",
+        "six-110@1.17.0",
+        "soupsieve-111@2.9.2",
+        "sqlalchemy-112@2.0.51",
+        "stack-data-113@0.6.3",
+        "starlette-114@1.3.1",
+        "tabulate-115@0.10.0",
+        "threadpoolctl-116@3.6.0",
+        "toolz-117@1.1.0",
+        "traitlets-118@5.16.1",
+        "typing-extensions-119@4.16.0",
+        "typing-inspection-120@0.4.2",
+        "tzdata-121@2026.3",
+        "urllib3-122@2.7.0",
+        "uvicorn-123@0.51.0",
+        "uvloop-124@0.22.1",
         "viem@2.55.10",
-        "watchfiles-126@1.2.0",
-        "wcwidth-127@0.8.2",
-        "websocket-client-128@1.9.0",
-        "websockets-129@16.1",
-        "winloop-130@0.6.3",
+        "watchfiles-125@1.2.0",
+        "wcwidth-126@0.8.2",
+        "websocket-client-127@1.9.0",
+        "websockets-128@16.1",
+        "winloop-129@0.6.3",
         "ws@8.21.0",
-        "yarl-131@1.24.2",
-        "yfinance-132@1.5.2",
-        "zlib-ng-133@1.0.0"
+        "yarl-130@1.24.2",
+        "yfinance-131@1.5.2",
+        "zlib-ng-132@1.0.0"
       ]
     },
     {
-      "ref": "traitlets-119@5.16.1"
+      "ref": "traitlets-118@5.16.1"
     },
     {
-      "ref": "typing-extensions-120@4.16.0"
+      "ref": "typing-extensions-119@4.16.0"
     },
     {
-      "ref": "typing-inspection-121@0.4.2",
+      "ref": "typing-inspection-120@0.4.2",
       "dependsOn": [
-        "typing-extensions-120@4.16.0"
+        "typing-extensions-119@4.16.0"
       ]
     },
     {
-      "ref": "tzdata-122@2026.3"
+      "ref": "tzdata-121@2026.3"
     },
     {
-      "ref": "urllib3-123@2.7.0"
+      "ref": "urllib3-122@2.7.0"
     },
     {
-      "ref": "uvicorn-124@0.51.0",
+      "ref": "uvicorn-123@0.51.0",
       "dependsOn": [
         "click-20@8.4.2",
         "h11-43@0.16.0",
         "httptools-46@0.8.0",
         "python-dotenv-99@1.2.2",
         "pyyaml-101@6.0.3",
-        "uvloop-125@0.22.1",
-        "watchfiles-126@1.2.0",
-        "websockets-129@16.1"
+        "uvloop-124@0.22.1",
+        "watchfiles-125@1.2.0",
+        "websockets-128@16.1"
       ]
     },
     {
-      "ref": "uvloop-125@0.22.1"
+      "ref": "uvloop-124@0.22.1"
     },
     {
       "ref": "viem@2.55.10",
@@ -3936,29 +3913,29 @@
       ]
     },
     {
-      "ref": "watchfiles-126@1.2.0",
+      "ref": "watchfiles-125@1.2.0",
       "dependsOn": [
         "anyio-9@4.14.2"
       ]
     },
     {
-      "ref": "wcwidth-127@0.8.2"
+      "ref": "wcwidth-126@0.8.2"
     },
     {
-      "ref": "websocket-client-128@1.9.0"
+      "ref": "websocket-client-127@1.9.0"
     },
     {
-      "ref": "websockets-129@16.1"
+      "ref": "websockets-128@16.1"
     },
     {
-      "ref": "winloop-130@0.6.3"
+      "ref": "winloop-129@0.6.3"
     },
     {
       "ref": "ws@8.21.0",
       "dependsOn": []
     },
     {
-      "ref": "yarl-131@1.24.2",
+      "ref": "yarl-130@1.24.2",
       "dependsOn": [
         "idna-49@3.18",
         "multidict-62@6.7.1",
@@ -3966,7 +3943,7 @@
       ]
     },
     {
-      "ref": "yfinance-132@1.5.2",
+      "ref": "yfinance-131@1.5.2",
       "dependsOn": [
         "beautifulsoup4-12@4.15.0",
         "curl-cffi-26@0.16.0",
@@ -3978,11 +3955,11 @@
         "protobuf-82@7.35.1",
         "pytz-100@2026.3.post1",
         "requests-104@2.34.2",
-        "websockets-129@16.1"
+        "websockets-128@16.1"
       ]
     },
     {
-      "ref": "zlib-ng-133@1.0.0"
+      "ref": "zlib-ng-132@1.0.0"
     }
   ]
 }
