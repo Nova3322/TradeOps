@@ -711,7 +711,6 @@ class FactIngestionExecutionService(ServiceComponent):
                     position.quantity != 0
                     or position.average_entry_price != 0
                     or position.fact_status != domain.FactStatus.KNOWN.value
-                    or position.observed_at != now
                 )
                 if position.quantity != 0:
                     closed += 1

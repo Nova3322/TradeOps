@@ -21,6 +21,8 @@ from trading_control_plane.freqtrade import FreqtradeWorkerClient, FreqtradeWork
 from trading_control_plane.models import (
     AuditEvent,
     ExchangeAccount,
+    Instrument,
+    Position,
     RoleAssignment,
     RuntimeSourceHealth,
     User,
@@ -104,11 +106,22 @@ def test_fact_adapter_ingestion_refreshes_exact_account_runtime_health(
         funding=(),
         protection=None,
     )
+    eth_snapshot = replace(
+        snapshot,
+        symbol="ETHUSDT",
+        instrument=replace(snapshot.instrument, symbol="ETHUSDT"),
+        position=replace(
+            snapshot.position,
+            quantity=Decimal("0.1"),
+            average_entry_price=Decimal("3000"),
+            mark_price=Decimal("3010"),
+        ),
+    )
 
     service.ingest_normalized_read_only_account_snapshot(
         binding.account_id,
         binding.service_principal_id,
-        (snapshot,),
+        (snapshot, eth_snapshot),
         venue=binding.venue,
         environment=ExecutionEnvironment.LIVE,
         runtime_binding=binding,
@@ -153,6 +166,65 @@ def test_fact_adapter_ingestion_refreshes_exact_account_runtime_health(
     assert projected["data_status"] == "CURRENT"
     assert projected["runtime_status"] == "FAILED"
     assert projected["error_code"] == "FACT_ADAPTER_HISTORY_INCOMPLETE"
+
+    with database.session_factory() as session:
+        eth_position = session.scalar(
+            select(Position)
+            .join(Instrument, Position.instrument_id == Instrument.instrument_id)
+            .where(
+                Position.team_id == binding.team_id,
+                Position.account_id == binding.account_id,
+                Position.venue == binding.venue,
+                Instrument.symbol == "ETHUSDT",
+            )
+        )
+        assert eth_position is not None
+        covered_events = session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "BINANCE_POSITION_COVERED",
+                AuditEvent.object_id == str(eth_position.position_id),
+            )
+        ).all()
+        assert eth_position.quantity == 0
+        assert eth_position.observed_at == degraded_at
+        assert len(covered_events) == 1
+
+    refreshed_at = degraded_at + timedelta(seconds=1)
+    service.ingest_normalized_read_only_account_snapshot(
+        binding.account_id,
+        binding.service_principal_id,
+        (
+            replace(
+                snapshot,
+                observed_at=refreshed_at,
+                history_error_code="FACT_ADAPTER_HISTORY_INCOMPLETE",
+            ),
+        ),
+        venue=binding.venue,
+        environment=ExecutionEnvironment.LIVE,
+        runtime_binding=binding,
+        now=refreshed_at,
+    )
+    with database.session_factory() as session:
+        eth_position = session.scalar(
+            select(Position)
+            .join(Instrument, Position.instrument_id == Instrument.instrument_id)
+            .where(
+                Position.team_id == binding.team_id,
+                Position.account_id == binding.account_id,
+                Position.venue == binding.venue,
+                Instrument.symbol == "ETHUSDT",
+            )
+        )
+        assert eth_position is not None
+        covered_events = session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "BINANCE_POSITION_COVERED",
+                AuditEvent.object_id == str(eth_position.position_id),
+            )
+        ).all()
+        assert eth_position.observed_at == refreshed_at
+        assert len(covered_events) == 1
 
 
 def encryption_key() -> str:
