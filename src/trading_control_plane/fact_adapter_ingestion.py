@@ -118,9 +118,16 @@ def normalize_fact_adapter_snapshot(
         )
     positions = _by_symbol(snapshot.positions)
     orders = _by_symbol(snapshot.orders)
-    fills = _by_symbol(snapshot.fills)
+    history_incomplete = bool(
+        {"fetchMyTrades", "fetchFundingHistory"}.intersection(snapshot.unknown_fields)
+    )
+    fills = {} if history_incomplete else _by_symbol(snapshot.fills)
     marks = _by_symbol(snapshot.marks)
-    funding = _by_symbol(tuple(row for row in snapshot.funding if row.get("kind") == "PAYMENT"))
+    funding = (
+        {}
+        if history_incomplete
+        else _by_symbol(tuple(row for row in snapshot.funding if row.get("kind") == "PAYMENT"))
+    )
     balances = {
         str(row.get("currency")): row
         for row in snapshot.balances
@@ -269,11 +276,7 @@ def normalize_fact_adapter_snapshot(
                     )
                 ),
                 history_error_code=(
-                    None
-                    if not {"fetchMyTrades", "fetchFundingHistory"}.intersection(
-                        snapshot.unknown_fields
-                    )
-                    else "FACT_ADAPTER_HISTORY_INCOMPLETE"
+                    "FACT_ADAPTER_HISTORY_INCOMPLETE" if history_incomplete else None
                 ),
             )
         )
