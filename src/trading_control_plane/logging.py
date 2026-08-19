@@ -9,7 +9,18 @@ from typing import Any
 class JsonFormatter(logging.Formatter):
     """Minimal structured formatter with an explicit safe-field allowlist."""
 
-    _safe_fields = ("event", "error_code", "command_type", "result", "component")
+    _safe_fields = (
+        "event",
+        "error_code",
+        "error_type",
+        "command_type",
+        "result",
+        "component",
+        "venue",
+        "account_id",
+        "capability",
+        "attempt",
+    )
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
