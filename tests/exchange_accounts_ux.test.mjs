@@ -31,8 +31,8 @@ test('production account cards expose the exact-account detail workflow', () => 
   assert.match(routerSource, /venueAccountMatch = path\.match\(\/\^\\\/venues\\\/\(\[\^\/\]\+\)\$\/\)/);
   assert.match(routerSource, /renderVenueAccountDetail\(venueAccountMatch\[1\]\)/);
   assert.match(indexSource, /execution\.js\?v=192/);
-  assert.match(indexSource, /accounts\.js\?v=179/);
-  assert.match(serviceWorkerSource, /trading-shell-v224/);
+  assert.match(indexSource, /accounts\.js\?v=180/);
+  assert.match(serviceWorkerSource, /trading-shell-v225/);
 });
 
 test('account detail trusts fresh exact-account facts instead of API-local worker flags', () => {

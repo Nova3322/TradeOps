@@ -77,6 +77,11 @@ def test_connection_projection_fails_closed_without_database_bindings() -> None:
 def test_connection_projection_uses_fresh_worker_health_not_api_local_flags() -> None:
     now = datetime(2026, 8, 19, 12, tzinfo=UTC)
     health = {
+        "BINANCE": {
+            "status": "FAILED",
+            "error_code": "LEGACY_PROCESS_LOCAL_STATUS",
+            "checked_at": (now - timedelta(days=1)).isoformat(),
+        },
         "BINANCE:binance-main": {
             "status": "SUCCESS",
             "checked_at": now.isoformat(),

@@ -55,13 +55,15 @@ def _failure_category(error_code: str | None) -> tuple[str, str, str]:
 def _latest_health(
     source_health: Mapping[str, Mapping[str, Any]],
     source: str,
+    *,
+    prefer_scoped: bool = False,
 ) -> Mapping[str, Any] | None:
     direct = source_health.get(source)
-    if direct is not None:
+    if direct is not None and not prefer_scoped:
         return direct
     matches = [value for key, value in source_health.items() if key.startswith(f"{source}:")]
     if not matches:
-        return None
+        return direct
     if any(item.get("status") == "FAILED" for item in matches):
         return next(item for item in matches if item.get("status") == "FAILED")
     if all(item.get("status") == "SUCCESS" for item in matches):
@@ -186,7 +188,7 @@ def project_runtime_connections(
             credential_state=("COMPLETE" if int(binding_counts.get(venue, 0)) > 0 else "MISSING"),
             config_complete=int(binding_counts.get(venue, 0)) > 0,
             health=_fresh_exchange_health(
-                _latest_health(source_health, venue),
+                _latest_health(source_health, venue, prefer_scoped=True),
                 now=now,
                 stale_after_seconds=fact_stale_after_seconds,
             ),
