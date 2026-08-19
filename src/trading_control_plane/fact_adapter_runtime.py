@@ -10,7 +10,6 @@ from typing import Any, cast
 
 import uvicorn
 from fastapi import FastAPI
-from sqlalchemy import select
 
 from trading_control_plane.adapters.facts import (
     CcxtProFactAdapter,
@@ -34,7 +33,6 @@ from trading_control_plane.freqtrade import (
     freqtrade_pair,
 )
 from trading_control_plane.logging import configure_logging
-from trading_control_plane.models import Instrument
 from trading_control_plane.service import (
     PreparedFreqtradeWorkerBinding,
     PreparedRuntimeAccountBinding,
@@ -399,7 +397,7 @@ class FreqtradeRpcRuntime:
         self._running.clear()
 
 
-def _database_symbol_provider(database: Database, settings: Settings) -> SymbolProvider:
+def _bootstrap_symbol_provider(settings: Settings) -> SymbolProvider:
     bootstrap = {
         "BINANCE": settings.runtime_binance_symbol,
         "HYPERLIQUID": settings.runtime_hyperliquid_symbol,
@@ -408,18 +406,11 @@ def _database_symbol_provider(database: Database, settings: Settings) -> SymbolP
     }
 
     def provider(venue: str) -> tuple[str, ...]:
-        with database.session_factory() as session:
-            symbols = tuple(
-                session.scalars(
-                    select(Instrument.symbol)
-                    .where(Instrument.venue == venue, Instrument.active.is_(True))
-                    .order_by(Instrument.symbol)
-                ).all()
-            )
-        # The adapter itself loads the authoritative exchange market catalog.
-        # This single bootstrap symbol only breaks the cold-start cycle before
-        # that catalog has been persisted; it is not a trading allowlist.
-        return symbols or (bootstrap[venue],)
+        # Account-wide position and order reads add every externally discovered
+        # live symbol.  Starting from the full persisted market catalog would
+        # turn a small account fact stream into hundreds of WebSocket ticker
+        # subscriptions and can make the venue close the connection.
+        return (bootstrap[venue],)
 
     return provider
 
@@ -460,7 +451,7 @@ def create_runtime_app(
         settings=resolved_settings,
         registry=registry,
         binding_provider=service.runtime_account_bindings,
-        symbol_provider=_database_symbol_provider(resolved_database, resolved_settings),
+        symbol_provider=_bootstrap_symbol_provider(resolved_settings),
         exchange_factory=exchange_factory,
         snapshot_consumer=persist_snapshot,
     )
