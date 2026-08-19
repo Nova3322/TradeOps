@@ -202,6 +202,37 @@ class FakeCcxtReconnectingExchange(FakeCcxtRestOnlyExchange):
         raise AssertionError("unreachable")
 
 
+class FakeCcxtBlockingSnapshotExchange(FakeCcxtRestOnlyExchange):
+    def __init__(self, *, fail: bool = False) -> None:
+        super().__init__()
+        self.fail = fail
+        self.balance_calls = 0
+        self.snapshot_started = asyncio.Event()
+        self.snapshot_release = asyncio.Event()
+
+    async def fetch_balance(self) -> Mapping[str, Any]:
+        self.balance_calls += 1
+        self.snapshot_started.set()
+        await self.snapshot_release.wait()
+        if self.fail:
+            raise OSError("fixture snapshot failure")
+        return await super().fetch_balance()
+
+
+class FakeCcxtFailedReconnectExchange(FakeCcxtRestOnlyExchange):
+    def __init__(self) -> None:
+        super().__init__()
+        self.has["watchBalance"] = True
+        self.balance_calls = 0
+
+    async def fetch_balance(self) -> Mapping[str, Any]:
+        self.balance_calls += 1
+        return await super().fetch_balance()
+
+    async def watch_balance(self) -> Mapping[str, Any]:
+        raise OSError("fixture reconnect remains unavailable")
+
+
 class FakeCcxtAccountWideExchange(FakeCcxtProExchange):
     async def load_markets(self) -> Mapping[str, Any]:
         markets = dict(await super().load_markets())
@@ -677,6 +708,244 @@ def test_websocket_disconnect_reconnects_then_rest_compensates_before_increment(
     asyncio.run(scenario())
 
 
+def test_reconciliation_jitter_is_scope_stable_bounded_and_distributed() -> None:
+    def supervisor(account_id: str) -> FactStreamSupervisor:
+        adapter = CcxtProFactAdapter(
+            _scope(account_id=account_id),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: FakeCcxtRestOnlyExchange(),
+            clock=lambda: _NOW,
+        )
+        return FactStreamSupervisor(FactAdapterRegistry(), adapter, reconciliation_seconds=300)
+
+    first = supervisor("account-a")
+    restarted = supervisor("account-a")
+    other = supervisor("account-b")
+
+    assert first.reconciliation_delay_seconds == restarted.reconciliation_delay_seconds
+    assert 240 <= first.reconciliation_delay_seconds <= 300
+    assert 240 <= other.reconciliation_delay_seconds <= 300
+    assert first.reconciliation_delay_seconds != other.reconciliation_delay_seconds
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_snapshot_refresh_is_per_scope_single_flight_and_propagates_failure(fail: bool) -> None:
+    async def scenario() -> None:
+        exchange = FakeCcxtBlockingSnapshotExchange(fail=fail)
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: exchange,
+            clock=lambda: _NOW,
+        )
+        registry = FactAdapterRegistry()
+        await registry.register(adapter)
+        supervisor = FactStreamSupervisor(registry, adapter)
+
+        periodic = asyncio.create_task(supervisor.refresh("PERIODIC_RECONCILIATION"))
+        await exchange.snapshot_started.wait()
+        gap = asyncio.create_task(supervisor.refresh("SEQUENCE_GAP_COMPENSATION"))
+        await asyncio.sleep(0)
+        exchange.snapshot_release.set()
+        outcomes = await asyncio.gather(periodic, gap, return_exceptions=True)
+
+        assert exchange.balance_calls == 1
+        assert adapter.metrics.snapshot_started == 1
+        assert adapter.metrics.snapshot_joined == 1
+        if fail:
+            assert all(isinstance(item, DomainRejected) for item in outcomes)
+            assert adapter.metrics.snapshot_failed == 1
+            with pytest.raises(DomainRejected, match="FACT_SNAPSHOT_UNKNOWN"):
+                await registry.latest(adapter.scope.key, stale_after=timedelta(days=1))
+        else:
+            assert outcomes == [None, None]
+            current = await registry.latest(adapter.scope.key, stale_after=timedelta(days=1))
+            assert current.reason == "SEQUENCE_GAP_COMPENSATION"
+            assert current.metrics.snapshot_completed == 1
+            assert current.metrics.sequence_compensations == 1
+            assert current.metrics.periodic_reconciliations == 0
+        await registry.close()
+
+    asyncio.run(scenario())
+
+
+def test_continuous_websocket_failure_does_not_create_rest_snapshot_storm() -> None:
+    async def scenario() -> None:
+        exchange = FakeCcxtFailedReconnectExchange()
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: exchange,
+            clock=lambda: _NOW,
+        )
+        registry = FactAdapterRegistry()
+        await registry.register(adapter)
+        delays: list[float] = []
+
+        async def sleeper(delay: float) -> None:
+            delays.append(delay)
+
+        supervisor = FactStreamSupervisor(
+            registry,
+            adapter,
+            reconnect_initial_seconds=0.1,
+            reconnect_max_seconds=1,
+            max_reconnect_attempts=2,
+            sleeper=sleeper,
+        )
+        with pytest.raises(DomainRejected, match="FACT_ADAPTER_WEBSOCKET_UNAVAILABLE"):
+            await supervisor.run()
+
+        current = await registry.latest(adapter.scope.key, stale_after=timedelta(days=1))
+        assert exchange.balance_calls == 1
+        assert delays == [0.1, 0.2]
+        assert current.data_status == "UNKNOWN"
+        assert "FACT_ADAPTER_WEBSOCKET_UNAVAILABLE" in current.unknown_fields
+        assert (await registry.health(stale_after=timedelta(days=1)))["status"] == "not_ready"
+        await registry.close()
+
+    asyncio.run(scenario())
+
+
+def test_repeated_identical_scope_gap_is_cooled_down_and_remains_unknown() -> None:
+    async def scenario() -> None:
+        seed_adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: FakeCcxtRestOnlyExchange(),
+            clock=lambda: _NOW,
+        )
+        seed = await seed_adapter.snapshot(reason="INITIAL")
+
+        class RepeatedGapAdapter:
+            scope = seed.scope
+            watch_channels = ("POSITION",)
+
+            def __init__(self) -> None:
+                self.snapshot_calls = 0
+                self.watch_calls = 0
+                self.steady_state = asyncio.Event()
+
+            async def snapshot(self, *, reason, observed_at=None):
+                del observed_at
+                self.snapshot_calls += 1
+                return replace(
+                    seed,
+                    snapshot_version=self.snapshot_calls,
+                    observed_at=datetime.now(UTC),
+                    reason=reason,
+                    data_status="CURRENT",
+                    unknown_fields=(),
+                )
+
+            async def watch(self, kind):
+                assert kind == "POSITION"
+                self.watch_calls += 1
+                if self.watch_calls <= 2:
+                    return {
+                        "positions": [
+                            {
+                                "native_symbol": "ETHUSDT",
+                                "side": "long",
+                                "quantity": "1",
+                            }
+                        ]
+                    }
+                self.steady_state.set()
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+            async def close(self) -> None:
+                return None
+
+        adapter = RepeatedGapAdapter()
+        registry = FactAdapterRegistry()
+        await registry.register(adapter)
+        supervisor = FactStreamSupervisor(registry, adapter, gap_cooldown_seconds=60)
+        task = asyncio.create_task(supervisor.run())
+        await asyncio.wait_for(adapter.steady_state.wait(), timeout=1)
+        current = None
+        for _ in range(40):
+            current = await registry.latest(adapter.scope.key, stale_after=timedelta(days=1))
+            if adapter.snapshot_calls == 2 and current.data_status == "UNKNOWN":
+                break
+            await asyncio.sleep(0)
+
+        assert adapter.snapshot_calls == 2
+        assert current is not None
+        assert current.data_status == "UNKNOWN"
+        assert any(field.startswith("sequence_gap:") for field in current.unknown_fields)
+        supervisor.stop()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await registry.close()
+        await seed_adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_rest_only_fallback_has_an_explicit_hourly_cap() -> None:
+    async def scenario() -> None:
+        seed_adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: FakeCcxtRestOnlyExchange(),
+            clock=lambda: _NOW,
+        )
+        seed = await seed_adapter.snapshot(reason="INITIAL")
+
+        class RestOnlyAdapter:
+            scope = seed.scope
+            watch_channels: tuple = ()
+
+            def __init__(self) -> None:
+                self.snapshot_calls = 0
+
+            async def snapshot(self, *, reason, observed_at=None):
+                del observed_at
+                self.snapshot_calls += 1
+                return replace(
+                    seed,
+                    snapshot_version=self.snapshot_calls,
+                    observed_at=datetime.now(UTC),
+                    reason=reason,
+                )
+
+            async def watch(self, kind):
+                raise AssertionError(kind)
+
+            async def close(self) -> None:
+                return None
+
+        adapter = RestOnlyAdapter()
+        registry = FactAdapterRegistry()
+        await registry.register(adapter)
+        sleep_calls = 0
+        supervisor: FactStreamSupervisor
+
+        async def sleeper(_delay: float) -> None:
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls == 5:
+                supervisor.stop()
+
+        supervisor = FactStreamSupervisor(
+            registry,
+            adapter,
+            fallback_seconds=30,
+            fallback_max_per_hour=2,
+            sleeper=sleeper,
+        )
+        await supervisor.run()
+
+        assert sleep_calls == 5
+        assert adapter.snapshot_calls == 3  # INITIAL plus two bounded fallbacks.
+        await registry.close()
+        await seed_adapter.close()
+
+    asyncio.run(scenario())
+
+
 def test_increment_persistence_is_coalesced_without_losing_latest_state() -> None:
     async def scenario() -> None:
         adapter = CcxtProFactAdapter(
@@ -760,17 +1029,18 @@ def test_non_authoritative_position_increment_preserves_absent_positions_until_s
             "BTCUSDT",
             "ETHUSDT",
         }
-        assert next(
-            row for row in increment.positions if row["native_symbol"] == "ETHUSDT"
-        )["quantity"] == "0.001"
+        assert (
+            next(row for row in increment.positions if row["native_symbol"] == "ETHUSDT")[
+                "quantity"
+            ]
+            == "0.001"
+        )
 
         authoritative = replace(
             initial,
             observed_at=datetime.now(UTC) + timedelta(seconds=1),
             reason="PERIODIC_RECONCILIATION",
-            positions=tuple(
-                row for row in initial.positions if row["native_symbol"] == "BTCUSDT"
-            ),
+            positions=tuple(row for row in initial.positions if row["native_symbol"] == "BTCUSDT"),
         )
         await registry.publish_snapshot(authoritative)
         normalized = normalize_fact_adapter_snapshot(

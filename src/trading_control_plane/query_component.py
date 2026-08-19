@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy import select
@@ -10,7 +11,16 @@ from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.models import Team, TeamMembership, User, Workspace, WorkspaceMembership
 from trading_control_plane.request_context import current_api_client_context
-from trading_control_plane.service import TradingService
+
+
+class QueryAccessPolicy(Protocol):
+    def can_user(
+        self,
+        user_id: UUID,
+        action: str,
+        account_id: str | None = None,
+        venue: str | None = None,
+    ) -> bool: ...
 
 
 def iso_datetime(value: datetime | None) -> str | None:
@@ -20,7 +30,7 @@ def iso_datetime(value: datetime | None) -> str | None:
 @dataclass(frozen=True, slots=True)
 class QueryRuntime:
     database: Database
-    service: TradingService
+    access_policy: QueryAccessPolicy
 
 
 class QueryComponent:
@@ -32,9 +42,14 @@ class QueryComponent:
     def database(self) -> Database:
         return self.runtime.database
 
-    @property
-    def service(self) -> TradingService:
-        return self.runtime.service
+    def can_user(
+        self,
+        user_id: UUID,
+        action: str,
+        account_id: str | None = None,
+        venue: str | None = None,
+    ) -> bool:
+        return self.runtime.access_policy.can_user(user_id, action, account_id, venue)
 
     def active_scope_ids(self, user_id: UUID) -> tuple[UUID, UUID]:
         """Resolve and validate the request actor's exact active workspace/team scope."""

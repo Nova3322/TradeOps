@@ -92,7 +92,7 @@ class AccountQueries(QueryComponent):
         """Resolve one capital account without depending on venue-listing RBAC."""
 
         workspace_id, team_id = self.active_scope_ids(actor_id)
-        if not self.service.can_user(actor_id, "capital.view", account_id, venue):
+        if not self.can_user(actor_id, "capital.view", account_id, venue):
             raise DomainRejected(
                 "RBAC_DENIED",
                 "capital account is outside the current assignment scope",
@@ -145,7 +145,7 @@ class AccountQueries(QueryComponent):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            if not self.service.can_user(
+            if not self.can_user(
                 actor_id,
                 "venue.view",
                 account.account_id,
@@ -229,7 +229,7 @@ class AccountQueries(QueryComponent):
             visible_accounts = [
                 item
                 for item in accounts
-                if self.service.can_user(
+                if self.can_user(
                     actor_id,
                     "venue.view",
                     item.account_id,
@@ -348,7 +348,7 @@ class AccountQueries(QueryComponent):
                 item
                 for item in accounts
                 if any(
-                    self.service.can_user(actor_id, action, item.account_id, item.venue)
+                    self.can_user(actor_id, action, item.account_id, item.venue)
                     for action in listing_actions
                 )
             ]
@@ -359,7 +359,7 @@ class AccountQueries(QueryComponent):
                     "account.credentials.manage",
                 }:
                     return False
-                return self.service.can_user(
+                return self.can_user(
                     actor_id,
                     action,
                     account.account_id,
@@ -521,7 +521,7 @@ class AccountQueries(QueryComponent):
         venue: str,
         environment: str,
     ) -> dict[str, Any]:
-        if not self.service.can_user(user_id, "view", account_id, venue):
+        if not self.can_user(user_id, "view", account_id, venue):
             raise DomainRejected("RBAC_DENIED", "venue facts are outside the current scope")
         workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:

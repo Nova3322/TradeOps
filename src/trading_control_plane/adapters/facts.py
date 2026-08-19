@@ -86,6 +86,16 @@ def _timestamp(value: object, *, fallback: datetime) -> str:
         return fallback.isoformat()
 
 
+def _integer_status(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
 def _fingerprint(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
@@ -153,6 +163,23 @@ class FactAdapterMetrics:
     duplicate_events: int
     out_of_order_events: int
     sequence_gaps: int
+    snapshot_started: int
+    snapshot_completed: int
+    snapshot_failed: int
+    snapshot_joined: int
+    snapshot_suppressed: int
+    reconnect_compensations: int
+    sequence_compensations: int
+    cooldown_suppressions: int
+    rate_limit_429: int
+    rate_limit_418: int
+    exchange_rate_limits: int
+    last_snapshot_reason: SnapshotReason | None
+    last_snapshot_started_at: str | None
+    last_snapshot_completed_at: str | None
+    last_success_at: str | None
+    last_failure_at: str | None
+    next_retry_at: str | None
 
     def to_dict(self) -> JsonObject:
         return {
@@ -165,6 +192,23 @@ class FactAdapterMetrics:
             "duplicate_events": self.duplicate_events,
             "out_of_order_events": self.out_of_order_events,
             "sequence_gaps": self.sequence_gaps,
+            "snapshot_started": self.snapshot_started,
+            "snapshot_completed": self.snapshot_completed,
+            "snapshot_failed": self.snapshot_failed,
+            "snapshot_joined": self.snapshot_joined,
+            "snapshot_suppressed": self.snapshot_suppressed,
+            "reconnect_compensations": self.reconnect_compensations,
+            "sequence_compensations": self.sequence_compensations,
+            "cooldown_suppressions": self.cooldown_suppressions,
+            "rate_limit_429": self.rate_limit_429,
+            "rate_limit_418": self.rate_limit_418,
+            "exchange_rate_limits": self.exchange_rate_limits,
+            "last_snapshot_reason": self.last_snapshot_reason,
+            "last_snapshot_started_at": self.last_snapshot_started_at,
+            "last_snapshot_completed_at": self.last_snapshot_completed_at,
+            "last_success_at": self.last_success_at,
+            "last_failure_at": self.last_failure_at,
+            "next_retry_at": self.next_retry_at,
         }
 
 
@@ -268,6 +312,23 @@ class _MutableMetrics:
     duplicate_events: int = 0
     out_of_order_events: int = 0
     sequence_gaps: int = 0
+    snapshot_started: int = 0
+    snapshot_completed: int = 0
+    snapshot_failed: int = 0
+    snapshot_joined: int = 0
+    snapshot_suppressed: int = 0
+    reconnect_compensations: int = 0
+    sequence_compensations: int = 0
+    cooldown_suppressions: int = 0
+    rate_limit_429: int = 0
+    rate_limit_418: int = 0
+    exchange_rate_limits: int = 0
+    last_snapshot_reason: SnapshotReason | None = None
+    last_snapshot_started_at: str | None = None
+    last_snapshot_completed_at: str | None = None
+    last_success_at: str | None = None
+    last_failure_at: str | None = None
+    next_retry_at: str | None = None
 
     def freeze(self) -> FactAdapterMetrics:
         return FactAdapterMetrics(
@@ -280,6 +341,23 @@ class _MutableMetrics:
             duplicate_events=self.duplicate_events,
             out_of_order_events=self.out_of_order_events,
             sequence_gaps=self.sequence_gaps,
+            snapshot_started=self.snapshot_started,
+            snapshot_completed=self.snapshot_completed,
+            snapshot_failed=self.snapshot_failed,
+            snapshot_joined=self.snapshot_joined,
+            snapshot_suppressed=self.snapshot_suppressed,
+            reconnect_compensations=self.reconnect_compensations,
+            sequence_compensations=self.sequence_compensations,
+            cooldown_suppressions=self.cooldown_suppressions,
+            rate_limit_429=self.rate_limit_429,
+            rate_limit_418=self.rate_limit_418,
+            exchange_rate_limits=self.exchange_rate_limits,
+            last_snapshot_reason=self.last_snapshot_reason,
+            last_snapshot_started_at=self.last_snapshot_started_at,
+            last_snapshot_completed_at=self.last_snapshot_completed_at,
+            last_success_at=self.last_success_at,
+            last_failure_at=self.last_failure_at,
+            next_retry_at=self.next_retry_at,
         )
 
 
@@ -413,6 +491,17 @@ class CcxtProFactAdapter:
                 "the CCXT exchange does not match the exact account venue",
             )
 
+    def _record_external_failure(self, exc: Exception) -> None:
+        self._metrics.last_failure_at = _utc(self._clock()).isoformat()
+        raw_status = getattr(exc, "status", getattr(exc, "status_code", None))
+        status = _integer_status(raw_status)
+        if status == 429:
+            self._metrics.rate_limit_429 += 1
+        elif status == 418:
+            self._metrics.rate_limit_418 += 1
+        elif "ratelimit" in type(exc).__name__.replace("_", "").lower():
+            self._metrics.exchange_rate_limits += 1
+
     @property
     def watch_channels(self) -> tuple[EventKind, ...]:
         return tuple(
@@ -443,7 +532,11 @@ class CcxtProFactAdapter:
                 f"CCXT advertised {capability} without its callable contract",
             )
         self._metrics.rest_requests[capability] = self._metrics.rest_requests.get(capability, 0) + 1
-        return await cast(Callable[..., Awaitable[Any]], method)(*args)
+        try:
+            return await cast(Callable[..., Awaitable[Any]], method)(*args)
+        except Exception as exc:
+            self._record_external_failure(exc)
+            raise
 
     async def _load_markets(self) -> Mapping[str, Any]:
         if self._markets_loaded:
@@ -459,7 +552,11 @@ class CcxtProFactAdapter:
         self._metrics.rest_requests["loadMarkets"] = (
             self._metrics.rest_requests.get("loadMarkets", 0) + 1
         )
-        raw = await cast(Callable[[], Awaitable[Any]], method)()
+        try:
+            raw = await cast(Callable[[], Awaitable[Any]], method)()
+        except Exception as exc:
+            self._record_external_failure(exc)
+            raise
         if not isinstance(raw, Mapping):
             raise DomainRejected(
                 "FACT_ADAPTER_RESPONSE_INVALID", "CCXT markets response is invalid"
@@ -886,6 +983,7 @@ class CcxtProFactAdapter:
                     list(tracked_symbols)
                 )
             except Exception as exc:
+                self._record_external_failure(exc)
                 logger.warning(
                     "Optional exchange ticker snapshot failed",
                     extra={
@@ -915,6 +1013,10 @@ class CcxtProFactAdapter:
             "SEQUENCE_GAP_COMPENSATION",
         }:
             self._metrics.rest_compensations += 1
+            if reason == "RECONNECT_COMPENSATION":
+                self._metrics.reconnect_compensations += 1
+            else:
+                self._metrics.sequence_compensations += 1
         elif reason == "PERIODIC_RECONCILIATION":
             self._metrics.periodic_reconciliations += 1
         elif reason == "LIMITED_REST_FALLBACK":
@@ -1200,6 +1302,28 @@ class FactAdapterRegistry:
             state.snapshot = snapshot
             return self._publish_locked(state, "SNAPSHOT", {"snapshot": snapshot.to_dict()})
 
+    async def mark_unknown(self, scope_key: str, *, field: str) -> None:
+        async with self._lock:
+            state = self._states.get(scope_key)
+            if state is None:
+                raise DomainRejected(
+                    "FACT_ADAPTER_SCOPE_NOT_FOUND", "the fact adapter scope is not registered"
+                )
+            snapshot = state.snapshot
+            if snapshot is None:
+                return
+            metrics = getattr(state.adapter, "_metrics", None)
+            state.snapshot = replace(
+                snapshot,
+                data_status="UNKNOWN",
+                unknown_fields=tuple(sorted({*snapshot.unknown_fields, field})),
+                metrics=(
+                    snapshot.metrics
+                    if not isinstance(metrics, _MutableMetrics)
+                    else metrics.freeze()
+                ),
+            )
+
     def _remember_fingerprint(self, state: _RegistryState, fingerprint: str) -> bool:
         if fingerprint in state.fingerprint_set:
             metrics = getattr(state.adapter, "_metrics", None)
@@ -1387,7 +1511,7 @@ class FactAdapterRegistry:
                     "FACT_SNAPSHOT_UNKNOWN", "the account fact snapshot is not yet known"
                 )
             snapshot = state.snapshot
-        if _utc() - snapshot.observed_at <= stale_after:
+        if snapshot.data_status == "UNKNOWN" or _utc() - snapshot.observed_at <= stale_after:
             return snapshot
         return ExchangeFactSnapshot(
             scope=snapshot.scope,
@@ -1451,7 +1575,11 @@ class FactAdapterRegistry:
         now = _utc()
         async with self._lock:
             states = tuple(self._states.items())
-        unknown = sorted(key for key, state in states if state.snapshot is None)
+        unknown = sorted(
+            key
+            for key, state in states
+            if state.snapshot is None or state.snapshot.data_status == "UNKNOWN"
+        )
         stale = sorted(
             key
             for key, state in states
@@ -1481,6 +1609,15 @@ class FactAdapterRegistry:
 class FactStreamSupervisor:
     """WebSocket-first fact loop with bounded recovery and REST compensation."""
 
+    _REASON_PRIORITY: Mapping[SnapshotReason, int] = {
+        "LIMITED_REST_FALLBACK": 1,
+        "PERIODIC_RECONCILIATION": 2,
+        "INITIAL": 3,
+        "RECONNECT_COMPENSATION": 4,
+        "SEQUENCE_GAP_COMPENSATION": 5,
+        "WEBSOCKET_INCREMENT": 0,
+    }
+
     def __init__(
         self,
         registry: FactAdapterRegistry,
@@ -1494,6 +1631,8 @@ class FactStreamSupervisor:
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
         snapshot_callback: Callable[[ExchangeFactSnapshot], Awaitable[None]] | None = None,
         persistence_coalesce_seconds: float = 1.0,
+        gap_cooldown_seconds: float = 60,
+        fallback_max_per_hour: int = 12,
     ) -> None:
         if not 30 <= reconciliation_seconds <= 3_600:
             raise ValueError("fact reconciliation interval is outside its bounded range")
@@ -1505,6 +1644,10 @@ class FactStreamSupervisor:
             raise ValueError("fact reconnect attempts are outside their bounded range")
         if not 0 <= persistence_coalesce_seconds <= 5:
             raise ValueError("fact persistence coalescing is outside its bounded range")
+        if not 1 <= gap_cooldown_seconds <= 900:
+            raise ValueError("fact gap cooldown is outside its bounded range")
+        if not 1 <= fallback_max_per_hour <= 60:
+            raise ValueError("fact fallback budget is outside its bounded range")
         self.registry = registry
         self.adapter = adapter
         self.reconciliation_seconds = reconciliation_seconds
@@ -1515,9 +1658,23 @@ class FactStreamSupervisor:
         self.sleeper = sleeper
         self.snapshot_callback = snapshot_callback
         self.persistence_coalesce_seconds = persistence_coalesce_seconds
+        self.gap_cooldown_seconds = gap_cooldown_seconds
+        self.fallback_max_per_hour = fallback_max_per_hour
         self._stop = asyncio.Event()
         self._callback_task: asyncio.Task[None] | None = None
         self._last_callback_at = 0.0
+        self._snapshot_lock = asyncio.Lock()
+        self._snapshot_task: asyncio.Task[None] | None = None
+        self._snapshot_reason: SnapshotReason | None = None
+        self._reconnect_attempts = 0
+        self._gap_compensated_at: dict[str, float] = {}
+        self._fallback_started_at: deque[float] = deque()
+
+    @property
+    def reconciliation_delay_seconds(self) -> float:
+        digest = hashlib.sha256(self.adapter.scope.key.encode()).digest()
+        fraction = int.from_bytes(digest[:8], "big") / ((1 << 64) - 1)
+        return self.reconciliation_seconds * (0.8 + 0.2 * fraction)
 
     async def _persist_current(self) -> None:
         if self.snapshot_callback is None:
@@ -1562,11 +1719,99 @@ class FactStreamSupervisor:
             name=f"fact-persist:{self.adapter.scope.key}",
         )
 
-    async def _snapshot(self, reason: SnapshotReason) -> None:
-        snapshot = await self.adapter.snapshot(reason=reason)
+    @staticmethod
+    def _move_reason_metric(
+        metrics: _MutableMetrics,
+        previous: SnapshotReason,
+        current: SnapshotReason,
+    ) -> None:
+        if previous == current:
+            return
+        if previous in {"RECONNECT_COMPENSATION", "SEQUENCE_GAP_COMPENSATION"}:
+            metrics.rest_compensations -= 1
+            if previous == "RECONNECT_COMPENSATION":
+                metrics.reconnect_compensations -= 1
+            else:
+                metrics.sequence_compensations -= 1
+        elif previous == "PERIODIC_RECONCILIATION":
+            metrics.periodic_reconciliations -= 1
+        elif previous == "LIMITED_REST_FALLBACK":
+            metrics.limited_rest_fallbacks -= 1
+        if current in {"RECONNECT_COMPENSATION", "SEQUENCE_GAP_COMPENSATION"}:
+            metrics.rest_compensations += 1
+            if current == "RECONNECT_COMPENSATION":
+                metrics.reconnect_compensations += 1
+            else:
+                metrics.sequence_compensations += 1
+        elif current == "PERIODIC_RECONCILIATION":
+            metrics.periodic_reconciliations += 1
+        elif current == "LIMITED_REST_FALLBACK":
+            metrics.limited_rest_fallbacks += 1
+
+    async def _execute_snapshot(self) -> None:
+        reason = self._snapshot_reason
+        if reason is None:
+            raise RuntimeError("snapshot reason is missing")
+        metrics = getattr(self.adapter, "_metrics", None)
+        if isinstance(metrics, _MutableMetrics):
+            started_at = _utc()
+            metrics.snapshot_started += 1
+            metrics.last_snapshot_reason = reason
+            metrics.last_snapshot_started_at = started_at.isoformat()
+        try:
+            snapshot = await self.adapter.snapshot(reason=reason)
+        except Exception:
+            if isinstance(metrics, _MutableMetrics):
+                metrics.snapshot_failed += 1
+                metrics.last_failure_at = _utc().isoformat()
+            raise
+        effective_reason = self._snapshot_reason or reason
+        if isinstance(metrics, _MutableMetrics):
+            self._move_reason_metric(metrics, reason, effective_reason)
+            completed_at = _utc()
+            metrics.snapshot_completed += 1
+            metrics.last_snapshot_reason = effective_reason
+            metrics.last_snapshot_completed_at = completed_at.isoformat()
+            metrics.last_success_at = completed_at.isoformat()
+            metrics.next_retry_at = None
+            snapshot = replace(
+                snapshot,
+                reason=effective_reason,
+                metrics=metrics.freeze(),
+            )
+        elif effective_reason != reason:
+            snapshot = replace(snapshot, reason=effective_reason)
         await self.registry.publish_snapshot(snapshot)
         if self.snapshot_callback is not None:
             await self._flush_callback()
+
+    async def refresh(self, reason: SnapshotReason) -> None:
+        async with self._snapshot_lock:
+            task = self._snapshot_task
+            if task is None or task.done():
+                self._snapshot_reason = reason
+                task = asyncio.create_task(
+                    self._execute_snapshot(),
+                    name=f"fact-snapshot:{self.adapter.scope.key}",
+                )
+                self._snapshot_task = task
+            else:
+                metrics = getattr(self.adapter, "_metrics", None)
+                if isinstance(metrics, _MutableMetrics):
+                    metrics.snapshot_joined += 1
+                current = self._snapshot_reason
+                if (
+                    current is None
+                    or self._REASON_PRIORITY[reason] > self._REASON_PRIORITY[current]
+                ):
+                    self._snapshot_reason = reason
+        try:
+            await asyncio.shield(task)
+        finally:
+            async with self._snapshot_lock:
+                if self._snapshot_task is task and task.done():
+                    self._snapshot_task = None
+                    self._snapshot_reason = None
 
     async def _watch_channel(
         self,
@@ -1600,14 +1845,40 @@ class FactStreamSupervisor:
             for row in rows
         )
 
-    async def _run_connected(self) -> None:
+    @staticmethod
+    def _gap_identity(kind: EventKind, payload: JsonObject) -> str:
+        field = "positions" if kind == "POSITION" else "orders"
+        rows = payload.get(field)
+        identities: list[str] = []
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, Mapping):
+                    identities.append(str(row.get("native_symbol") or "MISSING"))
+                else:
+                    identities.append("INVALID")
+        else:
+            identities.append("INVALID")
+        return _fingerprint({"kind": kind, "identities": sorted(identities)})
+
+    async def _run_connected(self, *, reconnecting: bool) -> None:
         channels = self.adapter.watch_channels
         if not channels:
+            loop = asyncio.get_running_loop()
             while not self._stop.is_set():
                 await self.sleeper(float(self.fallback_seconds))
                 if self._stop.is_set():
                     return
-                await self._snapshot("LIMITED_REST_FALLBACK")
+                now = loop.time()
+                while self._fallback_started_at and now - self._fallback_started_at[0] >= 3_600:
+                    self._fallback_started_at.popleft()
+                if len(self._fallback_started_at) >= self.fallback_max_per_hour:
+                    metrics = getattr(self.adapter, "_metrics", None)
+                    if isinstance(metrics, _MutableMetrics):
+                        metrics.snapshot_suppressed += 1
+                        metrics.cooldown_suppressions += 1
+                    continue
+                self._fallback_started_at.append(now)
+                await self.refresh("LIMITED_REST_FALLBACK")
             return
         metrics = getattr(self.adapter, "_metrics", None)
         if isinstance(metrics, _MutableMetrics):
@@ -1616,7 +1887,7 @@ class FactStreamSupervisor:
         tasks = [asyncio.create_task(self._watch_channel(kind, queue)) for kind in channels]
         queue_task: asyncio.Task[tuple[EventKind, JsonObject]] | None = None
         loop = asyncio.get_running_loop()
-        next_reconciliation = loop.time() + self.reconciliation_seconds
+        next_reconciliation = loop.time() + self.reconciliation_delay_seconds
         try:
             while not self._stop.is_set():
                 queue_task = asyncio.create_task(queue.get())
@@ -1638,25 +1909,47 @@ class FactStreamSupervisor:
                     queue_task.cancel()
                     await asyncio.gather(queue_task, return_exceptions=True)
                     queue_task = None
-                    await self._snapshot("PERIODIC_RECONCILIATION")
-                    next_reconciliation = loop.time() + self.reconciliation_seconds
+                    await self.refresh("PERIODIC_RECONCILIATION")
+                    next_reconciliation = loop.time() + self.reconciliation_delay_seconds
                     continue
                 kind, payload = queue_task.result()
                 queue_task = None
-                if await self._requires_scope_compensation(kind, payload):
+                requires_compensation = await self._requires_scope_compensation(kind, payload)
+                if reconnecting:
+                    self._reconnect_attempts = 0
+                    reconnecting = False
+                    if not requires_compensation:
+                        await self.refresh("RECONNECT_COMPENSATION")
+                        next_reconciliation = loop.time() + self.reconciliation_delay_seconds
+                if requires_compensation:
                     # A position/order opened outside Freqtrade can introduce a
                     # market not present in the previous snapshot.  Rebuild the
                     # account-wide snapshot before exposing the increment so
                     # instruments, marks and balances remain internally complete.
-                    await self._snapshot("SEQUENCE_GAP_COMPENSATION")
-                    next_reconciliation = loop.time() + self.reconciliation_seconds
+                    gap_identity = self._gap_identity(kind, payload)
+                    await self.registry.mark_unknown(
+                        self.adapter.scope.key,
+                        field=f"sequence_gap:{gap_identity}",
+                    )
+                    if self.snapshot_callback is not None:
+                        await self._flush_callback()
+                    now = loop.time()
+                    last_attempt = self._gap_compensated_at.get(gap_identity)
+                    if last_attempt is not None and now - last_attempt < self.gap_cooldown_seconds:
+                        if isinstance(metrics, _MutableMetrics):
+                            metrics.snapshot_suppressed += 1
+                            metrics.cooldown_suppressions += 1
+                        continue
+                    self._gap_compensated_at[gap_identity] = now
+                    await self.refresh("SEQUENCE_GAP_COMPENSATION")
+                    next_reconciliation = loop.time() + self.reconciliation_delay_seconds
                     continue
                 event = await self.registry.publish(self.adapter.scope.key, kind, payload)
                 if event is not None and self.snapshot_callback is not None:
                     await self._schedule_callback()
                 if loop.time() >= next_reconciliation:
-                    await self._snapshot("PERIODIC_RECONCILIATION")
-                    next_reconciliation = loop.time() + self.reconciliation_seconds
+                    await self.refresh("PERIODIC_RECONCILIATION")
+                    next_reconciliation = loop.time() + self.reconciliation_delay_seconds
         finally:
             if queue_task is not None:
                 queue_task.cancel()
@@ -1671,16 +1964,15 @@ class FactStreamSupervisor:
                 self._callback_task = None
 
     async def run(self) -> None:
-        await self._snapshot("INITIAL")
-        attempts = 0
+        await self.refresh("INITIAL")
         while not self._stop.is_set():
             try:
-                await self._run_connected()
-                attempts = 0
+                await self._run_connected(reconnecting=self._reconnect_attempts > 0)
+                self._reconnect_attempts = 0
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                attempts += 1
+                self._reconnect_attempts += 1
                 metrics = getattr(self.adapter, "_metrics", None)
                 if isinstance(metrics, _MutableMetrics):
                     metrics.websocket_reconnects += 1
@@ -1691,21 +1983,29 @@ class FactStreamSupervisor:
                         "component": "fact-adapter",
                         "venue": self.adapter.scope.venue,
                         "account_id": self.adapter.scope.account_id,
-                        "attempt": attempts,
+                        "attempt": self._reconnect_attempts,
                         "error_type": type(exc).__name__,
                     },
                 )
-                if attempts > self.max_reconnect_attempts:
+                if self._reconnect_attempts > self.max_reconnect_attempts:
+                    await self.registry.mark_unknown(
+                        self.adapter.scope.key,
+                        field="FACT_ADAPTER_WEBSOCKET_UNAVAILABLE",
+                    )
+                    if self.snapshot_callback is not None:
+                        await self._flush_callback()
                     raise DomainRejected(
                         "FACT_ADAPTER_WEBSOCKET_UNAVAILABLE",
                         "the fact stream exceeded its bounded reconnect attempts",
                     ) from exc
                 delay = min(
                     self.reconnect_max_seconds,
-                    self.reconnect_initial_seconds * (2 ** (attempts - 1)),
+                    self.reconnect_initial_seconds * (2 ** (self._reconnect_attempts - 1)),
                 )
+                if isinstance(metrics, _MutableMetrics):
+                    metrics.last_failure_at = _utc().isoformat()
+                    metrics.next_retry_at = (_utc() + timedelta(seconds=delay)).isoformat()
                 await self.sleeper(delay)
-                await self._snapshot("RECONNECT_COMPENSATION")
 
     def stop(self) -> None:
         self._stop.set()

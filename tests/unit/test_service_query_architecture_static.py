@@ -155,6 +155,27 @@ def test_core_god_namespaces_are_retired() -> None:
     assert not (PACKAGE / "query_core.py").exists()
 
 
+def test_query_runtime_exposes_only_read_only_authorization() -> None:
+    component = PACKAGE / "query_component.py"
+    queries = PACKAGE / "queries.py"
+    assert "trading_control_plane.service" not in _imports(component)
+    assert "trading_control_plane.service" not in _imports(queries)
+    runtime = next(
+        node
+        for node in _tree(component).body
+        if isinstance(node, ast.ClassDef) and node.name == "QueryRuntime"
+    )
+    annotations = {
+        node.target.id: ast.unparse(node.annotation)
+        for node in runtime.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    }
+    assert annotations == {"database": "Database", "access_policy": "QueryAccessPolicy"}
+    for path in QUERY_DOMAINS.glob("*.py"):
+        source = path.read_text()
+        assert "self.service" not in source, path
+
+
 def test_internal_import_graph_has_no_cycle() -> None:
     modules = {
         "trading_control_plane." + ".".join(path.relative_to(PACKAGE).with_suffix("").parts): path
