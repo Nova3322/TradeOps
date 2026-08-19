@@ -609,7 +609,7 @@
       "purl": "pkg:pypi/aiohttp@3.14.1",
       "licenses": [
         {
-          "expression": "NOASSERTION"
+          "expression": "Apache-2.0 AND MIT"
         }
       ],
       "properties": [
@@ -1691,7 +1691,7 @@
       "purl": "pkg:pypi/multidict@6.7.1",
       "licenses": [
         {
-          "expression": "NOASSERTION"
+          "expression": "Apache-2.0"
         }
       ],
       "properties": [
@@ -2953,7 +2953,7 @@
       ],
       "licenses": [
         {
-          "expression": "NOASSERTION"
+          "expression": "MIT"
         }
       ]
     },
