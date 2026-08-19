@@ -292,6 +292,7 @@ function formatDirectCapitalBlocker(code) {
     SAFE_PREFLIGHT_REJECTED:'Safe 链上实时预检未通过',
     SAFE_RESPONSE_INVALID:'Safe RPC 返回的数据无效',
     SAFE_ALLOWANCE_PREFLIGHT_REQUIRED:'必须读取 Safe 当前额度、余额、重置周期与 nonce',
+    CAPITAL_DIRECT_OPERATION_EXPIRED:'操作已过期且从未提交；资金保持原位，请新建操作并重新读取实时状态',
   }[code] || code);
 }
 
@@ -1448,6 +1449,7 @@ async function renderCapitalCenter() {
     const blockers = blockerCodes.map(formatDirectCapitalBlocker);
     const pendingPreflights = blockerCodes.filter(code => DIRECT_CAPITAL_PREFLIGHT_BLOCKERS.has(code));
     const hardBlockers = blockerCodes.filter(code => !DIRECT_CAPITAL_PREFLIGHT_BLOCKERS.has(code));
+    const operationExpired = blockerCodes.includes('CAPITAL_DIRECT_OPERATION_EXPIRED');
     const safeOutbound = operation.path === 'VAULT_TO_BINANCE' || operation.path === 'VAULT_TO_HYPERLIQUID';
     const frozenStages = operation.stages || [];
     const binancePreview = [...frozenStages].reverse().find(stage => stage.artifact?.kind?.startsWith('BINANCE_'));
@@ -1478,7 +1480,7 @@ async function renderCapitalCenter() {
     const treasuryPreviewExecutable = safePreview
       ? Boolean(safePreview.signature_request?.to && safePreview.signature_request?.data)
       : Boolean(notiltPreview?.wallet_address && notiltPreview?.transactions?.length);
-    const treasuryActionKey = treasuryPreview && treasuryPreviewExecutable && !treasuryAlreadySubmitted ? `${operation.operation_id}:${treasuryStage}` : '';
+    const treasuryActionKey = !operationExpired && treasuryPreview && treasuryPreviewExecutable && !treasuryAlreadySubmitted ? `${operation.operation_id}:${treasuryStage}` : '';
     if (treasuryActionKey) {
       directCapitalWalletActions.set(treasuryActionKey, safePreview ? {
         operationId:operation.operation_id, version:operation.version, stage:treasuryStage,
@@ -1492,31 +1494,31 @@ async function renderCapitalCenter() {
         path:operation.path, treasuryProvider:operation.treasury_provider,
       });
     }
-    const notiltExecutionActionKey = notiltExecutionPreview && !notiltExecutionSubmission ? `${operation.operation_id}:NOTILT_RELEASE_EXECUTION` : '';
+    const notiltExecutionActionKey = !operationExpired && notiltExecutionPreview && !notiltExecutionSubmission ? `${operation.operation_id}:NOTILT_RELEASE_EXECUTION` : '';
     if (notiltExecutionActionKey) directCapitalWalletActions.set(notiltExecutionActionKey, {
       operationId:operation.operation_id, version:operation.version, stage:'NOTILT_RELEASE_EXECUTION',
       kind:'TRANSACTIONS', transactions:notiltExecutionPreview.transactions,
       expectedWallet:notiltExecutionPreview.wallet_address,
     });
-    const notiltDestinationActionKey = notiltDestinationPreview && !notiltDestinationSubmission ? `${operation.operation_id}:NOTILT_DESTINATION_TRANSFER` : '';
+    const notiltDestinationActionKey = !operationExpired && notiltDestinationPreview && !notiltDestinationSubmission ? `${operation.operation_id}:NOTILT_DESTINATION_TRANSFER` : '';
     if (notiltDestinationActionKey) directCapitalWalletActions.set(notiltDestinationActionKey, {
       operationId:operation.operation_id, version:operation.version, stage:'NOTILT_DESTINATION_TRANSFER',
       kind:'TRANSACTION', transaction:notiltDestinationPreview.artifact,
       expectedWallet:notiltDestinationPreview.artifact?.from,
     });
-    const hyperliquidActionKey = hyperliquidPreview && !walletSubmission ? `${operation.operation_id}:${walletStage}` : '';
+    const hyperliquidActionKey = !operationExpired && hyperliquidPreview && !walletSubmission ? `${operation.operation_id}:${walletStage}` : '';
     if (hyperliquidActionKey) directCapitalWalletActions.set(hyperliquidActionKey, {
       operationId:operation.operation_id, version:operation.version, stage:walletStage,
       kind:'HYPERLIQUID', artifact:hyperliquidPreview.artifact,
       path:operation.path, treasuryProvider:operation.treasury_provider,
     });
-    const startButton = !treasuryActionKey && !hyperliquidActionKey && !binanceSubmission && !(operation.path === 'BINANCE_TO_VAULT' && binancePreview) && !treasuryWithdrawalSubmission && !walletSubmission
+    const startButton = !operationExpired && !treasuryActionKey && !hyperliquidActionKey && !binanceSubmission && !(operation.path === 'BINANCE_TO_VAULT' && binancePreview) && !treasuryWithdrawalSubmission && !walletSubmission
       ? `<button class="primary" type="button" data-direct-capital-start="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}" data-operation-path="${escapeHtml(operation.path)}" data-treasury-provider="${escapeHtml(operation.treasury_provider || 'NOTILT_VAULT')}">${operation.path === 'BINANCE_TO_VAULT' ? '继续并提交币安提现' : '继续并打开钱包'}</button>` : '';
     const treasuryWalletButton = treasuryActionKey ? `<button class="primary" type="button" data-direct-wallet-action="${escapeHtml(treasuryActionKey)}">打开钱包确认</button>` : '';
     const notiltExecutionWalletButton = notiltExecutionActionKey ? `<button class="primary" type="button" data-direct-wallet-action="${escapeHtml(notiltExecutionActionKey)}">执行释放并打开钱包</button>` : '';
     const notiltDestinationWalletButton = notiltDestinationActionKey ? `<button class="primary" type="button" data-direct-wallet-action="${escapeHtml(notiltDestinationActionKey)}">转入币安并打开钱包</button>` : '';
     const hyperliquidWalletButton = hyperliquidActionKey ? `<button class="primary" type="button" data-direct-wallet-action="${escapeHtml(hyperliquidActionKey)}">打开钱包确认</button>` : '';
-    const binanceSubmitButton = operation.path === 'BINANCE_TO_VAULT' && binancePreview && !binanceSubmission ? `<button class="primary" type="button" data-binance-submit-direct="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}" ${directConfiguration.binance_capital_submission_enabled && item.real_transfer_gate === 'ENABLED' ? '' : 'disabled title="币安提现开关或 CAPITAL_TRANSFER 当前关闭"'}>直接提交币安提现</button>` : '';
+    const binanceSubmitButton = !operationExpired && operation.path === 'BINANCE_TO_VAULT' && binancePreview && !binanceSubmission ? `<button class="primary" type="button" data-binance-submit-direct="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}" ${directConfiguration.binance_capital_submission_enabled && item.real_transfer_gate === 'ENABLED' ? '' : 'disabled title="币安提现开关或 CAPITAL_TRANSFER 当前关闭"'}>直接提交币安提现</button>` : '';
     const binanceDepositSubmission = operation.treasury_provider === 'NOTILT_VAULT' ? notiltDestinationSubmission : treasuryWithdrawalSubmission;
     const binanceReceiptButton = binancePreview && !binanceReceiptConfirmed && ((operation.path === 'VAULT_TO_BINANCE' && binanceDepositSubmission?.transaction_hash) || (operation.path === 'BINANCE_TO_VAULT' && binanceSubmission)) ? `<button class="secondary" type="button" data-binance-receipt-direct="${escapeHtml(operation.operation_id)}" data-binance-stage="${operation.path === 'VAULT_TO_BINANCE' ? 'BINANCE_DEPOSIT' : 'BINANCE_WITHDRAWAL'}" data-operation-version="${Number(operation.version || 1)}" data-transaction-hash="${escapeHtml(binanceDepositSubmission?.transaction_hash || '')}">自动核对到账</button>` : '';
     const notiltReceiptSubmission = notiltExecutionSubmission && !notiltExecutionReceipt ? notiltExecutionSubmission : treasuryWithdrawalSubmission;
@@ -1545,7 +1547,7 @@ async function renderCapitalCenter() {
         : nextAction === 'HYPERLIQUID'
           ? (walletStage === 'HYPERLIQUID_CLASS_TRANSFER' ? '继续提现并打开钱包' : '到账后继续并打开钱包')
           : '继续存入金库并打开钱包';
-    const nextActionButton = nextAction ? `<button class="primary" type="button" data-direct-capital-next="${escapeHtml(operation.operation_id)}" data-next-action="${nextAction}" data-operation-version="${Number(operation.version || 1)}" data-operation-path="${escapeHtml(operation.path)}" data-treasury-provider="${escapeHtml(operation.treasury_provider || 'NOTILT_VAULT')}">${nextActionLabel}</button>` : '';
+    const nextActionButton = !operationExpired && nextAction ? `<button class="primary" type="button" data-direct-capital-next="${escapeHtml(operation.operation_id)}" data-next-action="${nextAction}" data-operation-version="${Number(operation.version || 1)}" data-operation-path="${escapeHtml(operation.path)}" data-treasury-provider="${escapeHtml(operation.treasury_provider || 'NOTILT_VAULT')}">${nextActionLabel}</button>` : '';
     const binanceBoundary = binancePreview ? renderCapitalHandoffCard({
       eyebrow:'交易所链路',
       title:operation.path === 'VAULT_TO_BINANCE' ? '币安充值范围已核对' : binanceSubmission ? '币安提现已提交' : '币安提现条件已核对',

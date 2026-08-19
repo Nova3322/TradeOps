@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from trading_control_plane import credentials, domain, models, rejections
@@ -224,6 +224,10 @@ def delete_exchange_account(
                     models.DirectCapitalOperation.account_id == scope[2],
                     models.DirectCapitalOperation.venue == scope[3],
                     models.DirectCapitalOperation.status.not_in({"BLOCKED", "SETTLED"}),
+                    or_(
+                        models.DirectCapitalOperation.receipt_status != "NOT_SUBMITTED",
+                        models.DirectCapitalOperation.expires_at > now,
+                    ),
                 )
             ),
         )

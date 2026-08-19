@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -20,6 +20,7 @@ from trading_control_plane.domain import DomainRejected, ExecutionEnvironment, R
 from trading_control_plane.freqtrade import FreqtradeWorkerClient, FreqtradeWorkerSpec
 from trading_control_plane.models import (
     AuditEvent,
+    DirectCapitalOperation,
     ExchangeAccount,
     Instrument,
     OrderIntent,
@@ -631,6 +632,72 @@ def test_exchange_account_delete_is_fail_closed_and_can_be_reconnected(
             ).all()
         )
         assert {"EXCHANGE_ACCOUNT_DELETED", "EXCHANGE_ACCOUNT_RESTORED"} <= events
+
+
+def test_expired_unsubmitted_direct_capital_plan_is_projected_blocked_and_not_running(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("expired-direct-capital-admin", now=now)
+    account_pk = service.create_exchange_account(
+        actor_id=admin,
+        account_id="binance-expired-plan",
+        venue="BINANCE",
+        label="Expired direct capital plan",
+        credentials={"api_key": "expired-key", "api_secret": "expired-secret"},
+        idempotency_key="create-expired-direct-capital-account",
+        now=now,
+    )
+    team_id = UUID(TradingQueries(database).user_context(admin)["active_team"]["team_id"])
+    operation_id = uuid4()
+    with database.session_factory.begin() as session:
+        session.add(
+            DirectCapitalOperation(
+                operation_id=operation_id,
+                team_id=team_id,
+                path="BINANCE_TO_VAULT",
+                treasury_provider="SAFE_SPENDING_LIMIT",
+                status="UNSIGNED_PLAN_READY",
+                receipt_status="NOT_SUBMITTED",
+                account_id="binance-expired-plan",
+                venue="BINANCE",
+                asset="USDC",
+                network="ARBITRUM",
+                amount=Decimal("1"),
+                max_fee=Decimal("0.1"),
+                min_received=Decimal("0.9"),
+                stages=[],
+                blockers=[],
+                expires_at=now - timedelta(seconds=1),
+                final_confirmed_at=now - timedelta(minutes=1),
+                actor_id=admin,
+                correlation_id=uuid4(),
+                idempotency_key="expired-direct-capital-operation",
+                version=2,
+                created_at=now - timedelta(minutes=1),
+                updated_at=now - timedelta(minutes=1),
+            )
+        )
+
+    projected = next(
+        item
+        for item in TradingQueries(database).capital_center(admin)["direct_operations"]
+        if item["operation_id"] == str(operation_id)
+    )
+    assert projected["status"] == "BLOCKED"
+    assert projected["receipt_status"] == "NOT_SUBMITTED"
+    assert "CAPITAL_DIRECT_OPERATION_EXPIRED" in projected["blockers"]
+
+    deleted = service.delete_exchange_account(
+        account_pk,
+        actor_id=admin,
+        confirmation="DELETE:LIVE:binance-expired-plan:BINANCE",
+        expected_version=1,
+        idempotency_key="delete-expired-direct-capital-account",
+        now=now,
+    )
+    assert deleted["status"] == "DELETED"
 
 
 def test_account_setup_is_allowed_before_team_activation_and_cross_team_rotation_is_denied(

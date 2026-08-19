@@ -11,6 +11,44 @@ from trading_control_plane import domain, models, notilt, service
 from trading_control_plane import execution_scope as scope_rules
 from trading_control_plane.query_component import QueryComponent, iso_datetime
 
+DIRECT_CAPITAL_EXPIRED_BLOCKER = "CAPITAL_DIRECT_OPERATION_EXPIRED"
+
+
+def direct_capital_operation_summary(
+    item: models.DirectCapitalOperation,
+    now: datetime,
+) -> dict[str, Any]:
+    blockers = list(item.blockers)
+    status = item.status
+    if item.receipt_status == "NOT_SUBMITTED" and item.expires_at <= now:
+        status = "BLOCKED"
+        if DIRECT_CAPITAL_EXPIRED_BLOCKER not in blockers:
+            blockers.append(DIRECT_CAPITAL_EXPIRED_BLOCKER)
+    return {
+        "operation_id": str(item.operation_id),
+        "path": item.path,
+        "treasury_provider": item.treasury_provider,
+        "status": status,
+        "receipt_status": item.receipt_status,
+        "account_id": item.account_id,
+        "venue": item.venue,
+        "vault_id": item.vault_id,
+        "asset": item.asset,
+        "network": item.network,
+        "amount": str(item.amount),
+        "max_fee": None if item.max_fee is None else str(item.max_fee),
+        "min_received": None if item.min_received is None else str(item.min_received),
+        "source_reference_configured": item.source_reference is not None,
+        "destination_reference_configured": item.destination_reference is not None,
+        "stages": item.stages,
+        "blockers": blockers,
+        "execute_after": iso_datetime(item.execute_after),
+        "expires_at": iso_datetime(item.expires_at),
+        "final_confirmed_at": iso_datetime(item.final_confirmed_at),
+        "version": item.version,
+        "updated_at": iso_datetime(item.updated_at),
+    }
+
 
 class CapitalQueries(QueryComponent):
     def treasury_users(self, team_id: UUID, account_id: str, venue: str) -> list[models.User]:
@@ -900,34 +938,7 @@ class CapitalQueries(QueryComponent):
                 ],
                 "transfers": [self._capital_transfer_summary(item) for item in visible_transfers],
                 "direct_operations": [
-                    {
-                        "operation_id": str(item.operation_id),
-                        "path": item.path,
-                        "treasury_provider": item.treasury_provider,
-                        "status": item.status,
-                        "receipt_status": item.receipt_status,
-                        "account_id": item.account_id,
-                        "venue": item.venue,
-                        "vault_id": item.vault_id,
-                        "asset": item.asset,
-                        "network": item.network,
-                        "amount": str(item.amount),
-                        "max_fee": None if item.max_fee is None else str(item.max_fee),
-                        "min_received": (
-                            None if item.min_received is None else str(item.min_received)
-                        ),
-                        "source_reference_configured": item.source_reference is not None,
-                        "destination_reference_configured": (
-                            item.destination_reference is not None
-                        ),
-                        "stages": item.stages,
-                        "blockers": item.blockers,
-                        "execute_after": iso_datetime(item.execute_after),
-                        "expires_at": iso_datetime(item.expires_at),
-                        "final_confirmed_at": iso_datetime(item.final_confirmed_at),
-                        "version": item.version,
-                        "updated_at": iso_datetime(item.updated_at),
-                    }
+                    direct_capital_operation_summary(item, now)
                     for item in direct_operations
                     if self.can_user(user_id, "capital.view", item.account_id, item.venue)
                 ],
