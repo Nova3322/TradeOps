@@ -67,11 +67,55 @@ class PyfolioReportAdapter:
                 "PYFOLIO_DEPENDENCY_MISSING", "pyfolio-reloaded is not installed"
             ) from exc
         try:
-            import matplotlib.pyplot as plt
-            import pyfolio as pf  # type: ignore[import-untyped]
-
             with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+                # pyfolio-reloaded 0.9.9 and its plotting stack emit these exact
+                # compatibility warnings. Keep unexpected warnings visible.
+                generic_timedelta = r"The 'generic' unit for NumPy timedelta is deprecated,.*"
+                warnings.filterwarnings(
+                    "ignore",
+                    message=(
+                        r'Module "zipline\.assets" not found; multipliers will not be applied.*'
+                    ),
+                    category=UserWarning,
+                    module=r"pyfolio\.pos",
+                )
+                warnings.filterwarnings(
+                    "ignore",
+                    message=generic_timedelta,
+                    category=DeprecationWarning,
+                    module=r"pyfolio\.round_trips",
+                )
+                from matplotlib import MatplotlibDeprecationWarning
+
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"The locs attribute was deprecated in Matplotlib 3\.11.*",
+                    category=MatplotlibDeprecationWarning,
+                    module=r"pandas\.plotting\._matplotlib\.converter",
+                )
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"The set_bad function will be deprecated in a future version\..*",
+                    category=PendingDeprecationWarning,
+                    module=r"seaborn\.matrix",
+                )
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"vert: bool was deprecated in Matplotlib 3\.11.*",
+                    category=MatplotlibDeprecationWarning,
+                    module=r"seaborn\.categorical",
+                )
+                warnings.filterwarnings(
+                    "ignore",
+                    message=(
+                        r"set_ticklabels\(\) should only be used with a fixed number of ticks,.*"
+                    ),
+                    category=UserWarning,
+                    module=r"pyfolio\.plotting",
+                )
+                import matplotlib.pyplot as plt
+                import pyfolio as pf  # type: ignore[import-untyped]
+
                 stats = pf.timeseries.perf_stats(
                     frames.returns,
                     factor_returns=frames.benchmark_returns,
