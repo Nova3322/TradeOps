@@ -36,13 +36,14 @@ test('production account cards expose the exact-account detail workflow', () => 
   assert.match(routerSource, /renderVenueAccountDetail\(venueAccountMatch\[1\]\)/);
   assert.match(indexSource, /execution\.js\?v=193/);
   assert.match(indexSource, /shared\.js\?v=15/);
-  assert.match(indexSource, /accounts\.js\?v=181/);
-  assert.match(serviceWorkerSource, /trading-shell-v227/);
+  assert.match(indexSource, /accounts\.js\?v=182/);
+  assert.match(serviceWorkerSource, /trading-shell-v228/);
 });
 
 test('standard Binance account mode is rendered as known product truth', () => {
   assert.match(sharedSource, /STANDARD:'标准账户'/);
   assert.match(accountsSource, /STANDARD:'Standard account'/);
+  assert.match(accountsSource, /account_mode:account\.account_mode \|\| 'STANDARD'/);
 });
 
 test('account detail trusts fresh exact-account facts instead of API-local worker flags', () => {
