@@ -24,7 +24,7 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `viem` | `2.55.10` | Node.js | `MIT` |
 | `ws` | `8.21.0` | Node.js | `MIT` |
 | `aiohappyeyeballs` | `2.7.1` | Python | `PSF-2.0` |
-| `aiohttp` | `3.14.1` | Python | `NOASSERTION` |
+| `aiohttp` | `3.14.1` | Python | `Apache-2.0 AND MIT` |
 | `aiohttp-fast-zlib` | `0.3.0` | Python | `Apache-2.0` |
 | `aiosignal` | `1.4.0` | Python | `Apache-2.0` |
 | `alembic` | `1.18.5` | Python | `MIT` |
@@ -83,7 +83,7 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `matplotlib` | `3.11.1` | Python | `PSF-2.0` |
 | `matplotlib-inline` | `0.2.2` | Python | `BSD-3-Clause` |
 | `msgpack` | `1.2.1` | Python | `Apache-2.0` |
-| `multidict` | `6.7.1` | Python | `NOASSERTION` |
+| `multidict` | `6.7.1` | Python | `Apache-2.0` |
 | `multitasking` | `0.0.13` | Python | `Apache-2.0` |
 | `mypy` | `1.20.2` | Python | `MIT` |
 | `mypy-extensions` | `1.1.0` | Python | `MIT` |
@@ -151,7 +151,7 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `wcwidth` | `0.8.2` | Python | `MIT` |
 | `websocket-client` | `1.9.0` | Python | `Apache-2.0` |
 | `websockets` | `16.1` | Python | `BSD-3-Clause` |
-| `winloop` | `0.6.3` | Python | `NOASSERTION` |
+| `winloop` | `0.6.3` | Python | `MIT` |
 | `yarl` | `1.24.2` | Python | `Apache-2.0` |
 | `yfinance` | `1.5.2` | Python | `Apache-2.0` |
 | `zlib-ng` | `1.0.0` | Python | `PSF-2.0` |
