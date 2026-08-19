@@ -35,6 +35,9 @@ HYPERLIQUID_HIP3_PATTERN = re.compile(
     r"^(?P<dex>[a-z0-9][a-z0-9_-]{0,31}):(?P<coin>[A-Za-z0-9][A-Za-z0-9._-]{0,63})$"
 )
 HIP3_DEX_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+INTERNAL_FREQTRADE_HOST_PATTERN = re.compile(
+    r"^freqtrade-[a-z0-9](?:[a-z0-9-]{0,51}[a-z0-9])?$"
+)
 
 
 def parse_hip3_dexes(value: str) -> tuple[str, ...]:
@@ -101,8 +104,11 @@ def validate_worker_url(value: str) -> str:
     parsed = urllib.parse.urlparse(value)
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError("Freqtrade worker URL must not embed credentials, query, or fragment")
-    if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost"}:
-        raise ValueError("non-loopback Freqtrade workers require HTTPS")
+    http_host_allowed = parsed.hostname in {"127.0.0.1", "localhost"} or bool(
+        parsed.hostname and INTERNAL_FREQTRADE_HOST_PATTERN.fullmatch(parsed.hostname)
+    )
+    if parsed.scheme == "http" and not http_host_allowed:
+        raise ValueError("non-loopback/internal Freqtrade workers require HTTPS")
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or not parsed.port:
         raise ValueError("Freqtrade worker URL must include an explicit HTTP(S) host and port")
     return value.rstrip("/")
