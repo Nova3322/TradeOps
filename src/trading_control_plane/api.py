@@ -6,8 +6,6 @@ from trading_control_plane.adapters.capital import (
 )
 from trading_control_plane.api_core import (
     SESSION_COOKIE,
-    SUPPORTED_NOTILT_CHAINS,
-    UTC,
     UUID,
     WEB_ROOT,
     Any,
@@ -17,7 +15,6 @@ from trading_control_plane.api_core import (
     CapitalNotification,
     Cookie,
     Database,
-    Decimal,
     Depends,
     DomainRejected,
     ExchangeConnectionVerifier,
@@ -96,6 +93,14 @@ from trading_control_plane.api_routes.system import register_system_routes
 from trading_control_plane.api_routes.workspace import register_workspace_routes
 from trading_control_plane.binance_errors import BinanceRequestState
 from trading_control_plane.binance_state import DatabaseBinanceRequestState
+from trading_control_plane.capital_application import CapitalApplicationRuntime
+from trading_control_plane.capital_configuration_use_cases import (
+    CapitalConfigurationUseCases,
+)
+from trading_control_plane.capital_direct_use_cases import CapitalDirectUseCases
+from trading_control_plane.capital_receipt_use_cases import CapitalReceiptUseCases
+from trading_control_plane.capital_transfer_use_cases import CapitalTransferUseCases
+from trading_control_plane.exchange_connection_verification import ExchangeConnectionVerification
 from trading_control_plane.request_context import (
     ApiClientRequestContext,
     bind_api_client_context,
@@ -363,275 +368,6 @@ def create_app(
             timeout_seconds=resolved_settings.freqtrade_timeout_seconds,
             confirmation_timeout_seconds=(resolved_settings.freqtrade_confirmation_timeout_seconds),
         )
-
-    def effective_direct_capital_settings(
-        user_id: UUID,
-        environment: str = "LIVE",
-    ) -> tuple[Settings, dict[str, Any] | None]:
-        config = service().direct_capital_configuration(
-            user_id,
-            environment,
-            include_sensitive_addresses=True,
-        )
-        if config is None:
-            return resolved_settings, None
-        return (
-            resolved_settings.model_copy(
-                update={
-                    "capital_direct_network": config["network"],
-                    "capital_direct_asset": config["asset"],
-                    "capital_direct_treasury_provider": config["treasury_provider"],
-                    "capital_direct_vault_id": config["vault_id"],
-                    "capital_direct_vault_address": config["vault_address"],
-                    "capital_direct_owned_arbitrum_address": config["owned_arbitrum_address"],
-                    "capital_direct_binance_account_id": config["binance_account_id"],
-                    "capital_direct_binance_deposit_address": config["binance_deposit_address"],
-                    "capital_direct_binance_withdrawal_address": config[
-                        "binance_withdrawal_address"
-                    ],
-                    "capital_direct_hyperliquid_account_id": config["hyperliquid_account_id"],
-                    "capital_direct_hyperliquid_bridge_address": config[
-                        "hyperliquid_bridge_address"
-                    ],
-                    "capital_direct_safe_address": config["safe_address"],
-                    "capital_direct_safe_delegate_address": config["safe_delegate_address"],
-                    "capital_direct_max_amount": (
-                        None if config["max_amount"] is None else Decimal(str(config["max_amount"]))
-                    ),
-                    "capital_direct_max_fee": (
-                        None if config["max_fee"] is None else Decimal(str(config["max_fee"]))
-                    ),
-                }
-            ),
-            config,
-        )
-
-    def capital_snapshot(user_id: UUID) -> dict[str, Any]:
-        direct_settings, saved_config = effective_direct_capital_settings(user_id)
-        binance_account_id = direct_settings.capital_direct_binance_account_id
-        binance_capital_credentials_configured = bool(
-            resolved_settings.binance_capital_api_key
-            and resolved_settings.binance_capital_api_secret
-            and binance_account_id is not None
-            and binance_account_id == resolved_settings.binance_capital_account_id
-        )
-        configured_chain_id: int | None
-        try:
-            configured_chain_id = notilt_chain_id_for_network(
-                direct_settings.capital_direct_network
-            )
-        except DomainRejected:
-            configured_chain_id = None
-        configured_vault = (
-            None
-            if configured_chain_id is None
-            else resolved_settings.notilt_vaults.get(configured_chain_id)
-        )
-        selected_provider = direct_settings.capital_direct_treasury_provider
-        configured_notilt_address = direct_settings.capital_direct_vault_address or configured_vault
-        configured_safe_address = direct_settings.capital_direct_safe_address
-        selected_treasury_account_id = (
-            configured_safe_address
-            if selected_provider == "SAFE_SPENDING_LIMIT"
-            else configured_notilt_address
-        )
-        safe_scope_ready = (
-            direct_settings.safe_spending_enabled
-            and direct_settings.safe_spending_arbitrum_rpc_url is not None
-            and direct_settings.capital_direct_safe_address is not None
-            and direct_settings.capital_direct_safe_delegate_address is not None
-        )
-        notilt_scope_ready = (
-            direct_settings.notilt_enabled
-            and direct_settings.notilt_agent_address is not None
-            and configured_notilt_address is not None
-        )
-        selected_scope_ready = (
-            safe_scope_ready if selected_provider == "SAFE_SPENDING_LIMIT" else notilt_scope_ready
-        )
-        onchain_probe: dict[str, Any] = {
-            "provider": selected_provider,
-            "status": "NOT_ATTEMPTED" if selected_scope_ready else "BLOCKED",
-            "error_code": (
-                "SAFE_SPENDING_LIMIT_NOT_CONFIGURED"
-                if selected_provider == "SAFE_SPENDING_LIMIT" and not safe_scope_ready
-                else "NOTILT_VAULT_NOT_CONFIGURED"
-                if selected_provider == "NOTILT_VAULT" and not notilt_scope_ready
-                else None
-            ),
-        }
-        if selected_provider == "SAFE_SPENDING_LIMIT" and safe_scope_ready:
-            safe_rpc_url = direct_settings.safe_spending_arbitrum_rpc_url
-            safe_address = direct_settings.capital_direct_safe_address
-            safe_delegate = direct_settings.capital_direct_safe_delegate_address
-            assert safe_rpc_url is not None
-            assert safe_address is not None
-            assert safe_delegate is not None
-            try:
-                safe_fact = resolved_safe_spending.read_limit(
-                    rpc_url=safe_rpc_url,
-                    safe=safe_address,
-                    delegate=safe_delegate,
-                )
-                scale = Decimal(10) ** 6
-                observed_at = datetime.fromtimestamp(int(str(safe_fact["blockTimestamp"])), UTC)
-                safe_balance = Decimal(str(safe_fact["balance"])) / scale
-                safe_available_limit = Decimal(str(safe_fact["available"])) / scale
-                service().record_safe_spending_snapshot(
-                    actor_id=user_id,
-                    safe_address=safe_address,
-                    asset="USDC",
-                    balance=safe_balance,
-                    available_limit=safe_available_limit,
-                    module_enabled=bool(safe_fact["moduleEnabled"]),
-                    observed_at=observed_at,
-                    now=_now(),
-                )
-            except DomainRejected as exc:
-                onchain_probe.update(status="FAILED", error_code=exc.code)
-            except (KeyError, TypeError, ValueError, ArithmeticError):
-                onchain_probe.update(status="FAILED", error_code="SAFE_RESPONSE_INVALID")
-            else:
-                onchain_probe.update(
-                    status="SUCCESS",
-                    error_code=None,
-                    module_enabled=bool(safe_fact["moduleEnabled"]),
-                    available_limit=str(safe_available_limit),
-                    balance=str(safe_balance),
-                    reset_time_minutes=int(str(safe_fact["resetTimeMinutes"])),
-                    nonce=str(safe_fact["nonce"]),
-                    observed_at=observed_at.isoformat(),
-                )
-        snapshot = queries().capital_center(
-            user_id,
-            authoritative_live_treasury_account_id=selected_treasury_account_id,
-            require_authoritative_live_treasury=True,
-        )
-        expected_interval = resolved_settings.runtime_sync_interval_seconds
-        snapshot["net_worth"]["history_expected_interval_seconds"] = expected_interval
-        snapshot["net_worth"]["history_gap_tolerance_seconds"] = max(
-            180,
-            expected_interval * 3,
-        )
-        snapshot["net_worth"]["onchain_provider"] = selected_provider
-        snapshot["net_worth"]["onchain_probe"] = onchain_probe
-        can_manage_direct_configuration = service().can_user(user_id, "access.manage")
-        notilt_provider_configured = bool(
-            direct_settings.capital_direct_vault_id and direct_settings.capital_direct_vault_address
-        )
-        safe_provider_configured = bool(
-            direct_settings.capital_direct_safe_address
-            and direct_settings.capital_direct_safe_delegate_address
-        )
-        public_configuration_values = (
-            {
-                "vault_id": direct_settings.capital_direct_vault_id,
-                "vault_address": direct_settings.capital_direct_vault_address,
-                "owned_arbitrum_address": (direct_settings.capital_direct_owned_arbitrum_address),
-                "binance_account_id": direct_settings.capital_direct_binance_account_id,
-                "binance_deposit_address": (direct_settings.capital_direct_binance_deposit_address),
-                "binance_withdrawal_address": (
-                    direct_settings.capital_direct_binance_withdrawal_address
-                ),
-                "hyperliquid_account_id": (direct_settings.capital_direct_hyperliquid_account_id),
-                "hyperliquid_bridge_address": (
-                    direct_settings.capital_direct_hyperliquid_bridge_address
-                ),
-                "safe_address": direct_settings.capital_direct_safe_address,
-                "safe_delegate_address": (direct_settings.capital_direct_safe_delegate_address),
-                "max_amount": (
-                    None
-                    if direct_settings.capital_direct_max_amount is None
-                    else str(direct_settings.capital_direct_max_amount)
-                ),
-                "max_fee": (
-                    None
-                    if direct_settings.capital_direct_max_fee is None
-                    else str(direct_settings.capital_direct_max_fee)
-                ),
-            }
-            if can_manage_direct_configuration
-            else {}
-        )
-        snapshot["direct_configuration"] = {
-            "single_account_mode": False,
-            "source": "VERSIONED_DATABASE" if saved_config is not None else "ENVIRONMENT",
-            "version": None if saved_config is None else saved_config["version"],
-            "effective_at": None if saved_config is None else saved_config["effective_at"],
-            "updated_by_username": (
-                None if saved_config is None else saved_config["updated_by_username"]
-            ),
-            "can_manage": can_manage_direct_configuration,
-            **public_configuration_values,
-            "asset": direct_settings.capital_direct_asset,
-            "network": direct_settings.capital_direct_network,
-            "treasury_provider": direct_settings.capital_direct_treasury_provider,
-            "configured_providers": [
-                provider
-                for provider, configured in (
-                    ("NOTILT_VAULT", notilt_provider_configured),
-                    ("SAFE_SPENDING_LIMIT", safe_provider_configured),
-                )
-                if configured
-            ],
-            "selected_onchain_account_configured": selected_treasury_account_id is not None,
-            "vault_id_configured": direct_settings.capital_direct_vault_id is not None,
-            "vault_address_configured": (direct_settings.capital_direct_vault_address is not None),
-            "notilt_provider_configured": notilt_provider_configured,
-            "owned_arbitrum_address_configured": (
-                direct_settings.capital_direct_owned_arbitrum_address is not None
-            ),
-            "binance_account_configured": (
-                direct_settings.capital_direct_binance_account_id is not None
-            ),
-            "binance_whitelist_destination_configured": (
-                direct_settings.capital_direct_binance_deposit_address is not None
-            ),
-            "binance_withdrawal_destination_configured": (
-                direct_settings.capital_direct_binance_withdrawal_address is not None
-            ),
-            "binance_capital_credentials_configured": (binance_capital_credentials_configured),
-            "binance_capital_credentials_source": (
-                "DEDICATED_ENVIRONMENT"
-                if binance_capital_credentials_configured
-                else None
-            ),
-            "binance_capital_submission_enabled": (
-                direct_settings.binance_capital_withdraw_enabled
-            ),
-            "hyperliquid_account_configured": (
-                direct_settings.capital_direct_hyperliquid_account_id is not None
-            ),
-            "hyperliquid_contract_configured": (
-                direct_settings.capital_direct_hyperliquid_bridge_address is not None
-            ),
-            "limits_configured": (
-                direct_settings.capital_direct_max_amount is not None
-                and direct_settings.capital_direct_max_fee is not None
-            ),
-            "notilt_sdk_available": resolved_notilt.available,
-            "notilt_scope_configured": (
-                resolved_settings.notilt_enabled
-                and configured_notilt_address is not None
-                and resolved_settings.notilt_agent_address is not None
-            ),
-            "safe_spending_enabled": direct_settings.safe_spending_enabled,
-            "safe_gateway_available": resolved_safe_spending.available,
-            "safe_spending_scope_configured": (
-                direct_settings.safe_spending_enabled
-                and direct_settings.safe_spending_arbitrum_rpc_url is not None
-                and direct_settings.capital_direct_safe_address is not None
-                and direct_settings.capital_direct_safe_delegate_address is not None
-            ),
-            "safe_address_configured": direct_settings.capital_direct_safe_address is not None,
-            "safe_delegate_configured": (
-                direct_settings.capital_direct_safe_delegate_address is not None
-            ),
-            "safe_provider_configured": safe_provider_configured,
-            "signing": False,
-            "broadcast": False,
-        }
-        return snapshot
 
     def require_capability(
         identity: SessionIdentity,
@@ -983,147 +719,6 @@ def create_app(
             )
         )
 
-    def configured_notilt_scope(chain_id: int) -> tuple[str, str]:
-        if chain_id not in SUPPORTED_NOTILT_CHAINS:
-            raise DomainRejected(
-                "NOTILT_CHAIN_UNSUPPORTED",
-                "NoTilt only supports Ethereum, BNB Smart Chain, and Arbitrum One",
-            )
-        if not resolved_settings.notilt_enabled:
-            raise DomainRejected("NOTILT_DISABLED", "NoTilt read-only integration is disabled")
-        agent = resolved_settings.notilt_agent_address
-        vault = resolved_settings.notilt_vaults.get(chain_id)
-        if agent is None:
-            raise DomainRejected(
-                "NOTILT_NOT_CONFIGURED",
-                "NoTilt public whitelist agent address is not configured",
-            )
-        if vault is None:
-            raise DomainRejected(
-                "NOTILT_VAULT_NOT_CONFIGURED",
-                f"NoTilt {SUPPORTED_NOTILT_CHAINS[chain_id]} Vault is not configured",
-            )
-        return agent, vault
-
-    def notilt_chain_id_for_network(network: str) -> int:
-        normalized = network.upper().replace("-", "_").replace(" ", "_")
-        chain_id = {
-            "ETH": 1,
-            "ETHEREUM": 1,
-            "BNB": 56,
-            "BSC": 56,
-            "BNB_SMART_CHAIN": 56,
-            "ARB": 42161,
-            "ARBITRUM": 42161,
-            "ARBITRUM_ONE": 42161,
-        }.get(normalized)
-        if chain_id is None:
-            raise DomainRejected(
-                "NOTILT_CHAIN_UNSUPPORTED",
-                "NoTilt network must be Ethereum, BNB Smart Chain, or Arbitrum One",
-            )
-        return chain_id
-
-    def verify_live_notilt_release_budget(
-        *,
-        chain_id: int,
-        vault: str,
-        agent: str,
-        asset: str,
-        amount: Decimal,
-        max_fact_age_seconds: int,
-        now: datetime,
-    ) -> None:
-        snapshot = resolved_notilt.read_vault(chain_id, vault, agent)
-        budget = next(
-            (item for item in snapshot.budgets if item.asset == asset.upper()),
-            None,
-        )
-        if budget is None:
-            raise DomainRejected(
-                "NOTILT_RELEASE_BUDGET_MISSING",
-                "NoTilt release requires a live budget for the configured asset",
-            )
-        if (
-            snapshot.vault.lower() != vault.lower()
-            or snapshot.agent.lower() != agent.lower()
-            or budget.vault.lower() != vault.lower()
-            or budget.agent.lower() != agent.lower()
-        ):
-            raise DomainRejected(
-                "NOTILT_RELEASE_SCOPE_MISMATCH",
-                "NoTilt live budget does not match the configured Vault and Agent scope",
-            )
-        if not budget.is_official_vault:
-            raise DomainRejected(
-                "NOTILT_VAULT_UNTRUSTED",
-                "NoTilt release requires an official Vault from the trusted deployment catalog",
-            )
-        if (
-            not budget.is_active_whitelist
-            or budget.assigned_whitelist_vault.lower() != vault.lower()
-        ):
-            raise DomainRejected(
-                "NOTILT_WHITELIST_INACTIVE",
-                "NoTilt release requires an active whitelist assigned to the configured Vault",
-            )
-        if budget.owner.lower() == agent.lower():
-            raise DomainRejected(
-                "NOTILT_AGENT_OWNER_FORBIDDEN",
-                "NoTilt Agent budget cannot use the Vault owner identity",
-            )
-        if budget.panic_locked:
-            raise DomainRejected("NOTILT_PANIC_LOCKED", "NoTilt Vault is panic locked")
-        fact_age = now - budget.block_timestamp
-        if fact_age < timedelta(0) or fact_age > timedelta(seconds=max_fact_age_seconds):
-            raise DomainRejected(
-                "NOTILT_FACT_STALE",
-                "NoTilt live budget is outside the active production freshness window",
-            )
-        if amount > budget.max_release_net:
-            raise DomainRejected(
-                "NOTILT_RELEASE_LIMIT_EXCEEDED",
-                "NoTilt release amount exceeds the current live maxReleaseNet allowance",
-            )
-
-    def sync_configured_notilt_vault(
-        chain_id: int,
-        actor_id: UUID,
-        *,
-        now: datetime,
-    ) -> tuple[int, dict[str, Any]]:
-        agent, vault = configured_notilt_scope(chain_id)
-        snapshot = resolved_notilt.read_vault(chain_id, vault, agent)
-        valuations = {
-            budget.asset: (
-                resolved_notilt_valuator.value(
-                    budget.asset,
-                    budget.balance,
-                    now=now,
-                    mark_price=None if mark is None else mark[0],
-                    mark_observed_at=None if mark is None else mark[1],
-                )
-                if (
-                    mark := queries().native_asset_mark(actor_id, budget.asset)
-                )
-                is not None
-                or budget.asset.upper() in {"USD", "USDC", "USDT", "USDT0"}
-                else resolved_notilt_valuator.value(
-                    budget.asset,
-                    budget.balance,
-                    now=now,
-                )
-            )
-            for budget in snapshot.budgets
-        }
-        fact_ids = service().record_notilt_vault_snapshot(
-            actor_id=actor_id,
-            snapshot=snapshot,
-            valuations=valuations,
-            now=now,
-        )
-        return len(fact_ids), capital_snapshot(actor_id)
-
     def require_freqtrade_enabled() -> None:
         if not resolved_settings.freqtrade_workers_enabled:
             raise DomainRejected(
@@ -1172,6 +767,19 @@ def create_app(
         settings=resolved_settings,
         require_capability=require_capability,
     )
+    capital_runtime = CapitalApplicationRuntime(
+        settings=resolved_settings,
+        queries=queries,
+        service=service,
+        clock=_now,
+        notify_capital=notify_capital,
+        token_service=token_service,
+        adapter_resolver=resolved_capital_adapter_factory,
+        transfer_adapter=resolved_capital_transfer,
+        notilt=resolved_notilt,
+        notilt_valuator=resolved_notilt_valuator,
+        safe_spending=resolved_safe_spending,
+    )
     route_context = ApiRouteContext(
         app=app,
         system=SystemRouteDependencies(database=resolved_database),
@@ -1187,7 +795,9 @@ def create_app(
         accounts=AccountRouteDependencies(
             common=authenticated_dependencies,
             freqtrade_client_for_binding=freqtrade_client_for_binding,
-            exchange_connection_verifier=resolved_exchange_connection_verifier,
+            connection_verification=ExchangeConnectionVerification(
+                resolved_exchange_connection_verifier
+            ),
         ),
         signals=SignalRouteDependencies(
             common=authenticated_dependencies,
@@ -1220,18 +830,10 @@ def create_app(
         ),
         capital=CapitalRouteDependencies(
             common=authenticated_dependencies,
-            capital_snapshot=capital_snapshot,
-            configured_notilt_scope=configured_notilt_scope,
-            effective_direct_capital_settings=effective_direct_capital_settings,
-            notify_capital=notify_capital,
-            notilt_chain_id_for_network=notilt_chain_id_for_network,
-            capital_adapter_resolver=resolved_capital_adapter_factory,
-            capital_transfer=resolved_capital_transfer,
-            notilt=resolved_notilt,
-            safe_spending=resolved_safe_spending,
-            sync_configured_notilt_vault=sync_configured_notilt_vault,
-            token_service=token_service,
-            verify_live_notilt_release_budget=verify_live_notilt_release_budget,
+            configuration=CapitalConfigurationUseCases(capital_runtime),
+            direct=CapitalDirectUseCases(capital_runtime),
+            receipts=CapitalReceiptUseCases(capital_runtime),
+            transfers=CapitalTransferUseCases(capital_runtime),
         ),
     )
     register_system_routes(route_context)

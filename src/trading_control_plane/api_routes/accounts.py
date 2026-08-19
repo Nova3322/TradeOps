@@ -30,7 +30,7 @@ class _AccountsRoutes:
         self.identity_dependency = common.identity
         self.queries = common.queries
         self.require_capability = common.require_capability
-        self.resolved_exchange_connection_verifier = dependencies.exchange_connection_verifier
+        self.connection_verification = dependencies.connection_verification
         self.service = common.service
         self.resolved_settings = common.settings
 
@@ -191,35 +191,14 @@ class _AccountsRoutes:
             payload: ExchangeConnectionVerifyRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
-            account_service = self.service()
-            command, replay = account_service.prepare_exchange_account_connection_verification(
-                exchange_account_id,
+            result = self.connection_verification.verify(
+                service=self.service(),
+                exchange_account_id=exchange_account_id,
                 actor_id=identity.user_id,
                 expected_version=payload.expected_version,
                 idempotency_key=payload.idempotency_key,
-                now=_now(),
+                clock=_now,
             )
-            if replay is not None:
-                result = replay
-            else:
-                assert command is not None
-                outcome = self.resolved_exchange_connection_verifier.verify(
-                    workspace_id=str(command.workspace_id),
-                    team_id=str(command.team_id),
-                    account_id=command.account_id,
-                    venue=command.venue,
-                    environment=command.environment,
-                    account_mode=command.account_mode,
-                    credentials=command.credentials,
-                    now=_now(),
-                )
-                result = account_service.record_exchange_account_connection_verification(
-                    command,
-                    outcome,
-                    actor_id=identity.user_id,
-                    idempotency_key=payload.idempotency_key,
-                    now=_now(),
-                )
             return {
                 **result,
                 "data": self.exchange_accounts_projection(identity.user_id),
@@ -340,7 +319,6 @@ class _AccountsRoutes:
                 },
                 "as_of": _now().isoformat(),
             }
-
 
 
 def register_accounts_routes(context: ApiRouteContext) -> None:

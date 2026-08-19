@@ -133,3 +133,113 @@ def test_execution_route_delegates_transport_orchestration_to_application_use_ca
         for module in application_imports
         for boundary in {"fastapi", "trading_control_plane.api", "trading_control_plane.api_routes"}
     )
+
+
+def test_connection_verification_route_uses_server_side_application_boundary() -> None:
+    route = ROOT / "src/trading_control_plane/api_routes/accounts.py"
+    application = ROOT / "src/trading_control_plane/exchange_connection_verification.py"
+    source = route.read_text()
+    assert "exchange_connection_verifier" not in source
+    assert "prepare_exchange_account_connection_verification" not in source
+    assert "record_exchange_account_connection_verification" not in source
+    assert "self.connection_verification.verify(" in source
+    application_imports = {module for module, _names in _imports(application)}
+    assert not any(
+        module == boundary or module.startswith(f"{boundary}.")
+        for module in application_imports
+        for boundary in {"fastapi", "trading_control_plane.api", "trading_control_plane.api_routes"}
+    )
+
+
+def test_capital_route_has_no_direct_transport_dependency() -> None:
+    route = ROOT / "src/trading_control_plane/api_routes/capital.py"
+    applications = (
+        ROOT / "src/trading_control_plane/capital_application.py",
+        ROOT / "src/trading_control_plane/capital_configuration_use_cases.py",
+        ROOT / "src/trading_control_plane/capital_direct_use_cases.py",
+        ROOT / "src/trading_control_plane/capital_receipt_use_cases.py",
+        ROOT / "src/trading_control_plane/capital_transfer_use_cases.py",
+    )
+    route_imports = {module for module, _names in _imports(route)}
+    forbidden_imports = {
+        "trading_control_plane.adapters.capital",
+        "trading_control_plane.capital",
+        "trading_control_plane.notilt",
+        "trading_control_plane.safe_spending",
+    }
+    assert route_imports.isdisjoint(forbidden_imports)
+    source = route.read_text()
+    assert "capital_adapter_resolver" not in source
+    assert "resolved_capital_transfer" not in source
+    assert "resolved_notilt" not in source
+    assert "resolved_safe_spending" not in source
+    route_attributes = {
+        node.attr for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Attribute)
+    }
+    assert route_attributes.isdisjoint(
+        {
+            "adapter_resolver",
+            "execute_mapping",
+            "execute_string",
+            "prepare_deposit",
+            "prepare_release_execution",
+            "prepare_release_request",
+            "prepare_spend",
+            "submit",
+            "verify_receipt",
+        }
+    )
+
+    for application in applications:
+        application_imports = {module for module, _names in _imports(application)}
+        assert not any(
+            module == boundary or module.startswith(f"{boundary}.")
+            for module in application_imports
+            for boundary in {
+                "fastapi",
+                "trading_control_plane.api",
+                "trading_control_plane.api_routes",
+                "trading_control_plane.api_schemas",
+            }
+        ), application
+        assert not any(
+            isinstance(node, ast.Name) and node.id == "Any"
+            for node in ast.walk(ast.parse(application.read_text()))
+        ), application
+
+
+def test_direct_capital_domain_lifecycle_ownership_is_split_without_forwarders() -> None:
+    aggregate = ROOT / "src/trading_control_plane/service_domains/capital_direct.py"
+    tree = ast.parse(aggregate.read_text())
+    service = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "DirectOperationCapitalService"
+    )
+    assert len(service.bases) == 4
+    assert not any(isinstance(node, ast.FunctionDef) for node in service.body)
+
+    expected_owners = {
+        "capital_direct_configuration.py": {
+            "set_direct_capital_configuration",
+            "create_direct_capital_operation",
+        },
+        "capital_direct_preview.py": {
+            "record_direct_capital_unsigned_preview",
+            "record_direct_capital_safe_preview",
+        },
+        "capital_direct_submission.py": {
+            "record_direct_capital_wallet_submission",
+            "record_direct_capital_binance_submission",
+        },
+        "capital_direct_receipt.py": {
+            "record_direct_capital_notilt_receipt",
+            "record_direct_capital_hyperliquid_receipt",
+        },
+    }
+    for filename, expected in expected_owners.items():
+        module = ast.parse(
+            (ROOT / "src/trading_control_plane/service_domains" / filename).read_text()
+        )
+        methods = {node.name for node in ast.walk(module) if isinstance(node, ast.FunctionDef)}
+        assert expected.issubset(methods), filename

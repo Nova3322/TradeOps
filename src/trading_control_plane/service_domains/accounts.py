@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -2069,6 +2069,33 @@ class AccountService(ServiceComponent):
             "expected_version": expected_version,
         }
 
+    @staticmethod
+    def _connection_verification_response(
+        account: models.ExchangeAccount,
+        *,
+        checked_at: datetime,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "exchange_account_id": str(account.exchange_account_id),
+            "version": account.version,
+            "connection": {
+                "status": account.connection_status,
+                "error_code": account.connection_error_code,
+                "checked_at": checked_at.astimezone(UTC).isoformat(),
+                "last_verified_at": (
+                    None
+                    if account.last_verified_at is None
+                    else account.last_verified_at.astimezone(UTC).isoformat()
+                ),
+                **({"diagnostics": diagnostics} if diagnostics is not None else {}),
+            },
+            "trading": {
+                "status": account.trading_status,
+                "enabled": account.trading_status == "ELIGIBLE",
+            },
+        }
+
     def prepare_exchange_account_connection_verification(
         self,
         exchange_account_id: UUID,
@@ -2102,7 +2129,7 @@ class AccountService(ServiceComponent):
                 team_id=account.team_id,
             )
             caller = f"{actor_id}:{account.team_id}"
-            _digest, replay = self.transactions.idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=caller,
                 operation="exchange-account.connection.verify",
@@ -2116,6 +2143,51 @@ class AccountService(ServiceComponent):
                 return None, replay
             if not account.active:
                 _reject("EXCHANGE_ACCOUNT_INACTIVE", "exchange account is inactive")
+            current_time = (now or datetime.now(UTC)).astimezone(UTC)
+            last_check = account.last_connection_check_at
+            if (
+                last_check is not None
+                and timedelta(0)
+                <= current_time - last_check.astimezone(UTC)
+                < timedelta(seconds=30)
+                and expected_version in {account.version, account.version - 1}
+            ):
+                raw_diagnostics = (account.credential_metadata or {}).get("last_connection_error")
+                response = self._connection_verification_response(
+                    account,
+                    checked_at=last_check,
+                    diagnostics=(
+                        dict(raw_diagnostics) if isinstance(raw_diagnostics, dict) else None
+                    ),
+                )
+                self.transactions.save_receipt(
+                    session,
+                    caller_id=caller,
+                    operation="exchange-account.connection.verify",
+                    idempotency_key=idempotency_key,
+                    semantic_hash=digest,
+                    response=response,
+                    now=current_time,
+                )
+                self.transactions.audit(
+                    session,
+                    actor_id=str(actor_id),
+                    event_type="EXCHANGE_ACCOUNT_CONNECTION_VERIFICATION_REUSED",
+                    object_type="ExchangeAccount",
+                    object_id=account.exchange_account_id,
+                    reason=(
+                        f"venue={account.venue};credential_version={account.credential_version};"
+                        "probe=server-cooldown-reuse"
+                    ),
+                    correlation_id=uuid4(),
+                    object_version=account.version,
+                    idempotency_key=idempotency_key,
+                    workspace_id=active_team.workspace_id,
+                    team_id=account.team_id,
+                    account_id=account.account_id,
+                    now=current_time,
+                )
+                return None, response
             if account.version != expected_version:
                 _reject("VERSION_CONFLICT", "exchange account version changed")
             diagnostics = (account.credential_metadata or {}).get("last_connection_error")
@@ -2125,7 +2197,6 @@ class AccountService(ServiceComponent):
                     next_retry_at = datetime.fromisoformat(str(raw_next_retry))
                 except (TypeError, ValueError):
                     next_retry_at = None
-                current_time = (now or datetime.now(UTC)).astimezone(UTC)
                 if next_retry_at is not None and current_time < next_retry_at.astimezone(UTC):
                     raise domain.DomainRejected(
                         "BINANCE_CONNECTION_RETRY_DEFERRED",
@@ -2262,29 +2333,15 @@ class AccountService(ServiceComponent):
             account.version += 1
             account.updated_by = actor_id
             account.updated_at = now
-            response = {
-                "exchange_account_id": str(account.exchange_account_id),
-                "version": account.version,
-                "connection": {
-                    "status": account.connection_status,
-                    "error_code": account.connection_error_code,
-                    "checked_at": now.astimezone(UTC).isoformat(),
-                    "last_verified_at": (
-                        None
-                        if account.last_verified_at is None
-                        else account.last_verified_at.astimezone(UTC).isoformat()
-                    ),
-                    **(
-                        {"diagnostics": outcome.diagnostics}
-                        if not outcome.success and outcome.diagnostics is not None
-                        else {}
-                    ),
-                },
-                "trading": {
-                    "status": account.trading_status,
-                    "enabled": account.trading_status == "ELIGIBLE",
-                },
-            }
+            response = self._connection_verification_response(
+                account,
+                checked_at=now,
+                diagnostics=(
+                    outcome.diagnostics
+                    if not outcome.success and outcome.diagnostics is not None
+                    else None
+                ),
+            )
             self.transactions.save_receipt(
                 session,
                 caller_id=caller,
