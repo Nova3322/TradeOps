@@ -29,3 +29,11 @@ def test_fastapi_testclient_deprecation_allowlist_is_exact() -> None:
         "install `httpx2` instead\\.:starlette.exceptions."
         "StarletteDeprecationWarning:fastapi\\.testclient"
     )
+    assert filters[2:] == [
+        'ignore:Module "zipline\\.assets" not found; multipliers will not be applied to '
+        "position notionals\\.:UserWarning:pyfolio\\.pos",
+        "ignore:The 'generic' unit for NumPy timedelta is deprecated, and will raise an error "
+        "in the future\\. This includes implicit conversion of bare integers "
+        "\\(e\\.g\\. `\\+ 1`\\)\\.Please use a specific unit instead\\.:"
+        "DeprecationWarning:pyfolio\\.round_trips",
+    ]
