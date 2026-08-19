@@ -158,15 +158,12 @@ def project_runtime_connections(
     exchange_connections = {
         venue: _projection(
             enabled=settings.fact_adapter_enabled and int(binding_counts.get(venue, 0)) > 0,
-            credential_state=(
-                "COMPLETE" if int(binding_counts.get(venue, 0)) > 0 else "MISSING"
-            ),
+            credential_state=("COMPLETE" if int(binding_counts.get(venue, 0)) > 0 else "MISSING"),
             config_complete=int(binding_counts.get(venue, 0)) > 0,
             health=_latest_health(source_health, venue),
             owner_role="系统管理员",
             write_process_enabled=(
-                settings.freqtrade_workers_enabled
-                and int(binding_counts.get(venue, 0)) > 0
+                settings.freqtrade_workers_enabled and int(binding_counts.get(venue, 0)) > 0
             ),
         )
         for venue in ("BINANCE", "HYPERLIQUID", "OKX", "BYBIT")

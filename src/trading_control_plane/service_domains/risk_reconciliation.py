@@ -30,9 +30,7 @@ class ReconciliationRiskService(ServiceComponent):
             )
         with self.database.session_factory.begin() as session:
             _environment, account_id, venue = scope_rules.scope_parts(execution_scope)
-            team = self.transactions.require_role(
-                session, actor_id, "reconcile", account_id, venue
-            )
+            team = self.transactions.require_role(session, actor_id, "reconcile", account_id, venue)
             if campaign_id is not None:
                 campaign = session.get(models.Campaign, campaign_id)
                 if campaign is None:
@@ -130,9 +128,7 @@ class ReconciliationRiskService(ServiceComponent):
     ) -> UUID:
         environment, account_id, venue = scope_rules.scope_parts(execution_scope)
         with self.database.session_factory.begin() as session:
-            team = self.transactions.require_role(
-                session, actor_id, "reconcile", account_id, venue
-            )
+            team = self.transactions.require_role(session, actor_id, "reconcile", account_id, venue)
             policy = session.scalar(
                 select(models.RiskPolicy).where(
                     models.RiskPolicy.team_id == team.team_id,

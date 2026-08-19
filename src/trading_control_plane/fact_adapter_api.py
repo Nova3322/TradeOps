@@ -76,9 +76,7 @@ def create_fact_adapter_app(
 
     @app.get("/health/ready")
     async def health_ready() -> JSONResponse:
-        health = await registry.health(
-            stale_after=timedelta(seconds=stale_after_seconds)
-        )
+        health = await registry.health(stale_after=timedelta(seconds=stale_after_seconds))
         return JSONResponse(
             status_code=200 if health["status"] == "ready" else 503,
             content=health,
@@ -148,10 +146,7 @@ def create_fact_adapter_app(
                         status = "STREAM_RESET_COMPENSATED"
                     elif after_sequence is not None and after_sequence > event.sequence:
                         status = "STREAM_RESET_COMPENSATED"
-                    elif (
-                        after_sequence is not None
-                        and after_sequence + 1 < event.sequence
-                    ):
+                    elif after_sequence is not None and after_sequence + 1 < event.sequence:
                         status = "SEQUENCE_GAP_COMPENSATED"
                     message["resume"] = {
                         "status": status,

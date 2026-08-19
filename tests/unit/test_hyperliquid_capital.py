@@ -84,9 +84,7 @@ def test_cctp_withdrawal_uses_current_route_and_unsigned_human_wallet() -> None:
     assert artifact["agentWallet"]["authorized"] is True
     assert artifact["agentWallet"]["capability"] == ("TRADING_AGENT_ONLY_MANUAL_WALLET_FALLBACK")
     assert artifact["fallbackReason"] == "CCTP_WITHDRAWAL_REQUIRES_USER_SIGNED_ACTION"
-    assert artifact["typedData"]["primaryType"] == (
-        "HyperliquidTransaction:SendToEvmWithData"
-    )
+    assert artifact["typedData"]["primaryType"] == ("HyperliquidTransaction:SendToEvmWithData")
     assert artifact["action"]["destinationChainId"] == 3
     assert artifact["action"]["gasLimit"] == 200_000
     assert artifact["action"]["token"] == f"USDC:{USDC_ASSET_ID}"
@@ -160,9 +158,7 @@ def test_bridge_deposit_is_fixed_to_native_usdc_and_official_bridge() -> None:
 
 
 def test_arbitrum_usdc_balance_reads_exact_native_usdc_balance() -> None:
-    def rpc_fetcher(
-        _url: str, method: str, params: list[object], _timeout: float
-    ) -> object:
+    def rpc_fetcher(_url: str, method: str, params: list[object], _timeout: float) -> object:
         assert method == "eth_call"
         call = params[0]
         assert isinstance(call, dict)
@@ -171,14 +167,13 @@ def test_arbitrum_usdc_balance_reads_exact_native_usdc_balance() -> None:
         assert params[1] == "latest"
         return hex(5_100_000)
 
-    balance = HyperliquidCapitalGateway(
-        rpc_fetcher=rpc_fetcher
-    ).arbitrum_usdc_balance(
+    balance = HyperliquidCapitalGateway(rpc_fetcher=rpc_fetcher).arbitrum_usdc_balance(
         rpc_url="https://arb.example.invalid/rpc",
         address=MAIN,
     )
 
     assert balance == Decimal("5.1")
+
 
 def test_exact_arbitrum_usdc_transfer_is_ready_for_browser_wallet() -> None:
     artifact = HyperliquidCapitalGateway().prepare_arbitrum_usdc_transfer(
@@ -376,9 +371,7 @@ def test_cctp_receipts_bind_signed_nonce_to_exact_arbitrum_credit() -> None:
             }
         ]
 
-    def cctp_fetcher(
-        _url: str, params: dict[str, str], _timeout: float
-    ) -> object:
+    def cctp_fetcher(_url: str, params: dict[str, str], _timeout: float) -> object:
         assert params == {"direction": "out", "user": MAIN}
         return [
             {
@@ -531,9 +524,7 @@ def test_default_rpc_transport_uses_bounded_requests_client(monkeypatch) -> None
     monkeypatch.setattr(hyperliquid_capital.requests, "post", post)
     gateway = HyperliquidCapitalGateway(timeout_seconds=4)
 
-    assert gateway._rpc_fetcher(
-        "https://arb1.arbitrum.io/rpc", "eth_blockNumber", [], 4
-    ) == "0x78"
+    assert gateway._rpc_fetcher("https://arb1.arbitrum.io/rpc", "eth_blockNumber", [], 4) == "0x78"
     assert calls == [
         (
             "https://arb1.arbitrum.io/rpc",

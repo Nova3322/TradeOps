@@ -625,13 +625,13 @@ def test_live_worker_force_entry_is_idempotent_and_force_exit_is_bounded(
                 {
                     "order_id": "exit-41",
                     "status": "closed",
-                        "is_open": False,
-                        "ft_order_side": "sell",
-                        "amount": 0.08,
-                        "filled": 0.08,
-                        "average": 72.6,
-                        "ft_order_tag": "force_exit",
-                        "order_filled_timestamp": 1_785_841_260_000,
+                    "is_open": False,
+                    "ft_order_side": "sell",
+                    "amount": 0.08,
+                    "filled": 0.08,
+                    "average": 72.6,
+                    "ft_order_tag": "force_exit",
+                    "order_filled_timestamp": 1_785_841_260_000,
                 }
             )
         return value

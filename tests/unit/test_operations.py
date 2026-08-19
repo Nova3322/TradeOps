@@ -115,9 +115,7 @@ def test_connection_matrix_projects_database_bindings_behind_process_master_swit
         )
     }
 
-    assert stopped["CCXT_PRO_CONTINUOUS_FACTS"]["deployment_state"] == (
-        "DISABLED_CONFIGURED"
-    )
+    assert stopped["CCXT_PRO_CONTINUOUS_FACTS"]["deployment_state"] == ("DISABLED_CONFIGURED")
     assert running["CCXT_PRO_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
 
 

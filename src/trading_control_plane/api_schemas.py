@@ -852,9 +852,7 @@ class DirectCapitalWalletSubmissionRequest(BaseModel):
             "TREASURY_WITHDRAWAL",
             "NOTILT_RELEASE_EXECUTION",
             "NOTILT_DESTINATION_TRANSFER",
-        } and (
-            self.transaction_hash is None
-        ):
+        } and (self.transaction_hash is None):
             raise ValueError("onchain wallet submission requires an Arbitrum transaction hash")
         if self.stage in {"HYPERLIQUID_WITHDRAWAL", "HYPERLIQUID_CLASS_TRANSFER"} and (
             self.nonce is None

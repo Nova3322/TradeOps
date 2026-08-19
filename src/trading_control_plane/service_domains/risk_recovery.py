@@ -1040,9 +1040,7 @@ class RecoveryRiskService(ServiceComponent):
             request = session.get(models.RiskControlChangeRequest, request_id, with_for_update=True)
             if request is None:
                 rejections.reject("RISK_RESTORE_NOT_FOUND", "restore request does not exist")
-            self.transactions.require_role(
-                session, reviewer_id, operation, team_id=request.team_id
-            )
+            self.transactions.require_role(session, reviewer_id, operation, team_id=request.team_id)
             reviewer = session.get(models.User, reviewer_id)
             if reviewer is None or reviewer.principal_type != domain.PrincipalType.HUMAN.value:
                 rejections.reject(

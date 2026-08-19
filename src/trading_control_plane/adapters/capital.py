@@ -54,9 +54,7 @@ class CapitalScope:
             if not value or value != value.strip() or len(value) > 160:
                 raise ValueError(f"capital adapter {name} is invalid")
         allowed_modes = (
-            {"STANDARD", "PORTFOLIO_MARGIN"}
-            if self.venue == "BINANCE"
-            else {"STANDARD"}
+            {"STANDARD", "PORTFOLIO_MARGIN"} if self.venue == "BINANCE" else {"STANDARD"}
         )
         if self.account_mode not in allowed_modes:
             raise DomainRejected(
@@ -333,9 +331,7 @@ def build_ccxt_capital_backend(
                 selected_scope.venue == "BINANCE"
                 and selected_scope.account_mode == "PORTFOLIO_MARGIN"
             ):
-                configuration["options"].update(
-                    {"papi": True, "portfolioMargin": True}
-                )
+                configuration["options"].update({"papi": True, "portfolioMargin": True})
             if selected_scope.venue == "OKX":
                 configuration["password"] = values.get("passphrase", "")
             if selected_scope.venue == "HYPERLIQUID":
@@ -390,9 +386,7 @@ class CallableCapitalBackend:
 class ProductionCapitalAdapterFactory:
     """Build an exact-scope adapter from dedicated capital-only custody."""
 
-    _NATIVE_METHODS: ClassVar[
-        dict[CapitalOperation, tuple[CapitalVenue, str]]
-    ] = {
+    _NATIVE_METHODS: ClassVar[dict[CapitalOperation, tuple[CapitalVenue, str]]] = {
         CapitalOperation.BINANCE_PREPARE_DEPOSIT: ("BINANCE", "prepare_deposit"),
         CapitalOperation.BINANCE_PREPARE_WITHDRAWAL: ("BINANCE", "prepare_withdrawal"),
         CapitalOperation.BINANCE_SUBMIT_WITHDRAWAL: ("BINANCE", "submit_withdrawal"),
@@ -441,13 +435,15 @@ class ProductionCapitalAdapterFactory:
             "find_cctp_withdrawal_credit",
         ),
     }
-    _GENERIC_CHAIN_OPERATIONS: ClassVar[frozenset[CapitalOperation]] = frozenset({
-        CapitalOperation.HYPERLIQUID_PREPARE_ARBITRUM_TRANSFER,
-        CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_TRANSFER,
-        CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_CREDIT,
-        CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_CREDIT_ANY,
-        CapitalOperation.HYPERLIQUID_FIND_ARBITRUM_CREDIT,
-    })
+    _GENERIC_CHAIN_OPERATIONS: ClassVar[frozenset[CapitalOperation]] = frozenset(
+        {
+            CapitalOperation.HYPERLIQUID_PREPARE_ARBITRUM_TRANSFER,
+            CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_TRANSFER,
+            CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_CREDIT,
+            CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_CREDIT_ANY,
+            CapitalOperation.HYPERLIQUID_FIND_ARBITRUM_CREDIT,
+        }
+    )
 
     def __init__(
         self,
@@ -543,10 +539,7 @@ class ProductionCapitalAdapterFactory:
             parameters: Mapping[str, Any],
         ) -> Any:
             venue, method_name = self._NATIVE_METHODS[operation]
-            if (
-                venue != selected_scope.venue
-                and operation not in self._GENERIC_CHAIN_OPERATIONS
-            ):
+            if venue != selected_scope.venue and operation not in self._GENERIC_CHAIN_OPERATIONS:
                 raise DomainRejected(
                     "CAPITAL_BACKEND_SCOPE_MISMATCH",
                     "capital fallback is outside the exact venue scope",
