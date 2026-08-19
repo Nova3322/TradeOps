@@ -385,7 +385,7 @@ def test_one_shot_fact_probe_uses_exact_scope_and_always_closes() -> None:
         return exchange
 
     probe = FactAdapterConnectionProbe(
-        bootstrap_symbols={"BINANCE": "BTC/USDT:USDT"},
+        bootstrap_symbols={"BINANCE": "BTCUSDT"},
         exchange_factory=factory,
     )
     result = probe.verify(
