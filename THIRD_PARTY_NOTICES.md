@@ -24,7 +24,7 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `viem` | `2.55.10` | Node.js | `MIT` |
 | `ws` | `8.21.0` | Node.js | `MIT` |
 | `aiohappyeyeballs` | `2.7.1` | Python | `PSF-2.0` |
-| `aiohttp` | `3.14.1` | Python | `Apache-2.0 AND MIT` |
+| `aiohttp` | `3.14.3` | Python | `Apache-2.0 AND MIT` |
 | `aiohttp-fast-zlib` | `0.3.0` | Python | `Apache-2.0` |
 | `aiosignal` | `1.4.0` | Python | `Apache-2.0` |
 | `alembic` | `1.18.5` | Python | `MIT` |
@@ -36,7 +36,7 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `beautifulsoup4` | `4.15.0` | Python | `MIT` |
 | `bitarray` | `3.9.2` | Python | `PSF-2.0` |
 | `bottleneck` | `1.6.0` | Python | `BSD-2-Clause` |
-| `ccxt` | `4.5.70` | Python | `MIT` |
+| `ccxt` | `4.5.74` | Python | `MIT` |
 | `certifi` | `2026.6.17` | Python | `MPL-2.0` |
 | `cffi` | `2.0.0` | Python | `MIT` |
 | `charset-normalizer` | `3.4.7` | Python | `MIT` |
@@ -46,7 +46,7 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `colorama` | `0.4.6` | Python | `BSD-3-Clause` |
 | `contourpy` | `1.3.3` | Python | `BSD-3-Clause` |
 | `coverage` | `7.15.2` | Python | `Apache-2.0` |
-| `cryptography` | `49.0.0` | Python | `Apache-2.0 OR BSD-3-Clause` |
+| `cryptography` | `50.0.0` | Python | `Apache-2.0 OR BSD-3-Clause` |
 | `curl-cffi` | `0.16.0` | Python | `MIT` |
 | `cycler` | `0.12.1` | Python | `BSD-3-Clause` |
 | `cytoolz` | `1.1.0` | Python | `BSD-3-Clause` |
@@ -131,7 +131,6 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `scikit-learn` | `1.9.0` | Python | `BSD-3-Clause` |
 | `scipy` | `1.18.0` | Python | `BSD-3-Clause` |
 | `seaborn` | `0.13.2` | Python | `BSD-3-Clause` |
-| `setuptools` | `83.0.0` | Python | `MIT` |
 | `six` | `1.17.0` | Python | `MIT` |
 | `soupsieve` | `2.9.2` | Python | `MIT` |
 | `sqlalchemy` | `2.0.51` | Python | `MIT` |
