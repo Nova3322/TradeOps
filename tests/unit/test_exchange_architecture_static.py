@@ -125,11 +125,13 @@ def test_binance_live_freqtrade_worker_corrects_exchange_clock_skew() -> None:
     )
     assert payload["exchange"]["ccxt_config"]["options"]["adjustForTimeDifference"] is True
     assert payload["exchange"]["ccxt_config"]["options"]["recvWindow"] == 60_000
+    assert payload["exchange"]["ccxt_config"]["options"]["papi"] is False
     assert (
         payload["exchange"]["ccxt_async_config"]["options"]["adjustForTimeDifference"]
         is True
     )
     assert payload["exchange"]["ccxt_async_config"]["options"]["recvWindow"] == 60_000
+    assert payload["exchange"]["ccxt_async_config"]["options"]["papi"] is False
 
 
 def test_compose_forwards_production_integration_switches_explicitly() -> None:

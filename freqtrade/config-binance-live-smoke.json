@@ -24,7 +24,7 @@
         "defaultType": "swap",
         "adjustForTimeDifference": true,
         "recvWindow": 60000,
-        "papi": true
+        "papi": false
       },
       "has": {
         "setMarginMode": false
@@ -36,7 +36,7 @@
         "defaultType": "swap",
         "adjustForTimeDifference": true,
         "recvWindow": 60000,
-        "papi": true
+        "papi": false
       },
       "has": {
         "setMarginMode": false
