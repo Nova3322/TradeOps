@@ -26,7 +26,10 @@ from trading_control_plane.models import (
     Instrument,
     Proposal,
 )
-from trading_control_plane.perptape import PerptapeClient, perptape_legacy_candidate_id
+from trading_control_plane.perptape import (
+    PerptapeClient,
+    perptape_legacy_candidate_id,
+)
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import MockTelegramGateway
@@ -298,6 +301,54 @@ def test_team_risk_policy_api_versions_explicit_limits_and_rejects_non_admin(
 async def logout(client: AsyncClient) -> None:
     response = await client.post("/api/auth/logout")
     assert response.status_code == 200
+
+
+def test_api_process_prefers_fresh_persisted_perptape_feed(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    feed = perptape_client().refresh(now=now, force=True)
+    service.record_perptape_feed(
+        ids["admin"],
+        feed,
+        now=now,
+        base_snapshot=None,
+    )
+    direct_fetches = 0
+
+    def unexpected_fetch(
+        _url: str, _headers: dict[str, str], _timeout: float
+    ) -> dict[str, Any]:
+        nonlocal direct_fetches
+        direct_fetches += 1
+        raise AssertionError("fresh runtime feed must prevent a direct Perptape request")
+
+    direct_client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="test-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(minutes=1),
+        fetcher=unexpected_fetch,
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(
+                app=app(database, MockTelegramGateway(), direct_client)
+            ),
+            base_url="http://test",
+        ) as http:
+            await login(http, "proposer")
+            response = await http.get("/api/opportunities")
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert len(payload["data"]) == 1
+            assert payload["snapshot_generated_at"] == feed.generated_at.isoformat()
+            assert payload["retry_at"] == feed.next_allowed_at.isoformat()
+
+    asyncio.run(scenario())
+    assert direct_fetches == 0
 
 
 def test_freqtrade_backend_status_is_explicit_and_order_send_remains_closed(

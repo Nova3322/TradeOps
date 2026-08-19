@@ -101,6 +101,7 @@ from trading_control_plane.capital_direct_use_cases import CapitalDirectUseCases
 from trading_control_plane.capital_receipt_use_cases import CapitalReceiptUseCases
 from trading_control_plane.capital_transfer_use_cases import CapitalTransferUseCases
 from trading_control_plane.exchange_connection_verification import ExchangeConnectionVerification
+from trading_control_plane.perptape import PerptapeFeedSnapshot
 from trading_control_plane.request_context import (
     ApiClientRequestContext,
     bind_api_client_context,
@@ -548,31 +549,41 @@ def create_app(
                 )
             )
 
+    def current_persisted_perptape_feed(
+        *, user_id: UUID, now: datetime
+    ) -> PerptapeFeedSnapshot | None:
+        feed = queries().perptape_feed(user_id)
+        if feed is None:
+            return None
+        grace = timedelta(
+            seconds=(
+                resolved_settings.runtime_sync_interval_seconds
+                + int(resolved_settings.perptape_timeout_seconds)
+                + 30
+            )
+        )
+        if (
+            feed.contract_version == resolved_settings.perptape_contract_version
+            and now <= feed.next_allowed_at + grace
+        ):
+            return feed
+        if resolved_settings.runtime_sync_enabled:
+            raise DomainRejected(
+                "PERPTAPE_CACHE_STALE",
+                "runtime Perptape feed is stale or uses another contract version",
+            )
+        return None
+
     def current_perptape_candidates(*, user_id: UUID, now: datetime) -> list[PerptapeCandidate]:
         runtime = service().perptape_source_runtime(user_id)
-        if resolved_settings.runtime_sync_enabled:
-            feed = queries().perptape_feed(user_id)
-            if feed is None:
-                raise DomainRejected(
-                    "PERPTAPE_CACHE_UNAVAILABLE",
-                    "runtime sync has not recorded a Perptape feed",
-                )
-            grace = timedelta(
-                seconds=(
-                    resolved_settings.runtime_sync_interval_seconds
-                    + int(resolved_settings.perptape_timeout_seconds)
-                    + 30
-                )
-            )
-            if (
-                feed.contract_version != resolved_settings.perptape_contract_version
-                or now > feed.next_allowed_at + grace
-            ):
-                raise DomainRejected(
-                    "PERPTAPE_CACHE_STALE",
-                    "runtime Perptape feed is stale or uses another contract version",
-                )
+        feed = current_persisted_perptape_feed(user_id=user_id, now=now)
+        if feed is not None:
             return list(feed.candidates)
+        if resolved_settings.runtime_sync_enabled:
+            raise DomainRejected(
+                "PERPTAPE_CACHE_UNAVAILABLE",
+                "runtime sync has not recorded a Perptape feed",
+            )
         team_api_key = runtime["api_key"]
         if team_api_key is not None:
             cache_key = (UUID(str(runtime["signal_source_id"])), int(runtime["version"]))
@@ -614,7 +625,7 @@ def create_app(
             for candidate in source_candidates
             if perptape_candidate_identity_is_displayable(candidate)
         ]
-        feed = queries().perptape_feed(user_id) if resolved_settings.runtime_sync_enabled else None
+        feed = current_persisted_perptape_feed(user_id=user_id, now=now)
         active_instrument_keys = queries().active_instrument_keys(
             {
                 (candidate.venue, candidate.symbol)
