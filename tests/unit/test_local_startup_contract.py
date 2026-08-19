@@ -61,3 +61,15 @@ def test_local_startup_rejects_unknown_preserved_capability_gate(
 
     with pytest.raises(RuntimeError, match="unknown gates: UNKNOWN_GATE"):
         _preserved_enabled_capability_gates()
+
+
+def test_compose_runtime_persists_operational_port_and_perptape_transport() -> None:
+    script = (ROOT / "scripts" / "run_compose.sh").read_text()
+
+    assert 'persist_runtime_default TRADING_PUBLIC_PORT "$public_port"' in script
+    assert (
+        "persist_runtime_default TRADING_PERPTAPE_WEBSOCKET_ENABLED "
+        '"$perptape_websocket_enabled"'
+    ) in script
+    assert "TRADING_PUBLIC_PORT must be an integer between 1 and 65535" in script
+    assert "TRADING_PERPTAPE_WEBSOCKET_ENABLED must be true or false" in script

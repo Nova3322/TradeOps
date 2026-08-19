@@ -86,6 +86,28 @@ if ! grep -q '^TRADING_FACT_ADAPTER_BEARER_TOKEN=.' "$env_file"; then
   chmod 600 "$env_file"
 fi
 
+persist_runtime_default() {
+  local key="$1"
+  local value="$2"
+  if ! grep -q "^${key}=" "$env_file"; then
+    printf '%s=%s\n' "$key" "$value" >>"$env_file"
+  fi
+}
+
+public_port="${TRADING_PUBLIC_PORT:-8000}"
+if [[ ! "$public_port" =~ ^[0-9]+$ ]] || (( public_port < 1 || public_port > 65535 )); then
+  echo "TRADING_PUBLIC_PORT must be an integer between 1 and 65535" >&2
+  exit 2
+fi
+perptape_websocket_enabled="${TRADING_PERPTAPE_WEBSOCKET_ENABLED:-false}"
+if [[ "$perptape_websocket_enabled" != "true" && "$perptape_websocket_enabled" != "false" ]]; then
+  echo "TRADING_PERPTAPE_WEBSOCKET_ENABLED must be true or false" >&2
+  exit 2
+fi
+persist_runtime_default TRADING_PUBLIC_PORT "$public_port"
+persist_runtime_default TRADING_PERPTAPE_WEBSOCKET_ENABLED "$perptape_websocket_enabled"
+chmod 600 "$env_file"
+
 required_variables=(
   TRADING_DATABASE_URL
   TRADING_SESSION_SIGNING_SECRET
