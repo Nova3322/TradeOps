@@ -191,11 +191,14 @@ class AccountQueries(QueryComponent):
                     RuntimeSourceHealth.venue == venue,
                 )
             )
-        if source is None or source.last_success_at is None:
+        history_incomplete = bool(
+            source is not None and "HISTORY_INCOMPLETE" in str(source.error_code or "")
+        )
+        if source is None:
             data_status = "UNKNOWN"
-        elif now - source.last_success_at > timedelta(seconds=stale_after_seconds):
+        elif now - source.checked_at > timedelta(seconds=stale_after_seconds):
             data_status = "STALE"
-        elif source.status == "SUCCESS":
+        elif source.status == "SUCCESS" or history_incomplete:
             data_status = "CURRENT"
         else:
             data_status = "UNKNOWN"

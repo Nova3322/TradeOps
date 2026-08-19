@@ -6,6 +6,10 @@ const executionSource = readFileSync(
   new URL('../src/trading_control_plane/web/execution.js', import.meta.url),
   'utf8',
 );
+const accountsSource = readFileSync(
+  new URL('../src/trading_control_plane/web/accounts.js', import.meta.url),
+  'utf8',
+);
 const routerSource = readFileSync(
   new URL('../src/trading_control_plane/web/router.js', import.meta.url),
   'utf8',
@@ -27,6 +31,12 @@ test('production account cards expose the exact-account detail workflow', () => 
   assert.match(routerSource, /venueAccountMatch = path\.match\(\/\^\\\/venues\\\/\(\[\^\/\]\+\)\$\/\)/);
   assert.match(routerSource, /renderVenueAccountDetail\(venueAccountMatch\[1\]\)/);
   assert.match(indexSource, /execution\.js\?v=192/);
-  assert.match(indexSource, /accounts\.js\?v=178/);
-  assert.match(serviceWorkerSource, /trading-shell-v223/);
+  assert.match(indexSource, /accounts\.js\?v=179/);
+  assert.match(serviceWorkerSource, /trading-shell-v224/);
+});
+
+test('account detail trusts fresh exact-account facts instead of API-local worker flags', () => {
+  assert.match(accountsSource, /health\?\.data\?\.data_status === 'CURRENT'/);
+  assert.match(accountsSource, /external_boundaries\?\.fact_adapter\?\.reconciliation_seconds/);
+  assert.doesNotMatch(accountsSource, /processRuntimeEnabled/);
 });

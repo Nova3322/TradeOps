@@ -106,6 +106,52 @@ def record_account_equity_observation(
 
 
 class FactIngestionExecutionService(ServiceComponent):
+    @staticmethod
+    def _record_fact_adapter_health(
+        session: Session,
+        *,
+        binding: PreparedRuntimeAccountBinding,
+        items_observed: int,
+        history_error_code: str | None,
+        now: datetime,
+    ) -> None:
+        current = session.scalar(
+            select(models.RuntimeSourceHealth)
+            .where(
+                models.RuntimeSourceHealth.team_id == binding.team_id,
+                models.RuntimeSourceHealth.source_name == binding.venue,
+                models.RuntimeSourceHealth.environment == binding.environment,
+                models.RuntimeSourceHealth.account_id == binding.account_id,
+                models.RuntimeSourceHealth.venue == binding.venue,
+            )
+            .with_for_update()
+        )
+        status = "FAILED" if history_error_code is not None else "SUCCESS"
+        values = {
+            "status": status,
+            "items_observed": items_observed,
+            "error_code": history_error_code,
+            "checked_at": now,
+            "last_success_at": now,
+            "retry_at": None,
+            "consecutive_failures": 1 if history_error_code is not None else 0,
+            "updated_by": binding.service_principal_id,
+        }
+        if current is None:
+            session.add(
+                models.RuntimeSourceHealth(
+                    team_id=binding.team_id,
+                    source_name=binding.venue,
+                    environment=binding.environment,
+                    account_id=binding.account_id,
+                    venue=binding.venue,
+                    **values,
+                )
+            )
+            return
+        for field, value in values.items():
+            setattr(current, field, value)
+
     def ingest_normalized_read_only_account_snapshot(
         self,
         account_id: str,
@@ -591,6 +637,14 @@ class FactIngestionExecutionService(ServiceComponent):
                 now=now,
                 session=session,
             )
+            if runtime_binding is not None:
+                self._record_fact_adapter_health(
+                    session,
+                    binding=runtime_binding,
+                    items_observed=len(snapshots),
+                    history_error_code=history_error_code,
+                    now=now,
+                )
         return {
             "symbols": persisted,
             "positions_covered": covered,

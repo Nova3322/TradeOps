@@ -307,7 +307,10 @@ def test_results_audit_and_runtime_api_do_not_mix_environments_or_expose_secrets
             }
             assert payload["external_boundaries"]["fact_adapter"] == {
                 "enabled": False,
+                "configured": False,
+                "process_local_enabled": False,
                 "database_binding_counts": {},
+                "reconciliation_seconds": 300,
                 "transport": "CCXT_PRO_WEBSOCKET_WITH_BOUNDED_REST",
                 "page_triggered_requests": False,
                 "order_send_supported": False,

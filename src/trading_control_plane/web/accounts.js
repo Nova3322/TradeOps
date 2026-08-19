@@ -225,17 +225,23 @@ async function renderVenueAccountDetail(requestedAccountId) {
   ]);
   const accountId = account.account_id;
   const facts = factsResult.data;
-  const processRuntimeEnabled = Boolean(runtime?.data?.external_boundaries?.runtime_sync?.enabled);
+  const persistedHistoryIncomplete = Boolean(
+    health?.data?.error_code && String(health.data.error_code).includes('HISTORY_INCOMPLETE')
+  );
+  const persistedFactsCurrent = Boolean(
+    health?.data?.data_status === 'CURRENT'
+      && (health.data.runtime_status === 'SUCCESS' || persistedHistoryIncomplete)
+  );
   const status = {
     venue,
     execution_backend:'FREQTRADE',
     worker_configured:false,
-    automatic_sync_enabled:Boolean(processRuntimeEnabled && account?.runtime_binding?.bound),
-    automatic_sync_interval_seconds:runtime?.data?.external_boundaries?.runtime_sync?.interval_seconds || 0,
+    automatic_sync_enabled:Boolean(persistedFactsCurrent && account?.runtime_binding?.bound),
+    automatic_sync_interval_seconds:runtime?.data?.external_boundaries?.fact_adapter?.reconciliation_seconds || 0,
     default_account_id:accountId,
     fact_environment:account.environment,
   };
-  status.automatic_sync_enabled = Boolean(processRuntimeEnabled && account.runtime_binding?.bound);
+  status.automatic_sync_enabled = Boolean(persistedFactsCurrent && account.runtime_binding?.bound);
   status.default_account_id = accountId;
   const aggregateConnection = runtime?.data?.connections?.[venue] || null;
   const persistedHealth = health?.data
@@ -248,22 +254,28 @@ async function renderVenueAccountDetail(requestedAccountId) {
   const connection = exactHealth
     ? {
         ...aggregateConnection,
-        available:exactHealth.status === 'SUCCESS' && status.automatic_sync_enabled,
-        category:exactHealth.status === 'SUCCESS'
+        available:(exactHealth.status === 'SUCCESS' || String(exactHealth.error_code || '').includes('HISTORY_INCOMPLETE')) && status.automatic_sync_enabled,
+        category:String(exactHealth.error_code || '').includes('HISTORY_INCOMPLETE')
+          ? 'READ_ONLY_CONNECTED_HISTORY_INCOMPLETE'
+          : exactHealth.status === 'SUCCESS'
           ? status.automatic_sync_enabled ? 'READ_ONLY_CONNECTED' : 'EXPLICITLY_DISABLED'
-          : String(exactHealth.error_code || '').includes('HISTORY_INCOMPLETE')
-            ? 'READ_ONLY_CONNECTED_HISTORY_INCOMPLETE'
-            : exactHealth.status === 'SKIPPED' ? 'PROBE_SKIPPED' : 'READ_ONLY_PROBE_FAILED',
+          : exactHealth.status === 'SKIPPED' ? 'PROBE_SKIPPED' : 'READ_ONLY_PROBE_FAILED',
         error_code:exactHealth.error_code,
         checked_at:exactHealth.checked_at,
         last_success_at:exactHealth.last_success_at,
         retry_at:exactHealth.retry_at,
         consecutive_failures:exactHealth.consecutive_failures,
-        reason:exactHealth.status === 'SUCCESS' && !status.automatic_sync_enabled
+        reason:String(exactHealth.error_code || '').includes('HISTORY_INCOMPLETE')
+          ? '当前余额、仓位与订单只读事实已连接；历史成交或资金费补全暂不完整。'
+          : exactHealth.status === 'SUCCESS' && !status.automatic_sync_enabled
           ? '最近只读探针成功，但连续同步当前关闭，因此不标记为实时连接。'
-          : aggregateConnection?.reason || '该账户最近一次只读同步没有形成可用实时事实。',
+          : exactHealth.status === 'SUCCESS'
+            ? '最近一次精确账户只读同步成功。'
+            : aggregateConnection?.reason || '该账户最近一次只读同步没有形成可用实时事实。',
         owner_role:aggregateConnection?.owner_role || '系统管理员',
-        next_action:exactHealth.status === 'SUCCESS' && !status.automatic_sync_enabled
+        next_action:String(exactHealth.error_code || '').includes('HISTORY_INCOMPLETE')
+          ? '等待上游历史接口恢复；新增风险继续保持阻断。'
+          : exactHealth.status === 'SUCCESS' && !status.automatic_sync_enabled
           ? '在连接设置中启用连续只读同步。'
           : aggregateConnection?.next_action || '检查精确账户错误代码并等待下一次有界重试。',
       }

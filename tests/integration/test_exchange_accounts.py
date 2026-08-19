@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -15,13 +16,143 @@ from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.credentials import CredentialCipher
 from trading_control_plane.database import Database
-from trading_control_plane.domain import DomainRejected, Role
+from trading_control_plane.domain import DomainRejected, ExecutionEnvironment, Role
 from trading_control_plane.freqtrade import FreqtradeWorkerClient, FreqtradeWorkerSpec
-from trading_control_plane.models import AuditEvent, ExchangeAccount, RoleAssignment, User
+from trading_control_plane.models import (
+    AuditEvent,
+    ExchangeAccount,
+    RoleAssignment,
+    RuntimeSourceHealth,
+    User,
+)
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.runtime_contracts import ConnectionProbeResult
 from trading_control_plane.service import TradingService
+from trading_control_plane.venue_read_only import (
+    VenueEquity,
+    VenueInstrument,
+    VenuePosition,
+    VenueReadOnlySnapshot,
+)
+
+
+def test_fact_adapter_ingestion_refreshes_exact_account_runtime_health(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("fact-health-admin", now=now)
+    account_uuid = service.create_exchange_account(
+        actor_id=admin,
+        account_id="fact-health-main",
+        venue="BINANCE",
+        label="Fact Health Main",
+        credentials={"api_key": "fact-health-key", "api_secret": "fact-health-secret"},
+        idempotency_key="create-fact-health-account",
+        now=now,
+    )
+    command, replay = service.prepare_exchange_account_connection_verification(
+        account_uuid,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key="verify-fact-health-account",
+    )
+    assert command is not None and replay is None
+    verified = service.record_exchange_account_connection_verification(
+        command,
+        ConnectionProbeResult(True, None),
+        actor_id=admin,
+        idempotency_key="record-fact-health-verification",
+        now=now,
+    )
+    service.configure_exchange_account_runtime_sync(
+        account_uuid,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(verified["version"]),
+        idempotency_key="enable-fact-health-runtime",
+        now=now,
+    )
+    binding = service.runtime_account_bindings()[0]
+    snapshot = VenueReadOnlySnapshot(
+        symbol="BTCUSDT",
+        observed_at=now,
+        instrument=VenueInstrument(
+            symbol="BTCUSDT",
+            tick_size=Decimal("0.1"),
+            lot_size=Decimal("0.001"),
+            minimum_notional=Decimal("5"),
+            quote_currency="USDT",
+            collateral_currency="USDT",
+            active=True,
+        ),
+        orders=(),
+        fills=(),
+        position=VenuePosition(
+            quantity=Decimal(0),
+            average_entry_price=Decimal(0),
+            mark_price=Decimal("60000"),
+            observed_at=now,
+        ),
+        equity=VenueEquity(
+            equity=Decimal("100"),
+            available_balance=Decimal("100"),
+            currency="USDT",
+            observed_at=now,
+        ),
+        funding=(),
+        protection=None,
+    )
+
+    service.ingest_normalized_read_only_account_snapshot(
+        binding.account_id,
+        binding.service_principal_id,
+        (snapshot,),
+        venue=binding.venue,
+        environment=ExecutionEnvironment.LIVE,
+        runtime_binding=binding,
+        now=now,
+    )
+    with database.session_factory() as session:
+        health = session.scalar(
+            select(RuntimeSourceHealth).where(
+                RuntimeSourceHealth.team_id == binding.team_id,
+                RuntimeSourceHealth.account_id == binding.account_id,
+                RuntimeSourceHealth.venue == binding.venue,
+            )
+        )
+        assert health is not None
+        assert health.status == "SUCCESS"
+        assert health.checked_at == now
+        assert health.last_success_at == now
+        assert health.error_code is None
+
+    degraded_at = now + timedelta(seconds=1)
+    service.ingest_normalized_read_only_account_snapshot(
+        binding.account_id,
+        binding.service_principal_id,
+        (
+            replace(
+                snapshot,
+                observed_at=degraded_at,
+                history_error_code="FACT_ADAPTER_HISTORY_INCOMPLETE",
+            ),
+        ),
+        venue=binding.venue,
+        environment=ExecutionEnvironment.LIVE,
+        runtime_binding=binding,
+        now=degraded_at,
+    )
+    projected = TradingQueries(database).exchange_account_fact_health(
+        admin,
+        account_uuid,
+        stale_after_seconds=360,
+        now=degraded_at,
+    )
+    assert projected["data_status"] == "CURRENT"
+    assert projected["runtime_status"] == "FAILED"
+    assert projected["error_code"] == "FACT_ADAPTER_HISTORY_INCOMPLETE"
 
 
 def encryption_key() -> str:
