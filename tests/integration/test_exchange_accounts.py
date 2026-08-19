@@ -22,10 +22,15 @@ from trading_control_plane.models import (
     AuditEvent,
     ExchangeAccount,
     Instrument,
+    OrderIntent,
     Position,
     RoleAssignment,
     RuntimeSourceHealth,
     User,
+    VenueOrder,
+)
+from trading_control_plane.models import (
+    VenueFill as PersistedVenueFill,
 )
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
@@ -33,9 +38,13 @@ from trading_control_plane.runtime_contracts import ConnectionProbeResult
 from trading_control_plane.service import TradingService
 from trading_control_plane.venue_read_only import (
     VenueEquity,
+    VenueFill,
     VenueInstrument,
     VenuePosition,
     VenueReadOnlySnapshot,
+)
+from trading_control_plane.venue_read_only import (
+    VenueOrder as ReadOnlyVenueOrder,
 )
 
 
@@ -225,6 +234,146 @@ def test_fact_adapter_ingestion_refreshes_exact_account_runtime_health(
         ).all()
         assert eth_position.observed_at == refreshed_at
         assert len(covered_events) == 1
+
+
+def test_confirmed_external_fill_closes_matching_unbound_order(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("external-fill-admin", now=now)
+    account_uuid = service.create_exchange_account(
+        actor_id=admin,
+        account_id="external-fill-main",
+        venue="BINANCE",
+        label="External Fill Main",
+        credentials={"api_key": "external-fill-key", "api_secret": "external-fill-secret"},
+        idempotency_key="create-external-fill-account",
+        now=now,
+    )
+    command, replay = service.prepare_exchange_account_connection_verification(
+        account_uuid,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key="verify-external-fill-account",
+    )
+    assert command is not None and replay is None
+    verified = service.record_exchange_account_connection_verification(
+        command,
+        ConnectionProbeResult(True, None),
+        actor_id=admin,
+        idempotency_key="record-external-fill-verification",
+        now=now,
+    )
+    service.configure_exchange_account_runtime_sync(
+        account_uuid,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(verified["version"]),
+        idempotency_key="enable-external-fill-runtime",
+        now=now,
+    )
+    binding = service.runtime_account_bindings()[0]
+    base = VenueReadOnlySnapshot(
+        symbol="SOLUSDT",
+        observed_at=now,
+        instrument=VenueInstrument(
+            symbol="SOLUSDT",
+            tick_size=Decimal("0.01"),
+            lot_size=Decimal("0.001"),
+            minimum_notional=Decimal("5"),
+            quote_currency="USDT",
+            collateral_currency="USDT",
+            active=True,
+        ),
+        orders=(
+            ReadOnlyVenueOrder(
+                order_id="external-close-order",
+                client_order_id="external-close-client",
+                status="SENT",
+                side="SELL",
+                order_type="MARKET",
+                ordered_quantity=Decimal("0.130"),
+                filled_quantity=Decimal(0),
+                stop_price=Decimal(0),
+                reduce_only=True,
+                close_position=False,
+                observed_at=now,
+            ),
+        ),
+        fills=(),
+        position=VenuePosition(
+            quantity=Decimal("0.130"),
+            average_entry_price=Decimal("82"),
+            mark_price=Decimal("81.84"),
+            observed_at=now,
+        ),
+        equity=VenueEquity(
+            equity=Decimal("100"),
+            available_balance=Decimal("90"),
+            currency="USDT",
+            observed_at=now,
+        ),
+        funding=(),
+        protection=None,
+    )
+    service.ingest_normalized_read_only_account_snapshot(
+        binding.account_id,
+        binding.service_principal_id,
+        (base,),
+        venue=binding.venue,
+        environment=ExecutionEnvironment.LIVE,
+        runtime_binding=binding,
+        now=now,
+    )
+
+    filled_at = now + timedelta(seconds=1)
+    filled = replace(
+        base,
+        observed_at=filled_at,
+        orders=(),
+        fills=(
+            VenueFill(
+                fill_id="external-close-fill",
+                order_id="external-close-order",
+                side="SELL",
+                quantity=Decimal("0.130"),
+                price=Decimal("81.84"),
+                fee=Decimal("0.004"),
+                fee_currency="USDT",
+                executed_at=filled_at,
+            ),
+        ),
+        position=replace(
+            base.position,
+            quantity=Decimal(0),
+            average_entry_price=Decimal(0),
+            observed_at=filled_at,
+        ),
+        equity=replace(base.equity, observed_at=filled_at),
+    )
+    for observed_at in (filled_at, filled_at + timedelta(seconds=1)):
+        service.ingest_normalized_read_only_account_snapshot(
+            binding.account_id,
+            binding.service_principal_id,
+            (replace(filled, observed_at=observed_at),),
+            venue=binding.venue,
+            environment=ExecutionEnvironment.LIVE,
+            runtime_binding=binding,
+            now=observed_at,
+        )
+
+    with database.session_factory() as session:
+        order = session.scalar(
+            select(VenueOrder).where(VenueOrder.venue_order_id == "external-close-order")
+        )
+        assert order is not None
+        assert order.order_intent_id is None
+        assert order.status == "FILLED"
+        assert order.ordered_quantity == Decimal("0.130")
+        assert order.filled_quantity == Decimal("0.130")
+        assert session.query(PersistedVenueFill).count() == 1
+        assert session.query(OrderIntent).count() == 0
 
 
 def encryption_key() -> str:
