@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -90,3 +91,17 @@ def test_retired_exchange_modules_and_direct_backend_markers_stay_absent() -> No
             if path.is_file() and path.suffix not in {".pyc", ".woff2", ".png"}:
                 source = path.read_text(errors="ignore")
                 assert not any(marker in source for marker in forbidden), path
+
+
+def test_all_freqtrade_configs_use_built_in_sync_and_async_rate_limiting() -> None:
+    configs = tuple((ROOT / "freqtrade").glob("config*.json"))
+    assert configs
+    for path in configs:
+        payload = json.loads(path.read_text())
+        exchange = payload["exchange"]
+        assert exchange["ccxt_config"]["enableRateLimit"] is True, path
+        assert exchange["ccxt_async_config"]["enableRateLimit"] is True, path
+        assert "rateLimit" not in exchange["ccxt_config"], path
+        assert "rateLimit" not in exchange["ccxt_async_config"], path
+        assert payload["process_only_new_candles"] is True, path
+        assert 1 <= len(exchange["pair_whitelist"]) <= 2, path

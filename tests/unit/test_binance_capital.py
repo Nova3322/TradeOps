@@ -14,13 +14,34 @@ from trading_control_plane.adapters.binance_capital import (
     OFFICIAL_BINANCE_BASE_URLS,
     BinanceCapitalGateway,
 )
-from trading_control_plane.binance_errors import BinanceRequestState
+from trading_control_plane.binance_errors import BinanceApiDiagnostic, BinanceRequestState
 from trading_control_plane.domain import DomainRejected
 
 DESTINATION = "0x1111111111111111111111111111111111111111"
 SOURCE = "0x2222222222222222222222222222222222222222"
 TX_HASH = "0x" + "ab" * 32
 NOW = datetime(2026, 8, 8, 12, tzinfo=UTC)
+
+
+def test_binance_diagnostic_deserialization_rejects_ambiguous_integer_values() -> None:
+    valid: dict[str, object] = {
+        "category": "REQUEST_WEIGHT_EXCEEDED",
+        "http_status": "429",
+        "binance_error_code": -1003,
+        "binance_error_message": "rate limited",
+        "retry_after_seconds": 30,
+        "rate_limit_headers": {},
+        "failed_at": NOW.isoformat(),
+        "next_retry_at": NOW.isoformat(),
+    }
+    assert BinanceApiDiagnostic.from_dict(valid) is not None
+    for field, invalid in (
+        ("http_status", True),
+        ("http_status", 429.0),
+        ("binance_error_code", "not-an-integer"),
+        ("retry_after_seconds", object()),
+    ):
+        assert BinanceApiDiagnostic.from_dict({**valid, field: invalid}) is None
 
 
 def responses(*, ip_restrict: bool = True, destination: str = DESTINATION) -> dict[str, Any]:

@@ -99,7 +99,7 @@ class CapitalQueries(QueryComponent):
                 raise domain.DomainRejected(
                     "TEAM_SCOPE_DENIED", "transfer proposal is outside scope"
                 )
-            if not self.service.can_user(
+            if not self.can_user(
                 user_id, "capital.view", proposal.account_id, proposal.venue
             ):
                 raise domain.DomainRejected("RBAC_DENIED", "transfer proposal is outside scope")
@@ -190,7 +190,7 @@ class CapitalQueries(QueryComponent):
                 raise domain.DomainRejected(
                     "TEAM_SCOPE_DENIED", "capital transfer is outside scope"
                 )
-            if not self.service.can_user(
+            if not self.can_user(
                 user_id, "capital.view", transfer.account_id, transfer.venue
             ):
                 raise domain.DomainRejected("RBAC_DENIED", "capital transfer is outside scope")
@@ -232,7 +232,7 @@ class CapitalQueries(QueryComponent):
             def can_view_scope(account_id: str | None = None, venue: str | None = None) -> bool:
                 scope = (account_id, venue)
                 if scope not in scope_access:
-                    scope_access[scope] = self.service.can_user(
+                    scope_access[scope] = self.can_user(
                         user_id,
                         "capital.view",
                         account_id,
@@ -541,7 +541,7 @@ class CapitalQueries(QueryComponent):
             def can_view_scope(account_id: str | None = None, venue: str | None = None) -> bool:
                 scope = (account_id, venue)
                 if scope not in scope_access:
-                    scope_access[scope] = self.service.can_user(
+                    scope_access[scope] = self.can_user(
                         user_id,
                         "capital.view",
                         account_id,
@@ -900,7 +900,7 @@ class CapitalQueries(QueryComponent):
                         ),
                     }
                     for item in proposals
-                    if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+                    if self.can_user(user_id, "capital.view", item.account_id, item.venue)
                 ],
                 "transfers": [self._capital_transfer_summary(item) for item in visible_transfers],
                 "direct_operations": [
@@ -933,7 +933,7 @@ class CapitalQueries(QueryComponent):
                         "updated_at": iso_datetime(item.updated_at),
                     }
                     for item in direct_operations
-                    if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+                    if self.can_user(user_id, "capital.view", item.account_id, item.venue)
                 ],
                 "automation": {
                     "gates": automation_gates,
@@ -958,7 +958,7 @@ class CapitalQueries(QueryComponent):
                             "updated_at": iso_datetime(item.updated_at),
                         }
                         for item in policies
-                        if self.service.can_user(
+                        if self.can_user(
                             user_id, "capital.view", item.account_id, item.venue
                         )
                     ],

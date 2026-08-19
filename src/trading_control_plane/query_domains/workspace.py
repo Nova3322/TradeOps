@@ -250,7 +250,7 @@ class WorkspaceQueries(QueryComponent):
             }
 
     def managed_users(self, actor_id: UUID) -> list[dict[str, Any]]:
-        if not self.service.can_user(actor_id, "user.manage"):
+        if not self.can_user(actor_id, "user.manage"):
             raise domain.DomainRejected(
                 "RBAC_DENIED", "user access management requires SYSTEM_ADMIN"
             )
@@ -508,13 +508,13 @@ class WorkspaceQueries(QueryComponent):
         limit: int = 100,
     ) -> dict[str, Any]:
         workspace_id, team_id = self.active_scope_ids(user_id)
-        if not self.service.can_user(user_id, "notification.view"):
+        if not self.can_user(user_id, "notification.view"):
             raise domain.DomainRejected(
                 "RBAC_DENIED",
                 "notification.view is not allowed in the active team",
             )
         bounded_limit = min(max(limit, 1), 200)
-        can_manage = self.service.can_user(user_id, "notification.manage")
+        can_manage = self.can_user(user_id, "notification.manage")
         with self.database.session_factory() as session:
             team = session.get(models.Team, team_id)
             routes = session.scalars(

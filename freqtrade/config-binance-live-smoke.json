@@ -20,23 +20,44 @@
     "key": "",
     "secret": "",
     "ccxt_config": {
-      "options": {"defaultType": "swap", "papi": true},
-      "has": {"setMarginMode": false}
+      "options": {
+        "defaultType": "swap",
+        "papi": true
+      },
+      "has": {
+        "setMarginMode": false
+      },
+      "enableRateLimit": true
     },
     "ccxt_async_config": {
-      "options": {"defaultType": "swap", "papi": true},
-      "has": {"setMarginMode": false}
+      "options": {
+        "defaultType": "swap",
+        "papi": true
+      },
+      "has": {
+        "setMarginMode": false
+      },
+      "enableRateLimit": true
     },
-    "pair_whitelist": ["SOL/USDT:USDT"],
+    "pair_whitelist": [
+      "SOL/USDT:USDT"
+    ],
     "pair_blacklist": []
   },
-  "pairlists": [{"method": "StaticPairList"}],
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    }
+  ],
   "entry_pricing": {
     "price_side": "same",
     "use_order_book": true,
     "order_book_top": 1,
     "price_last_balance": 0,
-    "check_depth_of_market": {"enabled": false, "bids_to_ask_delta": 1}
+    "check_depth_of_market": {
+      "enabled": false,
+      "bids_to_ask_delta": 1
+    }
   },
   "exit_pricing": {
     "price_side": "same",
@@ -53,7 +74,11 @@
     "stoploss_on_exchange": true,
     "stoploss_on_exchange_interval": 60
   },
-  "unfilledtimeout": {"entry": 1, "exit": 1, "unit": "minutes"},
+  "unfilledtimeout": {
+    "entry": 1,
+    "exit": 1,
+    "unit": "minutes"
+  },
   "telegram": {
     "enabled": false,
     "token": "",

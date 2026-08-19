@@ -265,7 +265,7 @@ class ExecutionQueries(QueryComponent):
                 for item in session.scalars(
                     campaign_query.order_by(models.Campaign.updated_at, models.Campaign.campaign_id)
                 ).all()
-                if self.service.can_user(user_id, "view", item.account_id, item.venue)
+                if self.can_user(user_id, "view", item.account_id, item.venue)
             ]
             attribution_cache: dict[UUID, dict[str, Any]] = {}
 
@@ -434,7 +434,7 @@ class ExecutionQueries(QueryComponent):
             }
             risk_proposals: dict[UUID, tuple[models.Proposal, dict[str, Any]]] = {}
             for proposal in session.scalars(risk_proposal_query).all():
-                if not self.service.can_user(user_id, "view", proposal.account_id, proposal.venue):
+                if not self.can_user(user_id, "view", proposal.account_id, proposal.venue):
                     continue
                 if campaign_id is not None and proposal.proposal_id not in campaign_proposal_ids:
                     continue
@@ -722,7 +722,7 @@ class ExecutionQueries(QueryComponent):
                         models.Proposal.team_id == team_id,
                     )
                 ).all()
-                if self.service.can_user(user_id, "view", item.account_id, item.venue)
+                if self.can_user(user_id, "view", item.account_id, item.venue)
             ]
             proposal_ids = [item.proposal_id for item in proposals]
             object_ids.update(str(item.proposal_id) for item in proposals)
@@ -734,7 +734,7 @@ class ExecutionQueries(QueryComponent):
                         models.Campaign.team_id == team_id,
                     )
                 ).all()
-                if self.service.can_user(user_id, "view", item.account_id, item.venue)
+                if self.can_user(user_id, "view", item.account_id, item.venue)
             ]
             campaign_ids = [item.campaign_id for item in campaigns]
             object_ids.update(str(item.campaign_id) for item in campaigns)
@@ -812,7 +812,7 @@ class ExecutionQueries(QueryComponent):
                         models.TransferProposal.environment == environment,
                     )
                 ).all()
-                if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+                if self.can_user(user_id, "capital.view", item.account_id, item.venue)
             ]
             transfer_proposal_ids = [item.transfer_proposal_id for item in transfer_proposals]
             object_ids.update(str(item) for item in transfer_proposal_ids)
@@ -849,7 +849,7 @@ class ExecutionQueries(QueryComponent):
                         models.CapitalAutomationPolicy.environment == environment,
                     )
                 ).all()
-                if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+                if self.can_user(user_id, "capital.view", item.account_id, item.venue)
             ]
             object_ids.update(str(item.policy_id) for item in policies)
             if not object_ids:
@@ -1043,7 +1043,7 @@ class ExecutionQueries(QueryComponent):
             ).all()
             result: list[dict[str, Any]] = []
             for campaign, instrument in values:
-                if not self.service.can_user(user_id, "view", campaign.account_id, campaign.venue):
+                if not self.can_user(user_id, "view", campaign.account_id, campaign.venue):
                     continue
                 summary = self._campaign_summary(campaign, instrument)
                 summary["workspace_id"] = str(workspace_id)
@@ -1058,7 +1058,7 @@ class ExecutionQueries(QueryComponent):
                 raise domain.DomainRejected("CAMPAIGN_NOT_FOUND", "campaign does not exist")
             if campaign.team_id != team_id:
                 raise domain.DomainRejected("TEAM_SCOPE_DENIED", "campaign is outside active team")
-            if not self.service.can_user(user_id, "view", campaign.account_id, campaign.venue):
+            if not self.can_user(user_id, "view", campaign.account_id, campaign.venue):
                 raise domain.DomainRejected("RBAC_DENIED", "campaign is outside the current scope")
             instrument = session.get(models.Instrument, campaign.instrument_id)
             proposal = session.get(models.Proposal, campaign.proposal_id)
@@ -1322,7 +1322,7 @@ class ExecutionQueries(QueryComponent):
                 raise domain.DomainRejected("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
             if campaign.team_id != team_id:
                 raise domain.DomainRejected("TEAM_SCOPE_DENIED", "intent is outside active team")
-            if not self.service.can_user(user_id, "view", campaign.account_id, campaign.venue):
+            if not self.can_user(user_id, "view", campaign.account_id, campaign.venue):
                 raise domain.DomainRejected("RBAC_DENIED", "intent is outside the current scope")
             return campaign.campaign_id
 

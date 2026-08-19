@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
+from trading_control_plane.credentials import CredentialCipher
 from trading_control_plane.database import Database
 from trading_control_plane.query_component import QueryRuntime
 from trading_control_plane.query_domains.accounts import AccountQueries
@@ -13,7 +14,7 @@ from trading_control_plane.query_domains.proposals import ProposalQueries
 from trading_control_plane.query_domains.risk import list_exceptions
 from trading_control_plane.query_domains.signals import SignalQueries
 from trading_control_plane.query_domains.workspace import WorkspaceQueries
-from trading_control_plane.service import TradingService
+from trading_control_plane.service_transactions import TransactionService
 
 _performance_metrics = performance_metrics
 
@@ -33,4 +34,7 @@ class TradingQueries(
         return list_exceptions(self, self, user_id, now=now)
 
     def __init__(self, database: Database) -> None:
-        self.runtime = QueryRuntime(database=database, service=TradingService(database))
+        self.runtime = QueryRuntime(
+            database=database,
+            access_policy=TransactionService(database, CredentialCipher(None)),
+        )

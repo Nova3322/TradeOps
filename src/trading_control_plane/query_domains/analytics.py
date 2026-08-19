@@ -92,7 +92,7 @@ class AnalyticsQueries(QueryComponent):
                         "report does not contain verified exact account and venue scopes",
                     )
                 if any(
-                    not self.service.can_user(
+                    not self.can_user(
                         user_id,
                         "view",
                         item["account_id"],
@@ -166,7 +166,7 @@ class AnalyticsQueries(QueryComponent):
                     .where(models.ExchangeAccount.team_id == team_id, models.ExchangeAccount.active)
                     .order_by(models.ExchangeAccount.venue, models.ExchangeAccount.account_id)
                 ).all()
-                if self.service.can_user(user_id, "view", account.account_id, account.venue)
+                if self.can_user(user_id, "view", account.account_id, account.venue)
             ]
             return {
                 "scope": {
@@ -254,7 +254,7 @@ class AnalyticsQueries(QueryComponent):
                     models.ExchangeAccount.venue, models.ExchangeAccount.account_id
                 )
             ).all()
-            if self.service.can_user(user_id, "view", item.account_id, item.venue)
+            if self.can_user(user_id, "view", item.account_id, item.venue)
         ]
         if not accounts:
             raise domain.DomainRejected(

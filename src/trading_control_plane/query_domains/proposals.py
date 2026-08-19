@@ -117,7 +117,7 @@ class ProposalQueries(QueryComponent):
             }
             result: list[dict[str, Any]] = []
             for proposal, instrument in values:
-                if not self.service.can_user(user_id, "view", proposal.account_id, proposal.venue):
+                if not self.can_user(user_id, "view", proposal.account_id, proposal.venue):
                     continue
                 effective_status = effective_proposal_status(proposal, current_time)
                 summary = proposal_summary(proposal, instrument)
@@ -138,7 +138,7 @@ class ProposalQueries(QueryComponent):
                     and proposal.proposer_id != user_id
                     and str(proposal.proposal_id) not in reused_proposal_ids
                     and proposal.proposal_id not in reviewed_proposal_ids
-                    and self.service.can_user(
+                    and self.can_user(
                         user_id,
                         "proposal.review",
                         proposal.account_id,
@@ -176,7 +176,7 @@ class ProposalQueries(QueryComponent):
             ).all()
             grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
             for proposal, instrument in values:
-                if not self.service.can_user(
+                if not self.can_user(
                     user_id,
                     "view",
                     proposal.account_id,
@@ -217,7 +217,7 @@ class ProposalQueries(QueryComponent):
                 raise domain.DomainRejected("PROPOSAL_NOT_FOUND", "proposal does not exist")
             if proposal.team_id != team_id:
                 raise domain.DomainRejected("TEAM_SCOPE_DENIED", "proposal is outside active team")
-            if not self.service.can_user(user_id, "view", proposal.account_id, proposal.venue):
+            if not self.can_user(user_id, "view", proposal.account_id, proposal.venue):
                 raise domain.DomainRejected("RBAC_DENIED", "proposal is outside the current scope")
             approvals = session.scalars(
                 select(models.Approval)
@@ -318,7 +318,7 @@ class ProposalQueries(QueryComponent):
                         and proposal.proposer_id != user_id
                         and reused_by_current_user is None
                         and all(item.reviewer_id != user_id for item in approvals)
-                        and self.service.can_user(
+                        and self.can_user(
                             user_id,
                             "proposal.review",
                             proposal.account_id,

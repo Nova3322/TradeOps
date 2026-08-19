@@ -92,7 +92,10 @@ class DatabaseBinanceRequestState(BinanceRequestState):
                 return None
             if row.probe_owner == owner:
                 return None
-            retry_at = row.probe_started_at + timedelta(seconds=30)
+            probe_started_at = row.probe_started_at
+            if probe_started_at is None:
+                return None
+            retry_at = probe_started_at + timedelta(seconds=30)
             return BinanceApiDiagnostic(
                 category=diagnostic.category,
                 http_status=diagnostic.http_status,

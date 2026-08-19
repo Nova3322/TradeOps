@@ -17,6 +17,16 @@ RATE_LIMIT_HEADER_PREFIXES = (
 )
 
 
+def _integer(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+        return int(value)
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class BinanceApiDiagnostic:
     category: str
@@ -52,16 +62,25 @@ class BinanceApiDiagnostic:
                 else {}
             )
             raw_code = value.get("binance_error_code")
+            http_status = _integer(value["http_status"])
+            error_code = None if raw_code is None else _integer(raw_code)
+            retry_after_seconds = _integer(value["retry_after_seconds"])
+            if (
+                http_status is None
+                or retry_after_seconds is None
+                or (raw_code is not None and error_code is None)
+            ):
+                return None
             return cls(
                 category=str(value["category"]),
-                http_status=int(value["http_status"]),
-                binance_error_code=None if raw_code is None else int(raw_code),
+                http_status=http_status,
+                binance_error_code=error_code,
                 binance_error_message=(
                     None
                     if value.get("binance_error_message") is None
                     else str(value["binance_error_message"])
                 ),
-                retry_after_seconds=int(value["retry_after_seconds"]),
+                retry_after_seconds=retry_after_seconds,
                 rate_limit_headers=headers,
                 failed_at=failed_at,
                 next_retry_at=next_retry_at,
@@ -133,7 +152,10 @@ class BinanceRequestState:
                 return None
             if self._probe_owner == owner:
                 return None
-            retry_at = self._probe_started_at + timedelta(seconds=30)
+            probe_started_at = self._probe_started_at
+            if probe_started_at is None:
+                return None
+            retry_at = probe_started_at + timedelta(seconds=30)
             return BinanceApiDiagnostic(
                 category=diagnostic.category,
                 http_status=diagnostic.http_status,
