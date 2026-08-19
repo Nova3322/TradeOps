@@ -433,6 +433,10 @@ class CcxtProFactAdapter:
                 "read-only fact adapters must not receive trading signing material",
             )
         options: dict[str, Any] = {"defaultType": "swap"}
+        if scope.venue == "BINANCE":
+            # Signed reads must use Binance server time.  A host clock outside
+            # recvWindow must not permanently stop the read-only fact stream.
+            options["adjustForTimeDifference"] = True
         if scope.venue == "BINANCE" and scope.account_mode == "PORTFOLIO_MARGIN":
             options.update({"papi": True, "portfolioMargin": True})
         if scope.venue == "HYPERLIQUID":
@@ -587,11 +591,15 @@ class CcxtProFactAdapter:
             )
             return None, capability
 
-    @staticmethod
-    def _market_id(markets: Mapping[str, Any], symbol: str) -> str:
+    def _market_id(self, markets: Mapping[str, Any], symbol: str) -> str:
         market = markets.get(symbol)
         if not isinstance(market, Mapping):
             return symbol
+        if self.scope.venue == "HYPERLIQUID":
+            info = market.get("info")
+            name = info.get("name") if isinstance(info, Mapping) else None
+            if isinstance(name, str) and name:
+                return name
         native = market.get("id")
         return str(native) if native else symbol
 
@@ -861,7 +869,10 @@ class CcxtProFactAdapter:
             mark = value.get("markPrice")
             if mark is None:
                 info = value.get("info")
-                mark = info.get("markPrice") if isinstance(info, Mapping) else None
+                if isinstance(info, Mapping):
+                    mark = info.get("markPrice")
+                    if mark is None:
+                        mark = info.get("markPx")
             rows.append(
                 {
                     "symbol": symbol,
@@ -1964,9 +1975,12 @@ class FactStreamSupervisor:
                 self._callback_task = None
 
     async def run(self) -> None:
-        await self.refresh("INITIAL")
+        initial_snapshot_ready = False
         while not self._stop.is_set():
             try:
+                if not initial_snapshot_ready:
+                    await self.refresh("INITIAL")
+                    initial_snapshot_ready = True
                 await self._run_connected(reconnecting=self._reconnect_attempts > 0)
                 self._reconnect_attempts = 0
             except asyncio.CancelledError:
@@ -1977,7 +1991,7 @@ class FactStreamSupervisor:
                 if isinstance(metrics, _MutableMetrics):
                     metrics.websocket_reconnects += 1
                 logger.warning(
-                    "Fact WebSocket connection interrupted",
+                    "Fact snapshot or WebSocket connection interrupted",
                     extra={
                         "event": "fact_adapter_websocket_reconnect",
                         "component": "fact-adapter",
@@ -1988,12 +2002,13 @@ class FactStreamSupervisor:
                     },
                 )
                 if self._reconnect_attempts > self.max_reconnect_attempts:
-                    await self.registry.mark_unknown(
-                        self.adapter.scope.key,
-                        field="FACT_ADAPTER_WEBSOCKET_UNAVAILABLE",
-                    )
-                    if self.snapshot_callback is not None:
-                        await self._flush_callback()
+                    if initial_snapshot_ready:
+                        await self.registry.mark_unknown(
+                            self.adapter.scope.key,
+                            field="FACT_ADAPTER_WEBSOCKET_UNAVAILABLE",
+                        )
+                        if self.snapshot_callback is not None:
+                            await self._flush_callback()
                     raise DomainRejected(
                         "FACT_ADAPTER_WEBSOCKET_UNAVAILABLE",
                         "the fact stream exceeded its bounded reconnect attempts",
