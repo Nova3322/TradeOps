@@ -859,6 +859,11 @@ class _ExecutionRoutes:
                 fact_stale_after_seconds=(
                     self.resolved_settings.fact_adapter_stale_after_seconds
                 ),
+                perptape_stale_after_seconds=max(
+                    self.resolved_settings.runtime_sync_interval_seconds * 2
+                    + int(self.resolved_settings.perptape_timeout_seconds),
+                    self.resolved_settings.perptape_websocket_heartbeat_timeout_seconds * 2,
+                ),
             )
             perptape_configured = database_perptape_configured or bool(
                 self.resolved_settings.perptape_api_key

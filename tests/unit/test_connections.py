@@ -114,6 +114,40 @@ def test_connection_projection_uses_fresh_worker_health_not_api_local_flags() ->
     assert stale["BINANCE"]["available"] is False
 
 
+def test_connection_projection_uses_fresh_database_perptape_worker_health() -> None:
+    now = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    current = project_runtime_connections(
+        _settings(runtime_sync_enabled=False),
+        {
+            "PERPTAPE": {
+                "status": "SUCCESS",
+                "checked_at": now.isoformat(),
+            }
+        },
+        database_perptape_configured=True,
+        now=now,
+        perptape_stale_after_seconds=135,
+    )
+    stale = project_runtime_connections(
+        _settings(runtime_sync_enabled=False),
+        {
+            "PERPTAPE": {
+                "status": "SUCCESS",
+                "checked_at": (now - timedelta(seconds=136)).isoformat(),
+            }
+        },
+        database_perptape_configured=True,
+        now=now,
+        perptape_stale_after_seconds=135,
+    )
+
+    assert current["PERPTAPE"]["category"] == "READ_ONLY_CONNECTED"
+    assert current["PERPTAPE"]["available"] is True
+    assert stale["PERPTAPE"]["category"] == "READ_ONLY_PROBE_FAILED"
+    assert stale["PERPTAPE"]["error_code"] == "PERPTAPE_HEALTH_STALE"
+    assert stale["PERPTAPE"]["available"] is False
+
+
 def test_connection_projection_classifies_exact_adapter_failures() -> None:
     settings = _settings(runtime_sync_enabled=True, fact_adapter_enabled=True)
     bindings = {venue: 1 for venue in ("BINANCE", "HYPERLIQUID", "OKX", "BYBIT")}

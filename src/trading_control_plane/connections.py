@@ -76,6 +76,7 @@ def _fresh_exchange_health(
     *,
     now: datetime | None,
     stale_after_seconds: int | None,
+    stale_error_code: str = "FACT_ADAPTER_STALE",
 ) -> Mapping[str, Any] | None:
     if health is None or now is None or stale_after_seconds is None:
         return health
@@ -87,9 +88,9 @@ def _fresh_exchange_health(
             else datetime.fromisoformat(str(raw_checked_at))
         )
     except (TypeError, ValueError):
-        return {**health, "status": "FAILED", "error_code": "FACT_ADAPTER_STALE"}
+        return {**health, "status": "FAILED", "error_code": stale_error_code}
     if checked_at.utcoffset() is None or now - checked_at > timedelta(seconds=stale_after_seconds):
-        return {**health, "status": "FAILED", "error_code": "FACT_ADAPTER_STALE"}
+        return {**health, "status": "FAILED", "error_code": stale_error_code}
     return health
 
 
@@ -176,6 +177,7 @@ def project_runtime_connections(
     database_perptape_configured: bool = False,
     now: datetime | None = None,
     fact_stale_after_seconds: int | None = None,
+    perptape_stale_after_seconds: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     binding_counts = database_binding_counts or {}
     notilt_identity = "COMPLETE" if settings.notilt_agent_address else "MISSING"
@@ -202,14 +204,15 @@ def project_runtime_connections(
     return {
         **exchange_connections,
         "PERPTAPE": _projection(
-            enabled=(
-                settings.runtime_sync_enabled
-                if database_perptape_configured
-                else bool(settings.perptape_api_key)
-            ),
+            enabled=database_perptape_configured or bool(settings.perptape_api_key),
             credential_state=perptape_credentials,
             config_complete=True,
-            health=_latest_health(source_health, "PERPTAPE"),
+            health=_fresh_exchange_health(
+                _latest_health(source_health, "PERPTAPE"),
+                now=now,
+                stale_after_seconds=perptape_stale_after_seconds,
+                stale_error_code="PERPTAPE_HEALTH_STALE",
+            ),
             owner_role="系统管理员",
             write_process_enabled=False,
         ),
