@@ -156,6 +156,13 @@ def test_compose_forwards_production_integration_switches_explicitly() -> None:
         assert f"{name}: ${{{name}" in source
 
 
+def test_validation_branch_push_runs_ci_without_a_pull_request() -> None:
+    expected = "branches: [main, codex/trading-production-validation]"
+    for workflow in ("ci.yml", "security.yml"):
+        source = (ROOT / ".github" / "workflows" / workflow).read_text()
+        assert expected in source
+
+
 def test_execution_route_delegates_transport_orchestration_to_application_use_case() -> None:
     route = ROOT / "src/trading_control_plane/api_routes/execution.py"
     application = ROOT / "src/trading_control_plane/execution_dispatch.py"
