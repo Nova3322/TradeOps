@@ -382,6 +382,51 @@ def test_fact_adapter_rejects_trading_signing_material() -> None:
         )
 
 
+def test_fact_adapter_derives_stable_ids_for_zero_hash_funding_payments() -> None:
+    class ZeroHashFundingExchange(FakeCcxtProExchange):
+        def __init__(self) -> None:
+            super().__init__()
+            self.id = "hyperliquid"
+
+        async def fetch_funding_history(
+            self,
+            symbol: str | None,
+            since: int,
+            limit: int,
+        ) -> list[Mapping[str, Any]]:
+            assert symbol is None and since > 0 and limit == 1_000
+            return [
+                {
+                    "id": "0x" + ("0" * 64),
+                    "symbol": "BTC/USDT:USDT",
+                    "amount": amount,
+                    "code": "USDT",
+                    "timestamp": int((_NOW + offset).timestamp() * 1_000),
+                }
+                for amount, offset in (
+                    (-0.25, timedelta(hours=1)),
+                    (-0.5, timedelta(hours=2)),
+                )
+            ]
+
+    exchange = ZeroHashFundingExchange()
+    adapter = CcxtProFactAdapter(
+        _scope("HYPERLIQUID"),
+        credentials=_credentials("HYPERLIQUID"),
+        exchange_factory=lambda *_args: exchange,
+        clock=lambda: _NOW,
+    )
+
+    first = asyncio.run(adapter.snapshot(reason="INITIAL"))
+    second = asyncio.run(adapter.snapshot(reason="PERIODIC_RECONCILIATION"))
+    first_ids = [row["payment_id"] for row in first.funding if row["kind"] == "PAYMENT"]
+    second_ids = [row["payment_id"] for row in second.funding if row["kind"] == "PAYMENT"]
+
+    assert len(set(first_ids)) == 2
+    assert all(payment_id.startswith("derived:") for payment_id in first_ids)
+    assert second_ids == first_ids
+
+
 def test_one_shot_fact_probe_uses_exact_scope_and_always_closes() -> None:
     exchange = FakeCcxtProExchange()
     observed: dict[str, object] = {}
