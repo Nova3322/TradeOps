@@ -114,7 +114,7 @@ class FakeCcxtProExchange:
         since: int,
         limit: int,
     ) -> list[Mapping[str, Any]]:
-        assert symbol is None and since > 0 and limit == 1_000
+        assert symbol in {None, "BTC/USDT:USDT"} and since > 0 and limit == 1_000
         return [
             {
                 "id": "external-fill",
@@ -272,6 +272,33 @@ class FakeCcxtAccountWideExchange(FakeCcxtProExchange):
             }
             for symbol in symbols
         }
+
+
+class FakeCcxtBinanceSymbolTradesExchange(FakeCcxtAccountWideExchange):
+    def __init__(self) -> None:
+        super().__init__()
+        self.trade_symbols: list[str | None] = []
+
+    async def fetch_my_trades(
+        self,
+        symbol: str | None,
+        since: int,
+        limit: int,
+    ) -> list[Mapping[str, Any]]:
+        self.trade_symbols.append(symbol)
+        assert symbol is not None and since > 0 and limit == 1_000
+        return [
+            {
+                "id": f"fill-{symbol}",
+                "order": f"order-{symbol}",
+                "symbol": symbol,
+                "amount": 1,
+                "price": 60_000,
+                "side": "buy",
+                "fee": {"cost": 0.1, "currency": "USDT"},
+                "timestamp": int(_NOW.timestamp() * 1_000),
+            }
+        ]
 
 
 def _scope(venue: str = "BINANCE", *, account_id: str = "account-a") -> FactAdapterScope:
@@ -714,6 +741,22 @@ def test_fact_snapshot_includes_non_freqtrade_account_positions() -> None:
     }
     normalized = normalize_fact_adapter_snapshot(snapshot)
     assert {item.symbol for item in normalized} == {"BTCUSDT", "ETHUSDT"}
+
+
+def test_binance_trade_history_queries_every_reconciled_symbol() -> None:
+    exchange = FakeCcxtBinanceSymbolTradesExchange()
+    adapter = CcxtProFactAdapter(
+        _scope(),
+        credentials=_credentials("BINANCE"),
+        exchange_factory=lambda *_args: exchange,
+        clock=lambda: _NOW,
+    )
+
+    snapshot = asyncio.run(adapter.snapshot(reason="INITIAL"))
+
+    assert exchange.trade_symbols == ["BTC/USDT:USDT", "ETH/USDT:USDT"]
+    assert {row["native_symbol"] for row in snapshot.fills} == {"BTCUSDT", "ETHUSDT"}
+    assert "fetchMyTrades" not in snapshot.unknown_fields
 
 
 def test_fact_snapshot_drops_delisted_catalog_subscription() -> None:

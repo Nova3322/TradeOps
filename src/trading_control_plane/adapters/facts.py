@@ -996,12 +996,15 @@ class CcxtProFactAdapter:
         positions_task = asyncio.create_task(self._rest("fetchPositions"))
         orders_task = asyncio.create_task(self._rest("fetchOpenOrders"))
         optional_tasks = {
-            "fills": asyncio.create_task(self._optional_rest("fetchMyTrades", None, since, 1_000)),
             "funding_history": asyncio.create_task(
                 self._optional_rest("fetchFundingHistory", None, since, 1_000)
             ),
             "status": asyncio.create_task(self._optional_rest("fetchStatus")),
         }
+        if self.scope.venue != "BINANCE":
+            optional_tasks["fills"] = asyncio.create_task(
+                self._optional_rest("fetchMyTrades", None, since, 1_000)
+            )
         try:
             balance, positions, orders = await asyncio.gather(
                 balance_task, positions_task, orders_task
@@ -1034,6 +1037,33 @@ class CcxtProFactAdapter:
             if isinstance(row.get("symbol"), str) and row["symbol"]
         )
         tracked_symbols = tuple(sorted(self._tracked_symbols))
+        if self.scope.venue == "BINANCE":
+            # Binance futures requires a symbol for fetchMyTrades. Query every
+            # live configured/position/order symbol after the account-wide
+            # position and order reads have expanded the reconciliation scope.
+            trade_results = await asyncio.gather(
+                *(
+                    self._optional_rest("fetchMyTrades", symbol, since, 1_000)
+                    for symbol in tracked_symbols
+                )
+            )
+            failed_trades = any(failed is not None for _rows, failed in trade_results)
+            optional["fills"] = (
+                (
+                    None,
+                    "fetchMyTrades",
+                )
+                if failed_trades
+                else (
+                    [
+                        row
+                        for rows, _failed in trade_results
+                        if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes))
+                        for row in rows
+                    ],
+                    None,
+                )
+            )
         funding_rates, funding_rates_error = await self._optional_rest(
             "fetchFundingRates", list(tracked_symbols)
         )
