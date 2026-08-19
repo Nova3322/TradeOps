@@ -24,7 +24,10 @@ from trading_control_plane.config import Settings
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.fact_adapter_api import create_fact_adapter_app
 from trading_control_plane.fact_adapter_ingestion import normalize_fact_adapter_snapshot
-from trading_control_plane.fact_adapter_runtime import FactAdapterRuntime
+from trading_control_plane.fact_adapter_runtime import (
+    FactAdapterRuntime,
+    _bootstrap_symbol_provider,
+)
 from trading_control_plane.service import PreparedRuntimeAccountBinding
 
 _TOKEN = "fact-adapter-contract-token-0123456789"  # noqa: S105
@@ -418,6 +421,15 @@ def test_one_shot_fact_probe_uses_exact_scope_and_always_closes() -> None:
         "portfolioMargin": True,
     }
     assert "secret" not in repr(result)
+
+
+def test_fact_runtime_starts_from_one_bootstrap_symbol_per_venue() -> None:
+    provider = _bootstrap_symbol_provider(
+        Settings(database_url="postgresql+psycopg://test:test@localhost/test", _env_file=None)
+    )
+
+    assert provider("BINANCE") == ("BTCUSDT",)
+    assert provider("HYPERLIQUID") == ("BTC",)
 
 
 def test_websocket_increment_rejects_unknown_quantity_instead_of_zeroing_it() -> None:
