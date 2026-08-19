@@ -77,7 +77,7 @@ const connectionEnglishCopy = {
   READ_ONLY_PROBE_FAILED:['The latest read-only probe failed; the data is not marked available.','Inspect the non-sensitive error category and rerun the read-only probe.'],
 };
 const venueModeLabels = {USER_DATA_READ_ONLY:'账户数据只读',INFO_READ_ONLY:'账户数据只读',READ_ONLY:'只读'};
-const accountModeLabels = {PORTFOLIO_MARGIN:'统一账户',MAIN_ACCOUNT:'主账户',SUBACCOUNT:'子账户'};
+const accountModeLabels = {STANDARD:'标准账户',PORTFOLIO_MARGIN:'统一账户',MAIN_ACCOUNT:'主账户',SUBACCOUNT:'子账户'};
 const fmtIntentKind = (value) => localizedText(intentKindLabels[value] || value || '未知意图');
 const fmtDirection = (value) => localizedText(directionLabels[value] || value || '未知方向');
 const fmtSide = (value) => currentLanguage === 'en'

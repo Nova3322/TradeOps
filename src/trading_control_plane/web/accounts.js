@@ -307,7 +307,7 @@ async function renderVenueAccountDetail(requestedAccountId) {
   const hip3Dexes = Array.isArray(status.hip3_dexes) ? status.hip3_dexes : [];
   const venueDetail = currentLanguage === 'en'
     ? venue === 'BINANCE'
-      ? ({PORTFOLIO_MARGIN:'Unified account',MAIN_ACCOUNT:'Main account',SUBACCOUNT:'Subaccount'}[status.account_mode] || 'Unknown account mode')
+      ? ({STANDARD:'Standard account',PORTFOLIO_MARGIN:'Unified account',MAIN_ACCOUNT:'Main account',SUBACCOUNT:'Subaccount'}[status.account_mode] || 'Unknown account mode')
       : venue === 'HYPERLIQUID'
         ? `Core markets${status.hip3_available ? ` + HIP-3${hip3Dexes.length ? ` (${hip3Dexes.join(', ')})` : ''}` : ''}`
         : venue === 'OKX' ? 'USDT linear SWAP scope' : 'Unified USDT linear perpetual scope'
