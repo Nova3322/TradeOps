@@ -340,6 +340,7 @@ def test_ccxt_pro_fact_contract_normalizes_all_supported_venues(venue: str) -> N
     if venue == "BINANCE":
         assert observed["options"] == {
             "defaultType": "swap",
+            "adjustForTimeDifference": True,
             "papi": True,
             "portfolioMargin": True,
         }
@@ -401,6 +402,7 @@ def test_one_shot_fact_probe_uses_exact_scope_and_always_closes() -> None:
     assert observed["scope"] == _scope("BINANCE")
     assert observed["options"] == {
         "defaultType": "swap",
+        "adjustForTimeDifference": True,
         "papi": True,
         "portfolioMargin": True,
     }
@@ -453,6 +455,99 @@ def test_hyperliquid_fact_adapter_loads_only_configured_hip3_dexes() -> None:
         "defaultType": "swap",
         "fetchMarkets": {"types": ["swap", "hip3"], "hip3": {"dexes": ["xyz"]}},
     }
+
+
+def test_hyperliquid_mark_and_native_identity_use_exchange_contract() -> None:
+    adapter = CcxtProFactAdapter(
+        _scope("HYPERLIQUID"),
+        credentials=_credentials("HYPERLIQUID"),
+        exchange_factory=lambda *_args: FakeCcxtProExchange(),
+        clock=lambda: _NOW,
+    )
+    pair = "BTC/USDC:USDC"
+    markets = {
+        pair: {
+            "id": "0",
+            "info": {"name": "BTC"},
+        }
+    }
+
+    marks = adapter._marks(
+        {
+            pair: {
+                "symbol": pair,
+                "markPrice": None,
+                "info": {"markPx": "60001.5"},
+                "timestamp": int(_NOW.timestamp() * 1_000),
+            }
+        },
+        markets,
+        _NOW,
+        (pair,),
+    )
+
+    assert marks == (
+        {
+            "symbol": pair,
+            "native_symbol": "BTC",
+            "mark_price": "60001.5",
+            "observed_at": _NOW.isoformat(),
+        },
+    )
+
+
+def test_initial_fact_snapshot_failure_retries_before_starting_stream() -> None:
+    class InitialFailureExchange(FakeCcxtRestOnlyExchange):
+        def __init__(self) -> None:
+            super().__init__()
+            self.balance_calls = 0
+
+        async def fetch_balance(self) -> Mapping[str, Any]:
+            self.balance_calls += 1
+            if self.balance_calls == 1:
+                raise OSError("fixture initial snapshot failure")
+            return await super().fetch_balance()
+
+    async def scenario() -> None:
+        exchange = InitialFailureExchange()
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: exchange,
+            clock=lambda: _NOW,
+        )
+        registry = FactAdapterRegistry()
+        await registry.register(adapter)
+        delays: list[float] = []
+        supervisor: FactStreamSupervisor
+
+        async def sleeper(delay: float) -> None:
+            delays.append(delay)
+
+        async def callback(_snapshot: ExchangeFactSnapshot) -> None:
+            supervisor.stop()
+
+        supervisor = FactStreamSupervisor(
+            registry,
+            adapter,
+            reconnect_initial_seconds=0.1,
+            reconnect_max_seconds=1,
+            max_reconnect_attempts=2,
+            sleeper=sleeper,
+            snapshot_callback=callback,
+            persistence_coalesce_seconds=0,
+        )
+        await supervisor.run()
+
+        current = await registry.latest(adapter.scope.key, stale_after=timedelta(days=365))
+        assert current.data_status == "CURRENT"
+        assert exchange.balance_calls == 2
+        assert delays == [0.1]
+        assert adapter.metrics.snapshot_failed == 1
+        assert adapter.metrics.snapshot_completed == 1
+        await registry.close()
+
+    asyncio.run(scenario())
 
 
 def test_fact_snapshot_includes_non_freqtrade_account_positions() -> None:
