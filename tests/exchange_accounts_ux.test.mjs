@@ -10,6 +10,14 @@ const routerSource = readFileSync(
   new URL('../src/trading_control_plane/web/router.js', import.meta.url),
   'utf8',
 );
+const indexSource = readFileSync(
+  new URL('../src/trading_control_plane/web/index.html', import.meta.url),
+  'utf8',
+);
+const serviceWorkerSource = readFileSync(
+  new URL('../src/trading_control_plane/web/sw.js', import.meta.url),
+  'utf8',
+);
 
 test('production account cards expose the exact-account detail workflow', () => {
   assert.match(
@@ -18,4 +26,6 @@ test('production account cards expose the exact-account detail workflow', () => 
   );
   assert.match(routerSource, /venueAccountMatch = path\.match\(\/\^\\\/venues\\\/\(\[\^\/\]\+\)\$\/\)/);
   assert.match(routerSource, /renderVenueAccountDetail\(venueAccountMatch\[1\]\)/);
+  assert.match(indexSource, /execution\.js\?v=192/);
+  assert.match(serviceWorkerSource, /trading-shell-v222/);
 });
