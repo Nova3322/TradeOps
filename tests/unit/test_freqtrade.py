@@ -358,13 +358,18 @@ def test_hip3_pair_mapping_requires_an_explicit_dex_allowlist() -> None:
         parse_hip3_dexes("xyz,XYZ")
 
 
-def test_worker_url_is_loopback_or_https_and_never_embeds_credentials() -> None:
+def test_worker_url_is_loopback_internal_or_https_and_never_embeds_credentials() -> None:
     assert validate_worker_url("http://127.0.0.1:8081/") == "http://127.0.0.1:8081"
+    assert validate_worker_url("http://freqtrade-binance-live-smoke:8080/") == (
+        "http://freqtrade-binance-live-smoke:8080"
+    )
     assert validate_worker_url("https://workers.internal.example:8443") == (
         "https://workers.internal.example:8443"
     )
     with pytest.raises(ValueError, match="require HTTPS"):
         validate_worker_url("http://workers.internal.example:8080")
+    with pytest.raises(ValueError, match="require HTTPS"):
+        validate_worker_url("http://trading-api:8080")
     with pytest.raises(ValueError, match="must not embed credentials"):
         validate_worker_url("https://user:secret@workers.internal.example:8443")
 
