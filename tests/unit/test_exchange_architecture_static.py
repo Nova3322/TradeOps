@@ -138,6 +138,10 @@ def test_compose_forwards_production_integration_switches_explicitly() -> None:
     source = (ROOT / "compose.yaml").read_text()
     for name in (
         "TRADING_ENVIRONMENT",
+        "TRADING_RUNTIME_BINANCE_SYMBOL",
+        "TRADING_RUNTIME_HYPERLIQUID_SYMBOL",
+        "TRADING_RUNTIME_OKX_SYMBOL",
+        "TRADING_RUNTIME_BYBIT_SYMBOL",
         "TRADING_FREQTRADE_WORKERS_ENABLED",
         "TRADING_TELEGRAM_ENABLED",
         "TRADING_TELEGRAM_BOT_TOKEN",
