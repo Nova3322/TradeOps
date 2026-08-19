@@ -437,14 +437,38 @@ def create_runtime_app(
         binding: PreparedRuntimeAccountBinding,
         snapshot: ExchangeFactSnapshot,
     ) -> None:
-        service.ingest_normalized_read_only_account_snapshot(
-            binding.account_id,
+        now = datetime.now(UTC)
+        if snapshot.data_status == "CURRENT":
+            service.ingest_normalized_read_only_account_snapshot(
+                binding.account_id,
+                binding.service_principal_id,
+                normalize_fact_adapter_snapshot(snapshot),
+                venue=binding.venue,
+                environment=ExecutionEnvironment(binding.environment),
+                runtime_binding=binding,
+                now=now,
+            )
+            return
+        error_code = next(
+            (
+                str(field).split(":", 1)[0]
+                for field in snapshot.unknown_fields
+                if str(field).startswith("FACT_ADAPTER_")
+            ),
+            f"FACT_ADAPTER_{snapshot.data_status}",
+        )
+        service.record_runtime_source_health(
             binding.service_principal_id,
-            normalize_fact_adapter_snapshot(snapshot),
-            venue=binding.venue,
-            environment=ExecutionEnvironment(binding.environment),
-            runtime_binding=binding,
-            now=datetime.now(UTC),
+            {
+                binding.venue: {
+                    "status": "FAILED",
+                    "items_observed": 0,
+                    "error_code": error_code,
+                }
+            },
+            scopes={binding.venue: (binding.account_id, binding.venue)},
+            runtime_account_binding=binding,
+            now=now,
         )
 
     runtime = FactAdapterRuntime(

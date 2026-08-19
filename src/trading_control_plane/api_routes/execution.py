@@ -838,6 +838,7 @@ class _ExecutionRoutes:
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
             self.require_capability(identity, "system.view")
+            now = _now()
             snapshot = self.queries().runtime_snapshot(identity.user_id)
             perptape_feed = snapshot["perptape_feed"]
             database_binding_counts = snapshot.pop("runtime_binding_counts")
@@ -854,6 +855,10 @@ class _ExecutionRoutes:
                 snapshot["source_health"],
                 database_binding_counts=database_binding_counts,
                 database_perptape_configured=database_perptape_configured,
+                now=now,
+                fact_stale_after_seconds=(
+                    self.resolved_settings.fact_adapter_stale_after_seconds
+                ),
             )
             perptape_configured = database_perptape_configured or bool(
                 self.resolved_settings.perptape_api_key
@@ -861,13 +866,13 @@ class _ExecutionRoutes:
             perptape_status = _perptape_runtime_status(
                 self.resolved_settings,
                 perptape_feed,
-                now=_now(),
+                now=now,
                 configured=perptape_configured,
             )
             perptape_transport = _perptape_transport_status(
                 self.resolved_settings,
                 snapshot["source_health"],
-                now=_now(),
+                now=now,
             )
             telegram_polling = (
                 self.resolved_telegram.polling_health()
@@ -903,8 +908,18 @@ class _ExecutionRoutes:
                             "live_order_send": "DATABASE_GATE",
                         },
                         "fact_adapter": {
-                            "enabled": self.resolved_settings.fact_adapter_enabled,
+                            "enabled": any(
+                                connection_states[venue]["available"]
+                                for venue in ("BINANCE", "HYPERLIQUID", "OKX", "BYBIT")
+                            ),
+                            "configured": bool(database_binding_counts),
+                            "process_local_enabled": (
+                                self.resolved_settings.fact_adapter_enabled
+                            ),
                             "database_binding_counts": database_binding_counts,
+                            "reconciliation_seconds": (
+                                self.resolved_settings.fact_adapter_reconciliation_seconds
+                            ),
                             "transport": "CCXT_PRO_WEBSOCKET_WITH_BOUNDED_REST",
                             "page_triggered_requests": False,
                             "order_send_supported": False,

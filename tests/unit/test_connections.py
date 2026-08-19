@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 
 from trading_control_plane.config import Settings
 from trading_control_plane.connections import project_runtime_connections
@@ -71,6 +72,41 @@ def test_connection_projection_fails_closed_without_database_bindings() -> None:
         assert missing[venue]["category"] == "CREDENTIALS_NOT_LOADED"
     assert missing["PERPTAPE"]["category"] == "CREDENTIALS_NOT_LOADED"
     assert missing["NOTILT"]["category"] == "CREDENTIALS_NOT_LOADED"
+
+
+def test_connection_projection_uses_fresh_worker_health_not_api_local_flags() -> None:
+    now = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    health = {
+        "BINANCE:binance-main": {
+            "status": "SUCCESS",
+            "checked_at": now.isoformat(),
+        }
+    }
+    current = project_runtime_connections(
+        _settings(runtime_sync_enabled=False, fact_adapter_enabled=False),
+        health,
+        database_binding_counts={"BINANCE": 1},
+        now=now,
+        fact_stale_after_seconds=360,
+    )
+    stale = project_runtime_connections(
+        _settings(runtime_sync_enabled=False, fact_adapter_enabled=False),
+        {
+            "BINANCE:binance-main": {
+                "status": "SUCCESS",
+                "checked_at": (now - timedelta(seconds=361)).isoformat(),
+            }
+        },
+        database_binding_counts={"BINANCE": 1},
+        now=now,
+        fact_stale_after_seconds=360,
+    )
+
+    assert current["BINANCE"]["category"] == "READ_ONLY_CONNECTED"
+    assert current["BINANCE"]["available"] is True
+    assert stale["BINANCE"]["category"] == "READ_ONLY_PROBE_FAILED"
+    assert stale["BINANCE"]["error_code"] == "FACT_ADAPTER_STALE"
+    assert stale["BINANCE"]["available"] is False
 
 
 def test_connection_projection_classifies_exact_adapter_failures() -> None:

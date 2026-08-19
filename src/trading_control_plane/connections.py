@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timedelta
 from typing import Any
 
 from trading_control_plane.config import Settings
@@ -66,6 +67,28 @@ def _latest_health(
     if all(item.get("status") == "SUCCESS" for item in matches):
         return max(matches, key=lambda item: str(item.get("checked_at") or ""))
     return max(matches, key=lambda item: str(item.get("checked_at") or ""))
+
+
+def _fresh_exchange_health(
+    health: Mapping[str, Any] | None,
+    *,
+    now: datetime | None,
+    stale_after_seconds: int | None,
+) -> Mapping[str, Any] | None:
+    if health is None or now is None or stale_after_seconds is None:
+        return health
+    raw_checked_at = health.get("checked_at")
+    try:
+        checked_at = (
+            raw_checked_at
+            if isinstance(raw_checked_at, datetime)
+            else datetime.fromisoformat(str(raw_checked_at))
+        )
+    except (TypeError, ValueError):
+        return {**health, "status": "FAILED", "error_code": "FACT_ADAPTER_STALE"}
+    if checked_at.utcoffset() is None or now - checked_at > timedelta(seconds=stale_after_seconds):
+        return {**health, "status": "FAILED", "error_code": "FACT_ADAPTER_STALE"}
+    return health
 
 
 def _projection(
@@ -149,6 +172,8 @@ def project_runtime_connections(
     *,
     database_binding_counts: Mapping[str, int] | None = None,
     database_perptape_configured: bool = False,
+    now: datetime | None = None,
+    fact_stale_after_seconds: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     binding_counts = database_binding_counts or {}
     notilt_identity = "COMPLETE" if settings.notilt_agent_address else "MISSING"
@@ -157,10 +182,14 @@ def project_runtime_connections(
     )
     exchange_connections = {
         venue: _projection(
-            enabled=settings.fact_adapter_enabled and int(binding_counts.get(venue, 0)) > 0,
+            enabled=int(binding_counts.get(venue, 0)) > 0,
             credential_state=("COMPLETE" if int(binding_counts.get(venue, 0)) > 0 else "MISSING"),
             config_complete=int(binding_counts.get(venue, 0)) > 0,
-            health=_latest_health(source_health, venue),
+            health=_fresh_exchange_health(
+                _latest_health(source_health, venue),
+                now=now,
+                stale_after_seconds=fact_stale_after_seconds,
+            ),
             owner_role="系统管理员",
             write_process_enabled=(
                 settings.freqtrade_workers_enabled and int(binding_counts.get(venue, 0)) > 0
