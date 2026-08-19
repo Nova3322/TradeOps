@@ -167,6 +167,20 @@ class TradingModeService(ServiceComponent):
         with self.database.session_factory() as session:
             team = self.transactions.require_role(session, actor_id, "venue.view", allow_setup=True)
             actor = session.get(models.User, actor_id)
+            can_manage = False
+            if actor is not None:
+                try:
+                    self.transactions.require_role(
+                        session,
+                        actor_id,
+                        "team.manage",
+                        team_id=team.team_id,
+                        allow_setup=True,
+                    )
+                except domain.DomainRejected:
+                    pass
+                else:
+                    can_manage = True
             updated_by = (
                 None
                 if team.execution_mode_updated_by is None
@@ -196,9 +210,7 @@ class TradingModeService(ServiceComponent):
                 "execution_mode": team.execution_mode,
                 "version": team.version,
                 "trading_enabled": team.trading_enabled,
-                "can_manage": bool(
-                    actor is not None and self.transactions.can_user(actor_id, "team.manage")
-                ),
+                "can_manage": can_manage,
                 "last_switched_by": None if updated_by is None else updated_by.username,
                 "last_switched_at": (
                     None
