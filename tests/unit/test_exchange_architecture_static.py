@@ -74,9 +74,7 @@ def test_retired_exchange_modules_and_direct_backend_markers_stay_absent() -> No
     for relative in REQUIRED_DELETIONS:
         assert not (package / relative).exists(), relative
 
-    searched = tuple(
-        ROOT / name for name in ("src", "scripts", ".env.example", "compose.yaml")
-    )
+    searched = tuple(ROOT / name for name in ("src", "scripts", ".env.example", "compose.yaml"))
     forbidden = (
         "DIRECT_LEGACY",
         "BinanceReadOnlyClient",
@@ -105,3 +103,33 @@ def test_all_freqtrade_configs_use_built_in_sync_and_async_rate_limiting() -> No
         assert "rateLimit" not in exchange["ccxt_async_config"], path
         assert payload["process_only_new_candles"] is True, path
         assert 1 <= len(exchange["pair_whitelist"]) <= 2, path
+
+
+def test_execution_route_delegates_transport_orchestration_to_application_use_case() -> None:
+    route = ROOT / "src/trading_control_plane/api_routes/execution.py"
+    application = ROOT / "src/trading_control_plane/execution_dispatch.py"
+    route_imports = {module for module, _names in _imports(route)}
+    assert "trading_control_plane.freqtrade" not in route_imports
+    assert "trading_control_plane.freqtrade_contracts" not in route_imports
+    forbidden_attributes = {
+        "find_open_trade",
+        "force_enter",
+        "force_exit",
+        "probe",
+        "recover_entry",
+        "recover_exit",
+        "spec",
+    }
+    route_attributes = {
+        node.attr
+        for node in ast.walk(ast.parse(route.read_text()))
+        if isinstance(node, ast.Attribute)
+    }
+    assert route_attributes.isdisjoint(forbidden_attributes)
+
+    application_imports = {module for module, _names in _imports(application)}
+    assert not any(
+        module == boundary or module.startswith(f"{boundary}.")
+        for module in application_imports
+        for boundary in {"fastapi", "trading_control_plane.api", "trading_control_plane.api_routes"}
+    )

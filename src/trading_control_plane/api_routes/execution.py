@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Literal
-
 from trading_control_plane.api_core import (
     UUID,
     AccountEquityFactRequest,
@@ -11,10 +9,7 @@ from trading_control_plane.api_core import (
     AutoAddRequest,
     AutomaticExitRequest,
     CampaignTargetRequest,
-    DomainRejected,
     FreqtradeActionRequest,
-    FreqtradeEntryCommand,
-    FreqtradeExitCommand,
     FundingFactRequest,
     IntentKind,
     IntentReleaseRequest,
@@ -40,7 +35,6 @@ from trading_control_plane.api_core import (
     _perptape_runtime_status,
     _perptape_transport_status,
     datetime,
-    freqtrade_pair,
     perptape_legacy_candidate_id,
     project_runtime_connections,
     render_report,
@@ -49,6 +43,15 @@ from trading_control_plane.api_core import (
     timedelta,
 )
 from trading_control_plane.api_routes.context import ApiRouteContext
+from trading_control_plane.execution_dispatch import (
+    ExecuteIntent,
+    SyncProtection,
+    sync_protection,
+    unbound_worker_status,
+)
+from trading_control_plane.execution_dispatch import (
+    execute_intent as dispatch_intent,
+)
 
 
 class _ExecutionRoutes:
@@ -963,32 +966,10 @@ class _ExecutionRoutes:
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
             self.require_capability(identity, "system.view")
-            workers: list[dict[str, Any]] = []
-            for worker in (
-                item
-                for item in self.resolved_freqtrade_workers
-                if item.spec.exchange_account_id is None
-            ):
-                workers.append(
-                    {
-                        "name": worker.spec.name,
-                        "venue": worker.spec.venue,
-                        "backend": "FREQTRADE",
-                        "status": (
-                            "DISABLED"
-                            if not self.resolved_settings.freqtrade_workers_enabled
-                            else "UNBOUND"
-                        ),
-                        "reason_code": (
-                            "FREQTRADE_WORKERS_DISABLED"
-                            if not self.resolved_settings.freqtrade_workers_enabled
-                            else "ACCOUNT_BINDING_REQUIRED"
-                        ),
-                        "scope_status": "UNBOUND_LEGACY_DEFAULT",
-                        "hip3_dexes": list(worker.spec.hip3_dexes),
-                        "order_send": False,
-                    }
-                )
+            workers = unbound_worker_status(
+                self.resolved_freqtrade_workers,
+                workers_enabled=self.resolved_settings.freqtrade_workers_enabled,
+            )
             registry = self.queries().exchange_accounts(identity.user_id)
             account_bindings = [
                 {
@@ -1018,179 +999,47 @@ class _ExecutionRoutes:
             payload: FreqtradeActionRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
-            scope_parts = payload.execution_scope.split(":")
-            if len(scope_parts) != 3:
-                raise DomainRejected(
-                    "EXECUTION_SCOPE_INVALID",
-                    "execution requires environment:account:venue",
-                )
-            environment, _account_id, _venue = scope_parts
-            if environment not in {"TESTNET", "LIVE"}:
-                raise DomainRejected(
-                    "EXECUTION_SCOPE_INVALID",
-                    "execution requires an explicit TESTNET or LIVE scope",
-                )
-            expected_mode: Literal["DRY_RUN", "LIVE"] = (
-                "LIVE" if environment == "LIVE" else "DRY_RUN"
-            )
-            self.require_freqtrade_enabled()
-            execution_service = self.service()
-            now = _now()
             campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            binding = execution_service.freqtrade_worker_binding(
-                actor_id=identity.user_id,
-                execution_scope=payload.execution_scope,
-                owner_id=payload.owner_id,
-                fencing_token=payload.fencing_token,
-                now=now,
-                campaign_id=campaign_id,
-            )
-            worker = self.require_freqtrade_worker(binding)
-            command = execution_service.prepare_freqtrade_order(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                hip3_dexes=binding.hip3_dexes,
-                leverage=self.resolved_settings.freqtrade_live_leverage,
-                now=now,
-            )
-            worker.probe(expected_mode=expected_mode, required_pair=command.pair)
-            execution_service.validate_freqtrade_worker_binding(binding)
-            external_trade_id = None
-            if isinstance(command, FreqtradeExitCommand) or command.position_adjustment:
-                external_trade_id = execution_service.freqtrade_dispatch_external_id(
-                    intent_id,
+            result = dispatch_intent(
+                ExecuteIntent(
+                    intent_id=intent_id,
+                    campaign_id=campaign_id,
                     actor_id=identity.user_id,
                     execution_scope=payload.execution_scope,
-                )
-                if external_trade_id is None:
-                    current = worker.find_open_trade(pair=command.pair)
-                    if current is None:
-                        raise DomainRejected(
-                            "FREQTRADE_POSITION_NOT_FOUND",
-                            "Freqtrade has no unique open trade for the controlled exit",
-                        )
-                    external_trade_id = current.trade_id
-                    if isinstance(command, FreqtradeExitCommand):
-                        if command.close_all and current.amount > command.max_quantity:
-                            raise DomainRejected(
-                                "FREQTRADE_ORDER_IDENTITY_CONFLICT",
-                                "Freqtrade open amount exceeds the frozen full-exit boundary",
-                            )
-                        if not command.close_all and current.amount <= command.max_quantity:
-                            raise DomainRejected(
-                                "FREQTRADE_ORDER_IDENTITY_CONFLICT",
-                                "partial reduction must remain below the exact open trade amount",
-                            )
-                    elif current.side != command.side:
-                        raise DomainRejected(
-                            "FREQTRADE_ORDER_IDENTITY_CONFLICT",
-                            "approved Add direction differs from the exact open trade",
-                        )
-            dispatch = execution_service.start_freqtrade_dispatch(
-                intent_id,
-                actor_id=identity.user_id,
-                execution_scope=payload.execution_scope,
-                owner_id=payload.owner_id,
-                fencing_token=payload.fencing_token,
-                binding=binding,
-                command=command,
-                external_trade_id=external_trade_id,
-                idempotency_key=payload.idempotency_key,
-                now=_now(),
+                    owner_id=payload.owner_id,
+                    fencing_token=payload.fencing_token,
+                    idempotency_key=payload.idempotency_key,
+                ),
+                service=self.service(),
+                worker_resolver=self.require_freqtrade_worker,
+                require_enabled=self.require_freqtrade_enabled,
+                live_leverage=self.resolved_settings.freqtrade_live_leverage,
+                clock=_now,
             )
-            if dispatch.mode == "COMPLETED":
+            detail = self.queries().campaign_detail(identity.user_id, campaign_id)
+            if result.venue_order_fact_id is None:
                 return {
                     "backend": "FREQTRADE",
-                    "environment": environment,
-                    "worker": worker.spec.name,
-                    "trade_id": dispatch.external_trade_id,
+                    "environment": result.environment,
+                    "worker": result.worker_name,
+                    "trade_id": result.trade_id,
                     "replayed": True,
-                    "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
+                    "detail": detail,
                 }
-            try:
-                execution_service.validate_freqtrade_worker_binding(binding)
-                if isinstance(command, FreqtradeEntryCommand):
-                    trade = (
-                        worker.force_enter(
-                            command,
-                            expected_mode=expected_mode,
-                            trade_id=dispatch.external_trade_id,
-                            dispatch_started_at=dispatch.started_at,
-                        )
-                        if dispatch.mode == "SEND"
-                        else worker.recover_entry(
-                            command,
-                            trade_id=dispatch.external_trade_id,
-                            dispatch_started_at=dispatch.started_at,
-                        )
-                    )
-                else:
-                    assert dispatch.external_trade_id is not None
-                    trade = (
-                        worker.force_exit(
-                            dispatch.external_trade_id,
-                            command,
-                            dispatch_started_at=dispatch.started_at,
-                        )
-                        if dispatch.mode == "SEND"
-                        else worker.recover_exit(
-                            dispatch.external_trade_id,
-                            command,
-                            dispatch_started_at=dispatch.started_at,
-                        )
-                    )
-            except DomainRejected as exc:
-                if exc.code in {
-                    "FREQTRADE_LIVE_OUTCOME_UNKNOWN",
-                    "FREQTRADE_PROTECTION_UNCONFIRMED",
-                }:
-                    execution_service.record_freqtrade_unknown(
-                        intent_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        exc.code,
-                        now=_now(),
-                    )
-                raise
-            fact_id = execution_service.record_freqtrade_order(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                command,
-                trade,
-                dispatch_started_at=dispatch.started_at,
-                now=_now(),
-            )
-            protection_id = None
-            if isinstance(command, FreqtradeEntryCommand):
-                protection_id = execution_service.record_freqtrade_protection(
-                    campaign_id,
-                    identity.user_id,
-                    payload.execution_scope,
-                    payload.owner_id,
-                    payload.fencing_token,
-                    trade,
-                    now=_now(),
-                )
+            assert result.pair is not None and result.is_open is not None
             return {
-                "venue_order_fact_id": str(fact_id),
-                "protection_id": None if protection_id is None else str(protection_id),
+                "venue_order_fact_id": str(result.venue_order_fact_id),
+                "protection_id": (
+                    None if result.protection_id is None else str(result.protection_id)
+                ),
                 "backend": "FREQTRADE",
-                "environment": environment,
-                "worker": worker.spec.name,
-                "trade_id": trade.trade_id,
-                "pair": trade.pair,
-                "is_open": trade.is_open,
-                "replayed": dispatch.mode != "SEND",
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
+                "environment": result.environment,
+                "worker": result.worker_name,
+                "trade_id": result.trade_id,
+                "pair": result.pair,
+                "is_open": result.is_open,
+                "replayed": result.replayed,
+                "detail": detail,
             }
 
         @self.app.post("/api/campaigns/{campaign_id}/freqtrade/protection")
@@ -1200,60 +1049,26 @@ class _ExecutionRoutes:
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
             detail = self.queries().campaign_detail(identity.user_id, campaign_id)
-            scope_parts = payload.execution_scope.split(":")
-            if len(scope_parts) != 3:
-                raise DomainRejected(
-                    "EXECUTION_SCOPE_INVALID",
-                    "execution requires environment:account:venue",
-                )
-            environment, _account_id, venue = scope_parts
-            if environment not in {"TESTNET", "LIVE"}:
-                raise DomainRejected(
-                    "EXECUTION_SCOPE_INVALID",
-                    "execution requires an explicit TESTNET or LIVE scope",
-                )
-            expected_mode: Literal["DRY_RUN", "LIVE"] = (
-                "LIVE" if environment == "LIVE" else "DRY_RUN"
-            )
-            self.require_freqtrade_enabled()
-            execution_service = self.service()
-            binding = execution_service.freqtrade_worker_binding(
-                actor_id=identity.user_id,
-                execution_scope=payload.execution_scope,
-                owner_id=payload.owner_id,
-                fencing_token=payload.fencing_token,
-                now=_now(),
-                campaign_id=campaign_id,
-            )
-            worker = self.require_freqtrade_worker(binding)
-            pair = freqtrade_pair(
-                venue,
-                str(detail["instrument"]["symbol"]),
-                hip3_dexes=binding.hip3_dexes,
-            )
-            worker.probe(expected_mode=expected_mode, required_pair=pair)
-            execution_service.validate_freqtrade_worker_binding(binding)
-            trade = worker.find_open_trade(pair=pair)
-            if trade is None:
-                raise DomainRejected(
-                    "FREQTRADE_POSITION_NOT_FOUND",
-                    "Freqtrade has no unique open trade to verify protection",
-                )
-            protection_id = execution_service.record_freqtrade_protection(
-                campaign_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                trade,
-                now=_now(),
+            result = sync_protection(
+                SyncProtection(
+                    campaign_id=campaign_id,
+                    actor_id=identity.user_id,
+                    execution_scope=payload.execution_scope,
+                    owner_id=payload.owner_id,
+                    fencing_token=payload.fencing_token,
+                    symbol=str(detail["instrument"]["symbol"]),
+                ),
+                service=self.service(),
+                worker_resolver=self.require_freqtrade_worker,
+                require_enabled=self.require_freqtrade_enabled,
+                clock=_now,
             )
             return {
-                "protection_id": str(protection_id),
+                "protection_id": str(result.protection_id),
                 "backend": "FREQTRADE",
-                "environment": environment,
-                "worker": worker.spec.name,
-                "trade_id": trade.trade_id,
+                "environment": result.environment,
+                "worker": result.worker_name,
+                "trade_id": result.trade_id,
                 "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
             }
 
