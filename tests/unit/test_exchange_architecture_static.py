@@ -119,6 +119,19 @@ def test_live_freqtrade_workers_start_stopped_and_never_cancel_external_orders_o
         assert payload["telegram"]["enabled"] is False, path
 
 
+def test_binance_live_freqtrade_worker_corrects_exchange_clock_skew() -> None:
+    payload = json.loads(
+        (ROOT / "freqtrade" / "config-binance-live-smoke.json").read_text()
+    )
+    assert payload["exchange"]["ccxt_config"]["options"]["adjustForTimeDifference"] is True
+    assert payload["exchange"]["ccxt_config"]["options"]["recvWindow"] == 60_000
+    assert (
+        payload["exchange"]["ccxt_async_config"]["options"]["adjustForTimeDifference"]
+        is True
+    )
+    assert payload["exchange"]["ccxt_async_config"]["options"]["recvWindow"] == 60_000
+
+
 def test_compose_forwards_production_integration_switches_explicitly() -> None:
     source = (ROOT / "compose.yaml").read_text()
     for name in (

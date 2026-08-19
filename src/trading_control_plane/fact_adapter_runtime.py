@@ -55,7 +55,7 @@ FreqtradeClientFactory = Callable[[PreparedFreqtradeWorkerBinding], FreqtradeWor
 
 @dataclass(slots=True)
 class _RunningAdapter:
-    version: tuple[int, int]
+    version: tuple[int, str]
     supervisor: FactStreamSupervisor
     task: asyncio.Task[None]
 
@@ -111,6 +111,10 @@ class FactAdapterRuntime:
             account_mode=binding.account_mode,
         )
 
+    @staticmethod
+    def _connection_version(binding: PreparedRuntimeAccountBinding) -> tuple[int, str]:
+        return binding.credential_version, str(binding.service_principal_id)
+
     async def _start_binding(self, binding: PreparedRuntimeAccountBinding) -> str:
         scope = self._scope(binding)
         kwargs: dict[str, Any] = {
@@ -141,7 +145,7 @@ class FactAdapterRuntime:
         )
         await self.registry.attach_task(scope.key, task)
         self._running[scope.key] = _RunningAdapter(
-            version=(binding.account_version, binding.credential_version),
+            version=self._connection_version(binding),
             supervisor=supervisor,
             task=task,
         )
@@ -164,7 +168,7 @@ class FactAdapterRuntime:
             version = (
                 None
                 if current_binding is None
-                else (current_binding.account_version, current_binding.credential_version)
+                else self._connection_version(current_binding)
             )
             if version != running.version or running.task.done():
                 running.supervisor.stop()

@@ -940,9 +940,14 @@ def test_runtime_reuses_one_connection_and_rotates_on_credential_version() -> No
         await runtime.reconcile_once()
         assert len(exchanges) == 1
 
+        bindings[0] = replace(binding, account_version=2)
+        await runtime.reconcile_once()
+        assert exchanges[0].closed is False
+        assert len(exchanges) == 1
+
         bindings[0] = replace(
             binding,
-            account_version=2,
+            account_version=3,
             credential_version=2,
             credentials={"api_key": "key-b", "api_secret": "secret-b"},
         )

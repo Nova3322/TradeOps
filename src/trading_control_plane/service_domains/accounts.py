@@ -205,16 +205,24 @@ def lock_runtime_account_binding(
         .where(models.ExchangeAccount.exchange_account_id == binding.exchange_account_id)
         .with_for_update()
     )
+    credential_metadata = {} if account is None else (account.credential_metadata or {})
     if (
         account is None
         or account.team_id != binding.team_id
         or account.account_id != binding.account_id
         or account.venue != binding.venue
         or account.environment != binding.environment
+        or not account.active
+        or account.deleted_at is not None
+        or account.connection_status != "VERIFIED"
         or not account.runtime_sync_enabled
         or account.runtime_service_principal_id != binding.service_principal_id
-        or account.version != binding.account_version
+        or account.credentials_ciphertext is None
         or account.credential_version != binding.credential_version
+        or credential_metadata.get("environment") != binding.environment
+        or str(credential_metadata.get("account_mode", "STANDARD"))
+        != binding.account_mode
+        or tuple(account.freqtrade_hip3_dexes or ()) != binding.hip3_dexes
     ):
         _reject(
             "RUNTIME_BINDING_CHANGED",
