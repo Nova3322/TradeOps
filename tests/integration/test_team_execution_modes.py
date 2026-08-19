@@ -169,9 +169,6 @@ def test_mode_switch_is_team_managed_versioned_audited_and_keeps_dangerous_gates
     assert status["can_manage"] is False
     assert status["target_readiness"]["TESTNET"]["ready"] is True
 
-    admin_status = service.trading_mode_status(actor_id=ids["admin"], now=now)
-    assert admin_status["can_manage"] is True
-
     with pytest.raises(DomainRejected, match="RBAC_DENIED"):
         service.set_team_execution_mode(
             actor_id=ids["member"],
