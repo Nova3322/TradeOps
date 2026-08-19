@@ -103,6 +103,21 @@ def _fingerprint(value: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+def _funding_payment_id(item: Mapping[str, Any]) -> str:
+    external_id = str(item.get("id") or "").strip()
+    normalized_id = external_id.removeprefix("0x").removeprefix("0X")
+    if external_id and normalized_id and set(normalized_id) != {"0"}:
+        return external_id
+    return "derived:" + _fingerprint(
+        {
+            "symbol": item.get("symbol"),
+            "amount": _decimal_text(item.get("amount")),
+            "currency": item.get("code"),
+            "timestamp": item.get("timestamp"),
+        }
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class FactAdapterScope:
     workspace_id: str
@@ -924,7 +939,7 @@ class CcxtProFactAdapter:
                 rows.append(
                     {
                         "kind": "PAYMENT",
-                        "payment_id": str(item.get("id") or _fingerprint(dict(item))),
+                        "payment_id": _funding_payment_id(item),
                         "symbol": symbol,
                         "native_symbol": self._market_id(markets, symbol),
                         "amount": _decimal_text(item.get("amount")),
