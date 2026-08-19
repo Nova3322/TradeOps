@@ -17,12 +17,22 @@ def test_formatter_emits_allowlisted_context_only() -> None:
     )
     record.event = "command_transaction_failed"
     record.command_type = "capability.disable.v1"
+    record.error_type = "AuthenticationError"
+    record.venue = "BINANCE"
+    record.account_id = "acct-1"
+    record.capability = "watchBalance"
+    record.attempt = 3
     record.secret = "must-not-leak"  # noqa: S105 - verifies secret-shaped fields are omitted
 
     payload = json.loads(JsonFormatter().format(record))
 
     assert payload["event"] == "command_transaction_failed"
     assert payload["command_type"] == "capability.disable.v1"
+    assert payload["error_type"] == "AuthenticationError"
+    assert payload["venue"] == "BINANCE"
+    assert payload["account_id"] == "acct-1"
+    assert payload["capability"] == "watchBalance"
+    assert payload["attempt"] == 3
     assert "secret" not in payload
 
 
