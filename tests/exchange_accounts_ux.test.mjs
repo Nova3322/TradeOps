@@ -30,13 +30,20 @@ test('production account cards expose the exact-account detail workflow', () => 
   );
   assert.match(routerSource, /venueAccountMatch = path\.match\(\/\^\\\/venues\\\/\(\[\^\/\]\+\)\$\/\)/);
   assert.match(routerSource, /renderVenueAccountDetail\(venueAccountMatch\[1\]\)/);
-  assert.match(indexSource, /execution\.js\?v=192/);
+  assert.match(indexSource, /execution\.js\?v=193/);
   assert.match(indexSource, /accounts\.js\?v=180/);
-  assert.match(serviceWorkerSource, /trading-shell-v225/);
+  assert.match(serviceWorkerSource, /trading-shell-v226/);
 });
 
 test('account detail trusts fresh exact-account facts instead of API-local worker flags', () => {
   assert.match(accountsSource, /health\?\.data\?\.data_status === 'CURRENT'/);
   assert.match(accountsSource, /external_boundaries\?\.fact_adapter\?\.reconciliation_seconds/);
   assert.doesNotMatch(accountsSource, /processRuntimeEnabled/);
+});
+
+test('all supported testnet venues remain available for fact-only onboarding', () => {
+  assert.match(executionSource, /<option value="\$\{venue\}">/);
+  assert.match(executionSource, /' · 仅事实同步'/);
+  assert.match(executionSource, /该交易所测试环境仅支持事实同步；执行保持不可用/);
+  assert.doesNotMatch(executionSource, /value="\$\{venue\}" \$\{selectedEnvironment.*\? 'disabled'/);
 });
