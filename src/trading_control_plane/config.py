@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     fact_adapter_port: int = Field(default=8010, ge=1, le=65_535)
     fact_adapter_bearer_token: str | None = Field(default=None, min_length=32, repr=False)
     fact_adapter_binding_refresh_seconds: int = Field(default=60, ge=30, le=3_600)
-    fact_adapter_stale_after_seconds: int = Field(default=90, ge=15, le=900)
+    fact_adapter_stale_after_seconds: int = Field(default=360, ge=15, le=900)
     fact_adapter_reconciliation_seconds: int = Field(default=300, ge=30, le=3_600)
     fact_adapter_fallback_seconds: int = Field(default=60, ge=30, le=900)
     notification_worker_enabled: bool = False

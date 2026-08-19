@@ -51,6 +51,8 @@ def test_postgresql_psycopg_url_is_accepted() -> None:
     assert settings.runtime_sync_enabled is False
     assert settings.runtime_sync_interval_seconds == 60
     assert settings.fact_adapter_enabled is False
+    assert settings.fact_adapter_stale_after_seconds == 360
+    assert settings.fact_adapter_reconciliation_seconds == 300
     assert settings.freqtrade_workers_enabled is False
     assert settings.notilt_enabled is False
     assert settings.notilt_vaults == {}
