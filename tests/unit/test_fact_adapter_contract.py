@@ -359,6 +359,13 @@ def test_ccxt_pro_fact_contract_normalizes_all_supported_venues(venue: str) -> N
     assert normalized[0].fills[0].fill_id == "external-fill"
     assert normalized[0].equity.equity == Decimal(100)
 
+    incomplete_history = normalize_fact_adapter_snapshot(
+        replace(snapshot, unknown_fields=("fetchMyTrades",))
+    )
+    assert incomplete_history[0].fills == ()
+    assert incomplete_history[0].funding == ()
+    assert incomplete_history[0].history_error_code == "FACT_ADAPTER_HISTORY_INCOMPLETE"
+
 
 def test_fact_adapter_rejects_trading_signing_material() -> None:
     with pytest.raises(DomainRejected, match="FACT_ADAPTER_CREDENTIAL_SCOPE_INVALID"):
