@@ -234,6 +234,7 @@ async function renderVenueAccountDetail(requestedAccountId) {
   );
   const status = {
     venue,
+    account_mode:account.account_mode || 'STANDARD',
     execution_backend:'FREQTRADE',
     worker_configured:false,
     automatic_sync_enabled:Boolean(persistedFactsCurrent && account?.runtime_binding?.bound),
