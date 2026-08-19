@@ -342,7 +342,7 @@ def test_exact_binance_deposit_and_withdrawal_receipts_are_verified() -> None:
             "network": "ARBITRUM",
             "address": DESTINATION,
             "txId": TX_HASH,
-            "amount": "25",
+            "amount": "24",
             "transactionFee": "1",
             "status": 6,
         }
@@ -363,6 +363,8 @@ def test_exact_binance_deposit_and_withdrawal_receipts_are_verified() -> None:
     assert deposit["status"] == "CONFIRMED"
     assert withdrawal["status"] == "CONFIRMED"
     assert withdrawal["transactionHash"] == TX_HASH
+    assert withdrawal["amount"] == "24"
+    assert withdrawal["fee"] == "1"
 
 
 def test_travel_rule_scope_fails_closed_instead_of_using_wrong_endpoint() -> None:

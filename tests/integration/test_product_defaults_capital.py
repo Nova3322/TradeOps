@@ -1149,7 +1149,7 @@ def test_safe_configuration_validation_returns_actionable_error_codes(
     asyncio.run(scenario())
 
 
-def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual_receipt(
+def test_binance_restricted_withdrawal_reconciles_after_frozen_plan_expires(
     database: Database,
 ) -> None:
     service = TradingService(database)
@@ -1250,7 +1250,7 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
                     "network": "ARBITRUM",
                     "address": destination,
                     "txId": tx_hash,
-                    "amount": "25",
+                    "amount": "24",
                     "transactionFee": "1",
                     "status": 6,
                 }
@@ -1272,7 +1272,7 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
                         "0x" + "0" * 24 + "9" * 40,
                         "0x" + "0" * 24 + destination[2:],
                     ],
-                    "data": hex(25_000_000),
+                    "data": hex(24_000_000),
                 }
             ],
         }
@@ -1329,6 +1329,10 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
                 },
             )
             assert submitted_response.status_code == 200, submitted_response.text
+            with database.session_factory.begin() as session:
+                expired = session.get(DirectCapitalOperation, UUID(operation_id))
+                assert expired is not None
+                expired.expires_at = datetime.now(UTC) - timedelta(seconds=1)
             service.acquire_direct_capital_binance_receipt_poll(
                 UUID(operation_id),
                 admin_id,

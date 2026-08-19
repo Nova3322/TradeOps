@@ -465,6 +465,7 @@ class DirectCapitalConfigurationService(ServiceComponent):
         actor_id: UUID,
         *,
         now: datetime,
+        allow_expired: bool = False,
     ) -> dict[str, Any]:
         with self.database.session_factory() as session:
             item = session.get(models.DirectCapitalOperation, operation_id)
@@ -480,7 +481,7 @@ class DirectCapitalConfigurationService(ServiceComponent):
                 item.venue,
                 team_id=item.team_id,
             )
-            if item.expires_at <= now:
+            if item.expires_at <= now and not allow_expired:
                 rejections.reject(
                     "CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired"
                 )

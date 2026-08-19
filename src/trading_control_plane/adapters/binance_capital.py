@@ -916,7 +916,13 @@ class BinanceCapitalGateway:
         result = self._normalize_withdrawal(
             raw[0], expected_order_id=order_id, expected_destination=destination
         )
-        if Decimal(result["amount"]) != Decimal(amount):
+        received_amount = _decimal(
+            result["amount"], code="BINANCE_CAPITAL_RECEIPT_MISMATCH", field="withdrawal amount"
+        )
+        fee = _decimal(
+            result["fee"], code="BINANCE_CAPITAL_RECEIPT_MISMATCH", field="withdrawal fee"
+        )
+        if received_amount <= 0 or received_amount + fee != Decimal(amount):
             _reject("BINANCE_CAPITAL_RECEIPT_MISMATCH", "withdrawal amount does not match")
         if result["status"] != "CONFIRMED" or not result["transactionHash"]:
             _reject("BINANCE_CAPITAL_WITHDRAWAL_PENDING", "withdrawal is not chain-confirmed")
