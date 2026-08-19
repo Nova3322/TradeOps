@@ -39,3 +39,8 @@ regexes = ['''replacement-(?:4321|secret)''']
 description = "Public chain token address fixture"
 regexTarget = "match"
 regexes = ['''0xaf88d065e77c8cc2239327c5edb3a432268e5831''']
+
+[[allowlists]]
+description = "Public Hyperliquid token identifier fixture"
+regexTarget = "match"
+regexes = ['''0x6d1e7cde53ba9467b783cb7c530ce054''']
