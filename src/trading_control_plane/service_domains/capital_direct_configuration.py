@@ -77,7 +77,7 @@ class DirectCapitalConfigurationService(ServiceComponent):
                 "direct capital configuration is available only in LIVE",
             )
         with self.database.session_factory() as session:
-            team = self.transactions.require_role(session, actor_id, "capital.view")
+            team = self.transactions.require_action_assignment(session, actor_id, "capital.view")
             config = session.scalar(
                 select(models.DirectCapitalConfiguration).where(
                     models.DirectCapitalConfiguration.team_id == team.team_id,

@@ -431,7 +431,7 @@ class RecoveryRiskService(ServiceComponent):
         now: datetime,
     ) -> dict[str, Any]:
         with self.database.session_factory() as session:
-            team = self.transactions.require_role(session, actor_id, "system.view")
+            team = self.transactions.require_action_assignment(session, actor_id, "system.view")
             policy = session.scalar(
                 select(models.RiskPolicy).where(
                     models.RiskPolicy.team_id == team.team_id,

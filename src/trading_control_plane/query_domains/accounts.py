@@ -80,7 +80,16 @@ class AccountQueries(QueryComponent):
                 )
                 .order_by(ExchangeAccount.account_id, ExchangeAccount.venue)
             ).all()
-        return tuple((str(row[0]), str(row[1]), str(row[2])) for row in rows)
+        return tuple(
+            (str(row[0]), str(row[1]), str(row[2]))
+            for row in rows
+            if self.can_user(
+                actor_id,
+                "system.view",
+                str(row[1]),
+                str(row[2]),
+            )
+        )
 
     def capital_account_scope(
         self,
