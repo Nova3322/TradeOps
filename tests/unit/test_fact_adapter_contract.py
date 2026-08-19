@@ -341,6 +341,8 @@ def test_ccxt_pro_fact_contract_normalizes_all_supported_venues(venue: str) -> N
         assert observed["options"] == {
             "defaultType": "swap",
             "adjustForTimeDifference": True,
+            "fetchCurrencies": False,
+            "fetchOpenOrders": {"warnWithoutSymbol": False},
             "papi": True,
             "portfolioMargin": True,
         }
@@ -403,6 +405,8 @@ def test_one_shot_fact_probe_uses_exact_scope_and_always_closes() -> None:
     assert observed["options"] == {
         "defaultType": "swap",
         "adjustForTimeDifference": True,
+        "fetchCurrencies": False,
+        "fetchOpenOrders": {"warnWithoutSymbol": False},
         "papi": True,
         "portfolioMargin": True,
     }
@@ -496,6 +500,35 @@ def test_hyperliquid_mark_and_native_identity_use_exchange_contract() -> None:
     )
 
 
+def test_mark_uses_funding_rate_fallback_and_ignores_unconfirmed_ticker() -> None:
+    adapter = CcxtProFactAdapter(
+        _scope(),
+        credentials=_credentials("BINANCE"),
+        exchange_factory=lambda *_args: FakeCcxtProExchange(),
+        clock=lambda: _NOW,
+    )
+    pair = "BTC/USDT:USDT"
+    markets = {pair: {"id": "BTCUSDT"}}
+
+    marks = adapter._marks(
+        {pair: {"symbol": pair, "markPrice": None}},
+        markets,
+        _NOW,
+        (pair,),
+        fallback={pair: {"markPrice": "60002", "timestamp": int(_NOW.timestamp() * 1_000)}},
+    )
+    missing = adapter._marks(
+        {pair: {"symbol": pair, "markPrice": None}},
+        markets,
+        _NOW,
+        (pair,),
+    )
+
+    assert marks[0]["mark_price"] == "60002"
+    assert marks[0]["native_symbol"] == "BTCUSDT"
+    assert missing == ()
+
+
 def test_initial_fact_snapshot_failure_retries_before_starting_stream() -> None:
     class InitialFailureExchange(FakeCcxtRestOnlyExchange):
         def __init__(self) -> None:
@@ -550,6 +583,51 @@ def test_initial_fact_snapshot_failure_retries_before_starting_stream() -> None:
     asyncio.run(scenario())
 
 
+def test_required_snapshot_failure_cancels_sibling_reads() -> None:
+    class RequiredReadFailureExchange(FakeCcxtRestOnlyExchange):
+        def __init__(self) -> None:
+            super().__init__()
+            self.positions_cancelled = False
+            self.orders_cancelled = False
+
+        async def fetch_balance(self) -> Mapping[str, Any]:
+            raise OSError("fixture required read failure")
+
+        async def fetch_positions(self) -> list[Mapping[str, Any]]:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.positions_cancelled = True
+                raise
+            raise AssertionError("unreachable")
+
+        async def fetch_open_orders(self) -> list[Mapping[str, Any]]:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.orders_cancelled = True
+                raise
+            raise AssertionError("unreachable")
+
+    async def scenario() -> None:
+        exchange = RequiredReadFailureExchange()
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: exchange,
+            clock=lambda: _NOW,
+        )
+
+        with pytest.raises(DomainRejected, match="FACT_ADAPTER_SNAPSHOT_UNAVAILABLE"):
+            await adapter.snapshot(reason="INITIAL")
+
+        assert exchange.positions_cancelled is True
+        assert exchange.orders_cancelled is True
+        await adapter.close()
+
+    asyncio.run(scenario())
+
+
 def test_fact_snapshot_includes_non_freqtrade_account_positions() -> None:
     exchange = FakeCcxtAccountWideExchange()
     adapter = CcxtProFactAdapter(
@@ -572,6 +650,24 @@ def test_fact_snapshot_includes_non_freqtrade_account_positions() -> None:
     }
     normalized = normalize_fact_adapter_snapshot(snapshot)
     assert {item.symbol for item in normalized} == {"BTCUSDT", "ETHUSDT"}
+
+
+def test_fact_snapshot_drops_delisted_catalog_subscription() -> None:
+    scope = replace(
+        _scope(),
+        symbols=("BTC/USDT:USDT", "DELISTED/USDT:USDT"),
+    )
+    adapter = CcxtProFactAdapter(
+        scope,
+        credentials=_credentials("BINANCE"),
+        exchange_factory=lambda *_args: FakeCcxtRestOnlyExchange(),
+        clock=lambda: _NOW,
+    )
+
+    snapshot = asyncio.run(adapter.snapshot(reason="INITIAL"))
+
+    assert {row["native_symbol"] for row in snapshot.instruments} == {"BTCUSDT"}
+    assert adapter._tracked_symbols == {"BTC/USDT:USDT"}
 
 
 def test_registry_deduplicates_adapter_owned_events() -> None:

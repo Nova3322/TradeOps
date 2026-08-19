@@ -437,6 +437,13 @@ class CcxtProFactAdapter:
             # Signed reads must use Binance server time.  A host clock outside
             # recvWindow must not permanently stop the read-only fact stream.
             options["adjustForTimeDifference"] = True
+            # CCXT's currency catalog uses an unrelated signed capital endpoint
+            # before market time calibration.  Account facts only need the
+            # public derivatives market catalog and exact account reads below.
+            options["fetchCurrencies"] = False
+            # Account-wide open orders are required so manual/non-Freqtrade
+            # orders cannot be hidden by the catalog subscription list.
+            options["fetchOpenOrders"] = {"warnWithoutSymbol": False}
         if scope.venue == "BINANCE" and scope.account_mode == "PORTFOLIO_MARGIN":
             options.update({"papi": True, "portfolioMargin": True})
         if scope.venue == "HYPERLIQUID":
@@ -854,31 +861,47 @@ class CcxtProFactAdapter:
         markets: Mapping[str, Any],
         observed_at: datetime,
         symbols: Sequence[str],
+        fallback: object = None,
     ) -> tuple[JsonObject, ...]:
-        if raw is None:
-            return ()
-        if not isinstance(raw, Mapping):
+        if raw is not None and not isinstance(raw, Mapping):
             raise DomainRejected(
                 "FACT_ADAPTER_RESPONSE_INVALID", "CCXT tickers response is invalid"
             )
+        if fallback is not None and not isinstance(fallback, Mapping):
+            raise DomainRejected(
+                "FACT_ADAPTER_RESPONSE_INVALID", "CCXT mark fallback response is invalid"
+            )
+        primary = raw if isinstance(raw, Mapping) else {}
+        secondary = fallback if isinstance(fallback, Mapping) else {}
         rows: list[JsonObject] = []
         for symbol in symbols:
-            value = raw.get(symbol)
-            if not isinstance(value, Mapping):
+            value = primary.get(symbol)
+            fallback_value = secondary.get(symbol)
+            if not isinstance(value, Mapping) and not isinstance(fallback_value, Mapping):
                 continue
-            mark = value.get("markPrice")
+            mark = None
+            source: Mapping[str, Any] = {}
+            for candidate in (value, fallback_value):
+                if not isinstance(candidate, Mapping):
+                    continue
+                source = candidate
+                mark = candidate.get("markPrice")
+                if mark is None:
+                    info = candidate.get("info")
+                    if isinstance(info, Mapping):
+                        mark = info.get("markPrice")
+                        if mark is None:
+                            mark = info.get("markPx")
+                if mark is not None:
+                    break
             if mark is None:
-                info = value.get("info")
-                if isinstance(info, Mapping):
-                    mark = info.get("markPrice")
-                    if mark is None:
-                        mark = info.get("markPx")
+                continue
             rows.append(
                 {
                     "symbol": symbol,
                     "native_symbol": self._market_id(markets, symbol),
                     "mark_price": _decimal_text(mark),
-                    "observed_at": _timestamp(value.get("timestamp"), fallback=observed_at),
+                    "observed_at": _timestamp(source.get("timestamp"), fallback=observed_at),
                 }
             )
         return tuple(rows)
@@ -939,6 +962,16 @@ class CcxtProFactAdapter:
         self.validate_capabilities()
         now = _utc(self._clock() if observed_at is None else observed_at)
         markets = await self._load_markets()
+        # Instrument catalog rows can remain active briefly after a venue
+        # delists a market.  They are subscription candidates, not authority.
+        # Account-wide positions/orders discovered below are still added and
+        # will fail closed if their live market identity cannot be resolved.
+        self._tracked_symbols.intersection_update(markets)
+        if not self._tracked_symbols:
+            raise DomainRejected(
+                "FACT_ADAPTER_SCOPE_EMPTY",
+                "the exact account has no live market subscription",
+            )
         since = int((now - self._history_window).timestamp() * 1_000)
         balance_task = asyncio.create_task(self._rest("fetchBalance"))
         # Account facts deliberately use the account-wide unified calls.  Passing
@@ -959,8 +992,14 @@ class CcxtProFactAdapter:
             )
             optional = {name: await task for name, task in optional_tasks.items()}
         except Exception as exc:
-            for task in (*optional_tasks.values(),):
+            required_tasks = (balance_task, positions_task, orders_task)
+            for task in (*required_tasks, *optional_tasks.values()):
                 task.cancel()
+            await asyncio.gather(
+                *required_tasks,
+                *optional_tasks.values(),
+                return_exceptions=True,
+            )
             raise DomainRejected(
                 "FACT_ADAPTER_SNAPSHOT_UNAVAILABLE",
                 "the complete account snapshot could not be confirmed",
@@ -1046,7 +1085,13 @@ class CcxtProFactAdapter:
             fills=self._fills(fills_raw, markets, now),
             balances=self._balances(balance, now),
             instruments=self._instruments(markets, tracked_symbols),
-            marks=self._marks(tickers, markets, now, tracked_symbols),
+            marks=self._marks(
+                tickers,
+                markets,
+                now,
+                tracked_symbols,
+                fallback=funding_rates,
+            ),
             funding=self._funding(
                 funding_history,
                 funding_rates,
