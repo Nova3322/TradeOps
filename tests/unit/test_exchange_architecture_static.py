@@ -105,6 +105,38 @@ def test_all_freqtrade_configs_use_built_in_sync_and_async_rate_limiting() -> No
         assert 1 <= len(exchange["pair_whitelist"]) <= 2, path
 
 
+def test_live_freqtrade_workers_start_stopped_and_never_cancel_external_orders_on_exit() -> None:
+    configs = tuple((ROOT / "freqtrade").glob("config-*-live-smoke.json"))
+    assert {path.name for path in configs} == {
+        "config-binance-live-smoke.json",
+        "config-hyperliquid-live-smoke.json",
+    }
+    for path in configs:
+        payload = json.loads(path.read_text())
+        assert payload["initial_state"] == "stopped", path
+        assert payload["force_entry_enable"] is False, path
+        assert payload["cancel_open_orders_on_exit"] is False, path
+        assert payload["telegram"]["enabled"] is False, path
+
+
+def test_compose_forwards_production_integration_switches_explicitly() -> None:
+    source = (ROOT / "compose.yaml").read_text()
+    for name in (
+        "TRADING_ENVIRONMENT",
+        "TRADING_FREQTRADE_WORKERS_ENABLED",
+        "TRADING_TELEGRAM_ENABLED",
+        "TRADING_TELEGRAM_BOT_TOKEN",
+        "TRADING_BINANCE_CAPITAL_API_KEY",
+        "TRADING_BINANCE_CAPITAL_API_SECRET",
+        "TRADING_BINANCE_CAPITAL_ACCOUNT_ID",
+        "TRADING_NOTILT_ENABLED",
+        "TRADING_NOTILT_AGENT_ADDRESS",
+        "TRADING_NOTILT_ARBITRUM_VAULT_ADDRESS",
+        "TRADING_HYPERLIQUID_ACCOUNT_ADDRESS",
+    ):
+        assert f"{name}: ${{{name}" in source
+
+
 def test_execution_route_delegates_transport_orchestration_to_application_use_case() -> None:
     route = ROOT / "src/trading_control_plane/api_routes/execution.py"
     application = ROOT / "src/trading_control_plane/execution_dispatch.py"
