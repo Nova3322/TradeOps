@@ -105,8 +105,14 @@ class CapitalApplicationRuntime:
         now: datetime,
         *,
         conflict_message: str = "direct capital operation changed; refresh",
+        allow_expired: bool = False,
     ) -> DirectCapitalContext:
-        raw = self.service().direct_capital_operation_context(operation_id, actor_id, now=now)
+        raw = self.service().direct_capital_operation_context(
+            operation_id,
+            actor_id,
+            now=now,
+            allow_expired=allow_expired,
+        )
         version = raw.get("version")
         stages = raw.get("stages")
         blockers = raw.get("blockers")

@@ -1075,6 +1075,13 @@ class BinanceApiState(Base):
     clock_synchronized_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    exchange_info: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    exchange_info_cached_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    history_schedules: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
     probe_owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
     probe_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -1566,6 +1573,11 @@ class DirectCapitalOperation(Base):
         DateTime(timezone=True), nullable=True
     )
     receipt_poll_token: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    receipt_next_due_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    receipt_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    receipt_last_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     execute_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     final_confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -1573,6 +1585,42 @@ class DirectCapitalOperation(Base):
     correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class BinanceCapitalOutbox(Base):
+    """Durable fence around every Binance capital write attempt."""
+
+    __tablename__ = "binance_capital_outbox"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id", "stage", name="uq_binance_capital_outbox_operation_stage"
+        ),
+        CheckConstraint(
+            "status IN ('NEVER_ATTEMPTED','ATTEMPTING','CONFIRMED','UNKNOWN')",
+            name="ck_binance_capital_outbox_status",
+        ),
+        CheckConstraint("attempt_count >= 0", name="ck_binance_capital_outbox_attempts"),
+        Index("ix_binance_capital_outbox_status", "status", "updated_at"),
+    )
+
+    outbox_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    operation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("direct_capital_operations.operation_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    stage: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    external_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

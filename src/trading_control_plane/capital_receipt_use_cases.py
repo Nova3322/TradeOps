@@ -52,7 +52,11 @@ class CapitalReceiptUseCases:
     ) -> dict[str, object]:
         now = self.runtime.clock()
         context = self.runtime.direct_operation_context(
-            operation_id, actor_id, request.expected_version, now
+            operation_id,
+            actor_id,
+            request.expected_version,
+            now,
+            allow_expired=True,
         )
         direct_settings, _ = self.runtime.direct_settings(actor_id)
         capital_account_id = None if context["account_id"] is None else str(context["account_id"])
@@ -174,6 +178,25 @@ class CapitalReceiptUseCases:
                         "amount": Decimal(str(context["amount"])),
                     },
                 )
+                try:
+                    received_amount = Decimal(str(withdrawal["amount"]))
+                    fee = Decimal(str(withdrawal["fee"]))
+                    min_received = Decimal(str(context["min_received"]))
+                    max_fee = Decimal(str(context["max_fee"]))
+                except (KeyError, ArithmeticError, ValueError) as exc:
+                    raise DomainRejected(
+                        "BINANCE_CAPITAL_RECEIPT_MISMATCH",
+                        "Binance withdrawal receipt amounts are invalid",
+                    ) from exc
+                if (
+                    received_amount < min_received
+                    or fee > max_fee
+                    or received_amount + fee != Decimal(str(context["amount"]))
+                ):
+                    raise DomainRejected(
+                        "BINANCE_CAPITAL_RECEIPT_MISMATCH",
+                        "Binance withdrawal receipt is outside the frozen amount limits",
+                    )
                 transaction_hash = str(withdrawal["transactionHash"])
                 chain = self.runtime.execute_mapping(
                     actor_id=actor_id,
@@ -184,7 +207,7 @@ class CapitalReceiptUseCases:
                         "rpc_url": rpc_url,
                         "transaction_hash": transaction_hash,
                         "recipient": destination,
-                        "amount": str(context["amount"]),
+                        "amount": str(received_amount),
                         "min_confirmations": (direct_settings.notilt_arbitrum_min_confirmations),
                     },
                 )
@@ -222,7 +245,11 @@ class CapitalReceiptUseCases:
     ) -> dict[str, object]:
         now = self.runtime.clock()
         context = self.runtime.direct_operation_context(
-            operation_id, actor_id, request.expected_version, now
+            operation_id,
+            actor_id,
+            request.expected_version,
+            now,
+            allow_expired=True,
         )
         execution_submission = next(
             (
@@ -313,7 +340,11 @@ class CapitalReceiptUseCases:
     ) -> dict[str, object]:
         now = self.runtime.clock()
         context = self.runtime.direct_operation_context(
-            operation_id, actor_id, request.expected_version, now
+            operation_id,
+            actor_id,
+            request.expected_version,
+            now,
+            allow_expired=True,
         )
         if (
             context["path"]
@@ -377,7 +408,11 @@ class CapitalReceiptUseCases:
     ) -> dict[str, object]:
         now = self.runtime.clock()
         context = self.runtime.direct_operation_context(
-            operation_id, actor_id, request.expected_version, now
+            operation_id,
+            actor_id,
+            request.expected_version,
+            now,
+            allow_expired=True,
         )
         direct_settings, _ = self.runtime.direct_settings(actor_id)
         direct_settings = self.runtime.hyperliquid_settings(
@@ -570,7 +605,11 @@ class CapitalReceiptUseCases:
             now=now,
         )
         updated_context = self.runtime.direct_operation_context(
-            operation_id, actor_id, version, now
+            operation_id,
+            actor_id,
+            version,
+            now,
+            allow_expired=True,
         )
         return {
             "operation_id": str(operation_id),
@@ -593,7 +632,11 @@ class CapitalReceiptUseCases:
     ) -> dict[str, object]:
         now = self.runtime.clock()
         context = self.runtime.direct_operation_context(
-            operation_id, actor_id, request.expected_version, now
+            operation_id,
+            actor_id,
+            request.expected_version,
+            now,
+            allow_expired=True,
         )
         if context["path"] != DirectCapitalPath.HYPERLIQUID_TO_VAULT.value:
             raise DomainRejected(

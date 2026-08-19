@@ -666,10 +666,6 @@ class DirectCapitalReceiptService(ServiceComponent):
                 rejections.reject(
                     "BINANCE_CAPITAL_RECEIPT_STAGE_INVALID", "receipt does not match path"
                 )
-            if item.expires_at <= now:
-                rejections.reject(
-                    "CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired"
-                )
             required_previous_stage = (
                 "BINANCE_DEPOSIT_PREFLIGHT_READY"
                 if stage == "BINANCE_DEPOSIT"
@@ -679,6 +675,23 @@ class DirectCapitalReceiptService(ServiceComponent):
                 rejections.reject(
                     "BINANCE_CAPITAL_PREVIOUS_STAGE_REQUIRED",
                     "Binance receipt cannot be accepted before the frozen prior stage",
+                )
+            irreversible_submission_recorded = (
+                required_previous_stage == "BINANCE_RESTRICTED_WITHDRAWAL_SUBMITTED"
+                or any(
+                    existing.get("code")
+                    in {
+                        "NOTILT_DESTINATION_TRANSFER_SUBMITTED_BY_HUMAN_WALLET",
+                        "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET",
+                    }
+                    for existing in item.stages
+                )
+            )
+            if item.expires_at <= now and (
+                item.status != "AWAITING_RECEIPT" or not irreversible_submission_recorded
+            ):
+                rejections.reject(
+                    "CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired"
                 )
             code = f"{stage}_RECEIPT_CONFIRMED"
             if not any(existing.get("code") == code for existing in item.stages):

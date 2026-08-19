@@ -23,23 +23,30 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `ox` | `0.14.33` | Node.js | `MIT` |
 | `viem` | `2.55.10` | Node.js | `MIT` |
 | `ws` | `8.21.0` | Node.js | `MIT` |
+| `aiohappyeyeballs` | `2.7.1` | Python | `PSF-2.0` |
+| `aiohttp` | `3.14.1` | Python | `NOASSERTION` |
+| `aiohttp-fast-zlib` | `0.3.0` | Python | `Apache-2.0` |
+| `aiosignal` | `1.4.0` | Python | `Apache-2.0` |
 | `alembic` | `1.18.5` | Python | `MIT` |
 | `annotated-doc` | `0.0.4` | Python | `MIT` |
 | `annotated-types` | `0.7.0` | Python | `MIT` |
 | `anyio` | `4.14.2` | Python | `MIT` |
 | `asttokens` | `3.0.2` | Python | `Apache-2.0` |
+| `attrs` | `26.1.0` | Python | `MIT` |
 | `beautifulsoup4` | `4.15.0` | Python | `MIT` |
 | `bitarray` | `3.9.2` | Python | `PSF-2.0` |
 | `bottleneck` | `1.6.0` | Python | `BSD-2-Clause` |
+| `ccxt` | `4.5.70` | Python | `MIT` |
 | `certifi` | `2026.6.17` | Python | `MPL-2.0` |
-| `cffi` | `2.1.1` | Python | `MIT-0` |
-| `charset-normalizer` | `3.4.9` | Python | `MIT` |
+| `cffi` | `2.0.0` | Python | `MIT` |
+| `charset-normalizer` | `3.4.7` | Python | `MIT` |
 | `ckzg` | `2.1.8` | Python | `Apache-2.0` |
 | `click` | `8.4.2` | Python | `BSD-3-Clause` |
+| `coincurve` | `21.0.0` | Python | `MIT OR Apache-2.0` |
 | `colorama` | `0.4.6` | Python | `BSD-3-Clause` |
 | `contourpy` | `1.3.3` | Python | `BSD-3-Clause` |
 | `coverage` | `7.15.2` | Python | `Apache-2.0` |
-| `cryptography` | `50.0.0` | Python | `Apache-2.0 OR BSD-3-Clause` |
+| `cryptography` | `49.0.0` | Python | `Apache-2.0 OR BSD-3-Clause` |
 | `curl-cffi` | `0.16.0` | Python | `MIT` |
 | `cycler` | `0.12.1` | Python | `BSD-3-Clause` |
 | `cytoolz` | `1.1.0` | Python | `BSD-3-Clause` |
@@ -55,6 +62,7 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `executing` | `2.2.1` | Python | `MIT` |
 | `fastapi` | `0.139.2` | Python | `MIT` |
 | `fonttools` | `4.63.0` | Python | `MIT` |
+| `frozenlist` | `1.8.0` | Python | `Apache-2.0` |
 | `greenlet` | `3.5.3` | Python | `MIT AND PSF-2.0` |
 | `h11` | `0.16.0` | Python | `MIT` |
 | `hexbytes` | `1.3.1` | Python | `MIT` |
@@ -75,11 +83,13 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `matplotlib` | `3.11.1` | Python | `PSF-2.0` |
 | `matplotlib-inline` | `0.2.2` | Python | `BSD-3-Clause` |
 | `msgpack` | `1.2.1` | Python | `Apache-2.0` |
+| `multidict` | `6.7.1` | Python | `NOASSERTION` |
 | `multitasking` | `0.0.13` | Python | `Apache-2.0` |
 | `mypy` | `1.20.2` | Python | `MIT` |
 | `mypy-extensions` | `1.1.0` | Python | `MIT` |
 | `narwhals` | `2.24.0` | Python | `MIT` |
 | `numpy` | `2.5.2` | Python | `BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0` |
+| `orjson` | `3.11.9` | Python | `MPL-2.0 AND (Apache-2.0 OR MIT)` |
 | `packaging` | `26.2` | Python | `Apache-2.0 OR BSD-2-Clause` |
 | `pandas` | `2.3.3` | Python | `BSD-3-Clause` |
 | `parsimonious` | `0.10.0` | Python | `MIT` |
@@ -92,6 +102,7 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `pluggy` | `1.6.0` | Python | `MIT` |
 | `prometheus-client` | `0.25.0` | Python | `Apache-2.0 AND BSD-2-Clause` |
 | `prompt-toolkit` | `3.0.53` | Python | `BSD-3-Clause` |
+| `propcache` | `0.5.2` | Python | `Apache-2.0` |
 | `protobuf` | `7.35.1` | Python | `BSD-3-Clause` |
 | `psutil` | `7.2.2` | Python | `BSD-3-Clause` |
 | `psycopg` | `3.3.4` | Python | `LGPL-3.0-only` |
@@ -120,6 +131,7 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `scikit-learn` | `1.9.0` | Python | `BSD-3-Clause` |
 | `scipy` | `1.18.0` | Python | `BSD-3-Clause` |
 | `seaborn` | `0.13.2` | Python | `BSD-3-Clause` |
+| `setuptools` | `83.0.0` | Python | `MIT` |
 | `six` | `1.17.0` | Python | `MIT` |
 | `soupsieve` | `2.9.2` | Python | `MIT` |
 | `sqlalchemy` | `2.0.51` | Python | `MIT` |
@@ -139,7 +151,10 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `wcwidth` | `0.8.2` | Python | `MIT` |
 | `websocket-client` | `1.9.0` | Python | `Apache-2.0` |
 | `websockets` | `16.1` | Python | `BSD-3-Clause` |
+| `winloop` | `0.6.3` | Python | `NOASSERTION` |
+| `yarl` | `1.24.2` | Python | `Apache-2.0` |
 | `yfinance` | `1.5.2` | Python | `Apache-2.0` |
+| `zlib-ng` | `1.0.0` | Python | `PSF-2.0` |
 
 ## Review status
 
