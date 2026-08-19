@@ -278,6 +278,7 @@ class FakeCcxtBinanceSymbolTradesExchange(FakeCcxtAccountWideExchange):
     def __init__(self) -> None:
         super().__init__()
         self.trade_symbols: list[str | None] = []
+        self.trade_since: list[int] = []
 
     async def fetch_my_trades(
         self,
@@ -286,6 +287,7 @@ class FakeCcxtBinanceSymbolTradesExchange(FakeCcxtAccountWideExchange):
         limit: int,
     ) -> list[Mapping[str, Any]]:
         self.trade_symbols.append(symbol)
+        self.trade_since.append(since)
         assert symbol is not None and since > 0 and limit == 1_000
         return [
             {
@@ -755,6 +757,7 @@ def test_binance_trade_history_queries_every_reconciled_symbol() -> None:
     snapshot = asyncio.run(adapter.snapshot(reason="INITIAL"))
 
     assert exchange.trade_symbols == ["BTC/USDT:USDT", "ETH/USDT:USDT"]
+    assert exchange.trade_since == [int((_NOW - timedelta(days=7)).timestamp() * 1_000)] * 2
     assert {row["native_symbol"] for row in snapshot.fills} == {"BTCUSDT", "ETHUSDT"}
     assert "fetchMyTrades" not in snapshot.unknown_fields
 

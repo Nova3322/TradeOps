@@ -988,7 +988,12 @@ class CcxtProFactAdapter:
                 "FACT_ADAPTER_SCOPE_EMPTY",
                 "the exact account has no live market subscription",
             )
-        since = int((now - self._history_window).timestamp() * 1_000)
+        history_window = self._history_window
+        if self.scope.venue == "BINANCE" and reason == "INITIAL":
+            # Backfill Binance's maximum supported window once at startup so a
+            # brief sync outage cannot leave otherwise valid fills unreconciled.
+            history_window = timedelta(days=7)
+        since = int((now - history_window).timestamp() * 1_000)
         balance_task = asyncio.create_task(self._rest("fetchBalance"))
         # Account facts deliberately use the account-wide unified calls.  Passing
         # the Freqtrade pair allowlist here would hide manual/non-Freqtrade
