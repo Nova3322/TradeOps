@@ -1064,6 +1064,13 @@ class FactIngestionExecutionService(ServiceComponent):
             session.flush()
 
             fill_count = 0
+            confirmed_fill_quantity_by_order: dict[str, Decimal] = {}
+            for external_fill in snapshot.fills:
+                if external_fill.order_id:
+                    confirmed_fill_quantity_by_order[external_fill.order_id] = (
+                        confirmed_fill_quantity_by_order.get(external_fill.order_id, Decimal(0))
+                        + external_fill.quantity
+                    )
             for external_fill in snapshot.fills:
                 current_fill = session.scalar(
                     select(models.VenueFill).where(
@@ -1151,6 +1158,23 @@ class FactIngestionExecutionService(ServiceComponent):
                         venue_order.filled_quantity = external_fill.quantity
                         venue_order.observed_at = external_fill.executed_at
                         venue_order.updated_at = now
+                if venue_order is not None and venue_order.order_intent_id is None:
+                    confirmed_quantity = confirmed_fill_quantity_by_order.get(
+                        external_fill.order_id, Decimal(0)
+                    )
+                    if confirmed_quantity > venue_order.ordered_quantity:
+                        _reject(
+                            f"{venue}_FACT_CONFLICT",
+                            "external order fills exceed the observed order quantity",
+                        )
+                    if confirmed_quantity > venue_order.filled_quantity:
+                        venue_order.filled_quantity = confirmed_quantity
+                    if confirmed_quantity == venue_order.ordered_quantity:
+                        venue_order.status = domain.VenueOrderStatus.FILLED.value
+                    venue_order.observed_at = max(
+                        venue_order.observed_at, external_fill.executed_at
+                    )
+                    venue_order.updated_at = now
                 intent = (
                     session.get(models.OrderIntent, venue_order.order_intent_id)
                     if venue_order is not None and venue_order.order_intent_id is not None
