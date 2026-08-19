@@ -27,5 +27,6 @@ test('production account cards expose the exact-account detail workflow', () => 
   assert.match(routerSource, /venueAccountMatch = path\.match\(\/\^\\\/venues\\\/\(\[\^\/\]\+\)\$\/\)/);
   assert.match(routerSource, /renderVenueAccountDetail\(venueAccountMatch\[1\]\)/);
   assert.match(indexSource, /execution\.js\?v=192/);
-  assert.match(serviceWorkerSource, /trading-shell-v222/);
+  assert.match(indexSource, /accounts\.js\?v=178/);
+  assert.match(serviceWorkerSource, /trading-shell-v223/);
 });
