@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from trading_control_plane.domain import DomainRejected
+from trading_control_plane.domain import DomainRejected, ReconciliationStatus
 from trading_control_plane.execution_dispatch import ExecuteIntent, ExecuteIntentResult
 from trading_control_plane.execution_runtime import (
     AUTOMATIC_EXECUTION_OWNER,
@@ -41,6 +41,30 @@ class _Service:
         del actor_id, now
         self.reconciled.append(execution_scope)
         return uuid4()
+
+
+class _SenderTakeoverService(_Service):
+    def __init__(self, status: str) -> None:
+        super().__init__()
+        self.status = status
+        self.acquire_attempts = 0
+
+    def acquire_sender(
+        self,
+        execution_scope: str,
+        owner_id: str,
+        actor_id: object,
+        now: datetime,
+    ) -> int:
+        del actor_id, now
+        self.acquire_attempts += 1
+        self.acquired.append((execution_scope, owner_id))
+        if self.acquire_attempts == 1 or self.status != "MATCH":
+            raise DomainRejected("RECONCILIATION_REQUIRED", "fresh MATCH required")
+        return 8
+
+    def reconciliation_status(self, _reconciliation_id: object) -> ReconciliationStatus:
+        return ReconciliationStatus(self.status)
 
 
 def test_worker_advances_approved_proposal_and_dispatches_ready_intent(
@@ -195,6 +219,102 @@ def test_worker_records_block_and_continues_without_blind_retry(
         "AUTHORIZATION_EXPIRED": 1,
         "FREQTRADE_LIVE_OUTCOME_UNKNOWN": 1,
     }
+
+
+def test_worker_reconciles_once_before_expired_sender_lease_takeover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = object.__new__(AutomaticExecutionWorker)
+    service = _SenderTakeoverService("MATCH")
+    intent = AutomaticIntent(
+        intent_id=uuid4(),
+        campaign_id=uuid4(),
+        actor_id=uuid4(),
+        execution_scope="LIVE:acct-1:BINANCE",
+    )
+    worker.settings = SimpleNamespace(
+        runtime_sync_service_username="runtime-sync",
+        runtime_sync_interval_seconds=60,
+        freqtrade_live_leverage=1,
+        execution_worker_enabled=True,
+        freqtrade_workers_enabled=True,
+    )
+    worker.service = service
+    worker.clock = lambda: datetime(2026, 8, 20, tzinfo=UTC)
+    worker.worker_factory = lambda _binding: object()
+    worker._safe_refresh_next_at = {}
+    worker._sender_reconciliation_next_at = {}
+    worker._refresh_safe_capital_fact = lambda **_kwargs: None  # type: ignore[method-assign]
+    worker._approved_proposal_ids = lambda *, now: ()  # type: ignore[method-assign]
+    worker._automatic_intents = lambda: (intent,)  # type: ignore[method-assign]
+    worker._reconciliation_intents = lambda: ()  # type: ignore[method-assign]
+    dispatches: list[ExecuteIntent] = []
+
+    def dispatch(request: ExecuteIntent, **_kwargs: object) -> ExecuteIntentResult:
+        dispatches.append(request)
+        return ExecuteIntentResult(
+            environment="LIVE",
+            worker_name="binance-live",
+            trade_id="trade-1",
+            replayed=False,
+            venue_order_fact_id=uuid4(),
+        )
+
+    monkeypatch.setattr("trading_control_plane.execution_runtime.execute_intent", dispatch)
+
+    report = worker.run_once()
+
+    assert report.blocked == {}
+    assert report.intents_selected == 1
+    assert report.intents_completed == 1
+    assert service.acquire_attempts == 2
+    assert service.reconciled == [intent.execution_scope]
+    assert len(dispatches) == 1
+    assert worker._sender_reconciliation_next_at == {}
+
+
+def test_worker_keeps_nonmatching_sender_takeover_query_only_on_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = object.__new__(AutomaticExecutionWorker)
+    service = _SenderTakeoverService("UNKNOWN")
+    intent = AutomaticIntent(
+        intent_id=uuid4(),
+        campaign_id=uuid4(),
+        actor_id=uuid4(),
+        execution_scope="LIVE:acct-1:BINANCE",
+    )
+    now = datetime(2026, 8, 20, tzinfo=UTC)
+    worker.settings = SimpleNamespace(
+        runtime_sync_service_username="runtime-sync",
+        runtime_sync_interval_seconds=60,
+        freqtrade_live_leverage=1,
+        execution_worker_enabled=True,
+        freqtrade_workers_enabled=True,
+    )
+    worker.service = service
+    worker.clock = lambda: now
+    worker.worker_factory = lambda _binding: object()
+    worker._safe_refresh_next_at = {}
+    worker._sender_reconciliation_next_at = {}
+    worker._refresh_safe_capital_fact = lambda **_kwargs: None  # type: ignore[method-assign]
+    worker._approved_proposal_ids = lambda *, now: ()  # type: ignore[method-assign]
+    worker._automatic_intents = lambda: (intent,)  # type: ignore[method-assign]
+    worker._reconciliation_intents = lambda: ()  # type: ignore[method-assign]
+    dispatches: list[object] = []
+    monkeypatch.setattr(
+        "trading_control_plane.execution_runtime.execute_intent",
+        lambda *_args, **_kwargs: dispatches.append(object()),
+    )
+
+    first = worker.run_once()
+    second = worker.run_once()
+
+    assert first.blocked == {"RECONCILIATION_REQUIRED": 1}
+    assert second.blocked == {"RECONCILIATION_REQUIRED": 1}
+    assert service.acquire_attempts == 2
+    assert service.reconciled == [intent.execution_scope]
+    assert dispatches == []
 
 
 def test_execution_worker_requires_both_process_switches() -> None:

@@ -90,6 +90,7 @@ class AutomaticExecutionWorker:
             timeout_seconds=settings.safe_spending_gateway_timeout_seconds
         )
         self._safe_refresh_next_at: dict[UUID, datetime] = {}
+        self._sender_reconciliation_next_at: dict[str, datetime] = {}
         self.clock = clock
 
     def _refresh_safe_capital_fact(
@@ -519,12 +520,7 @@ class AutomaticExecutionWorker:
         intents_completed = 0
         for intent in intents:
             try:
-                fencing_token = self.service.acquire_sender(
-                    intent.execution_scope,
-                    AUTOMATIC_EXECUTION_OWNER,
-                    intent.actor_id,
-                    self.clock(),
-                )
+                fencing_token = self._acquire_sender(intent)
                 execution_result: ExecuteIntentResult = execute_intent(
                     ExecuteIntent(
                         intent_id=intent.intent_id,
@@ -588,6 +584,46 @@ class AutomaticExecutionWorker:
                 "Freqtrade execution is explicitly disabled",
             )
 
+    def _acquire_sender(self, intent: AutomaticIntent) -> int:
+        now = self.clock()
+        try:
+            return self.service.acquire_sender(
+                intent.execution_scope,
+                AUTOMATIC_EXECUTION_OWNER,
+                intent.actor_id,
+                now,
+            )
+        except domain.DomainRejected as exc:
+            if exc.code != "RECONCILIATION_REQUIRED":
+                raise
+            next_at = self._sender_reconciliation_next_at.get(intent.execution_scope)
+            if next_at is not None and now < next_at:
+                raise
+            self._sender_reconciliation_next_at[intent.execution_scope] = now + timedelta(
+                seconds=max(60, self.settings.runtime_sync_interval_seconds)
+            )
+            reconciliation_id = self.service.reconcile_scope(
+                intent.execution_scope,
+                intent.actor_id,
+                now=now,
+            )
+            if (
+                self.service.reconciliation_status(reconciliation_id)
+                is not domain.ReconciliationStatus.MATCH
+            ):
+                raise domain.DomainRejected(
+                    "RECONCILIATION_REQUIRED",
+                    "automatic sender takeover requires a computed MATCH reconciliation",
+                ) from exc
+            fencing_token = self.service.acquire_sender(
+                intent.execution_scope,
+                AUTOMATIC_EXECUTION_OWNER,
+                intent.actor_id,
+                self.clock(),
+            )
+            self._sender_reconciliation_next_at.pop(intent.execution_scope, None)
+            return fencing_token
+
     def run_forever(self, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
             report = self.run_once()
@@ -603,6 +639,8 @@ class AutomaticExecutionWorker:
                     "intents_selected": report.intents_selected,
                     "intents_completed": report.intents_completed,
                     "reconciliations_completed": report.reconciliations_completed,
+                    "blocked_count": sum(report.blocked.values()),
+                    "blocked_codes": ",".join(sorted(report.blocked)) or "none",
                     "blocked": report.blocked,
                 },
             )
