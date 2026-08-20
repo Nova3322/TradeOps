@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
@@ -10,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from trading_control_plane import domain, models, rejections
 from trading_control_plane.database import Database
+from trading_control_plane.service_domains import risk_policy as risk_evaluation
 
 FACT_RETRY_REASONS = frozenset(
     {
@@ -124,50 +127,6 @@ def _latest_risk_retry_input_at(
     reasons = frozenset(decision.reasons)
     changed_at: list[datetime] = []
 
-    if reasons & FACT_RETRY_REASONS:
-        for value in (
-            session.scalar(
-                select(func.max(models.RuntimeSourceHealth.checked_at)).where(
-                    models.RuntimeSourceHealth.team_id == proposal.team_id,
-                    models.RuntimeSourceHealth.environment == proposal.environment,
-                    models.RuntimeSourceHealth.source_name == proposal.venue,
-                    models.RuntimeSourceHealth.account_id == proposal.account_id,
-                    models.RuntimeSourceHealth.venue == proposal.venue,
-                )
-            ),
-            session.scalar(
-                select(func.max(models.Position.updated_at)).where(
-                    models.Position.team_id == proposal.team_id,
-                    models.Position.environment == proposal.environment,
-                    models.Position.account_id == proposal.account_id,
-                    models.Position.venue == proposal.venue,
-                    models.Position.instrument_id == proposal.instrument_id,
-                )
-            ),
-            session.scalar(
-                select(func.max(models.AccountEquity.updated_at)).where(
-                    models.AccountEquity.team_id == proposal.team_id,
-                    models.AccountEquity.environment == proposal.environment,
-                )
-            ),
-            session.scalar(
-                select(func.max(models.ProtectionOrder.updated_at))
-                .join(
-                    models.Position,
-                    models.Position.position_id == models.ProtectionOrder.position_id,
-                )
-                .where(
-                    models.Position.team_id == proposal.team_id,
-                    models.Position.environment == proposal.environment,
-                    models.Position.account_id == proposal.account_id,
-                    models.Position.venue == proposal.venue,
-                    models.Position.instrument_id == proposal.instrument_id,
-                )
-            ),
-        ):
-            if value is not None:
-                changed_at.append(value)
-
     if reasons & POLICY_RETRY_REASONS:
         policy_updated_at = session.scalar(
             select(func.max(models.RiskPolicy.updated_at)).where(
@@ -213,6 +172,80 @@ def _latest_risk_retry_input_at(
                 changed_at.append(retry_at)
 
     return max(changed_at, default=None)
+
+
+def _decimal_risk_input(
+    decision: models.RiskDecision,
+    key: str,
+    fallback: Decimal,
+) -> Decimal:
+    try:
+        return Decimal(str(decision.input_data[key]))
+    except (KeyError, TypeError, ValueError):
+        return fallback
+
+
+def _fact_retry_marker(
+    session: Session,
+    *,
+    proposal: models.Proposal,
+    decision: models.RiskDecision,
+    now: datetime,
+) -> str | None:
+    """Return stable evidence only after the fact blocker is actually cleared.
+
+    Fact-adapter writes update healthy venue rows continuously. Those timestamps
+    must not retrigger risk while another required fact (for example managed
+    capital) remains stale or unknown.
+    """
+
+    reasons = frozenset(decision.reasons) & FACT_RETRY_REASONS
+    if not reasons:
+        return None
+    policy = risk_evaluation.active_risk_policy(session, proposal.team_id)
+    current_risk = risk_evaluation.occupied_risk(session, proposal.team_id)
+    inputs, facts, data_as_of, _ = risk_evaluation.server_risk_context(
+        session,
+        proposal=proposal,
+        policy=policy,
+        kind=domain.IntentKind.INITIAL,
+        requested_quantity=_decimal_risk_input(
+            decision,
+            "requested_quantity",
+            proposal.quantity,
+        ),
+        requested_risk=_decimal_risk_input(
+            decision,
+            "requested_risk",
+            proposal.max_risk,
+        ),
+        current_risk=current_risk,
+        now=now,
+    )
+    evidence: dict[str, object] = {}
+    if "READ_ONLY_SOURCE_UNAVAILABLE" in reasons:
+        if not inputs.source_current:
+            return None
+        evidence["read_only_source"] = facts["read_only_source"]
+    if "STALE_FACTS" in reasons:
+        if inputs.fact_age > timedelta(seconds=policy.max_fact_age_seconds):
+            return None
+        evidence["data_as_of"] = data_as_of.isoformat()
+    if "POSITION_UNKNOWN" in reasons:
+        if not inputs.position_known:
+            return None
+        evidence["position"] = facts["position"]
+    if "EQUITY_UNKNOWN" in reasons:
+        if not inputs.equity_known:
+            return None
+        evidence["equity"] = facts["equity"]
+        evidence["managed_capital"] = facts["managed_capital"]
+    if "PROTECTION_UNKNOWN" in reasons:
+        if not inputs.protection_known:
+            return None
+        evidence["protection"] = facts["protection"]
+    payload = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def refresh_approved_proposal_risk(
@@ -266,15 +299,35 @@ def refresh_approved_proposal_risk(
                 return False
             retry_marker = f"policy-{int(policy_updated_at.timestamp() * 1_000_000)}"
         else:
-            retry_input_at = _latest_risk_retry_input_at(
-                session,
-                proposal=proposal,
-                decision=decision,
-                now=now,
-            )
-            if retry_input_at is None or retry_input_at <= decision.created_at:
+            reasons = frozenset(decision.reasons)
+            retry_markers: list[str] = []
+            if reasons & FACT_RETRY_REASONS:
+                fact_marker = _fact_retry_marker(
+                    session,
+                    proposal=proposal,
+                    decision=decision,
+                    now=now,
+                )
+                if fact_marker is None:
+                    return False
+                retry_markers.append(f"facts-{fact_marker}")
+            if reasons & (POLICY_RETRY_REASONS | CAPACITY_RETRY_REASONS) or (
+                "LOSS_COOLDOWN_ACTIVE" in reasons
+            ):
+                retry_input_at = _latest_risk_retry_input_at(
+                    session,
+                    proposal=proposal,
+                    decision=decision,
+                    now=now,
+                )
+                if retry_input_at is None or retry_input_at <= decision.created_at:
+                    return False
+                retry_markers.append(
+                    f"changed-{int(retry_input_at.timestamp() * 1_000_000)}"
+                )
+            if not retry_markers:
                 return False
-            retry_marker = str(int(retry_input_at.timestamp() * 1_000_000))
+            retry_marker = ":".join(retry_markers)
         actor_id = actor.user_id
 
     service.decide_risk(

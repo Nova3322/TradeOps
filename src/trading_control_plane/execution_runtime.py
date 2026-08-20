@@ -7,12 +7,14 @@ import signal
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import func, select
 
 from trading_control_plane import domain, models
+from trading_control_plane import execution_scope as scope_rules
 from trading_control_plane.config import Settings, get_settings
 from trading_control_plane.database import Database
 from trading_control_plane.execution_dispatch import (
@@ -23,6 +25,7 @@ from trading_control_plane.execution_dispatch import (
 from trading_control_plane.freqtrade import FreqtradeWorkerClient, FreqtradeWorkerSpec
 from trading_control_plane.logging import configure_logging
 from trading_control_plane.runtime_contracts import PreparedFreqtradeWorkerBinding
+from trading_control_plane.safe_spending import SafeSpendingGateway
 from trading_control_plane.service import TradingService
 from trading_control_plane.service_domains.proposal_automation import (
     advance_approved_proposal,
@@ -45,6 +48,7 @@ class AutomaticIntent:
 class AutomaticExecutionReport:
     started_at: str
     completed_at: str
+    capital_facts_refreshed: int
     risk_decisions_refreshed: int
     proposals_advanced: int
     intents_selected: int
@@ -72,6 +76,7 @@ class AutomaticExecutionWorker:
         settings: Settings,
         database: Database,
         worker_factory: WorkerFactory | None = None,
+        safe_spending_gateway: SafeSpendingGateway | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.settings = settings
@@ -81,7 +86,160 @@ class AutomaticExecutionWorker:
             credential_encryption_key=settings.credential_encryption_key,
         )
         self.worker_factory = worker_factory or self._worker_client
+        self.safe_spending_gateway = safe_spending_gateway or SafeSpendingGateway(
+            timeout_seconds=settings.safe_spending_gateway_timeout_seconds
+        )
+        self._safe_refresh_next_at: dict[UUID, datetime] = {}
         self.clock = clock
+
+    def _refresh_safe_capital_fact(
+        self,
+        *,
+        proposal_id: UUID,
+        now: datetime,
+    ) -> UUID | None:
+        """Refresh a stale configured Safe fact before retrying approved risk."""
+
+        with self.database.session_factory() as session:
+            proposal = session.get(models.Proposal, proposal_id)
+            if (
+                proposal is None
+                or proposal.environment != domain.ExecutionEnvironment.LIVE.value
+            ):
+                return None
+            decision = session.scalar(
+                select(models.RiskDecision)
+                .where(models.RiskDecision.proposal_id == proposal_id)
+                .order_by(models.RiskDecision.created_at.desc())
+                .limit(1)
+            )
+            if (
+                decision is None
+                or decision.result != domain.RiskResult.DENY.value
+                or not frozenset(decision.reasons) & {"STALE_FACTS", "EQUITY_UNKNOWN"}
+            ):
+                return None
+            next_at = self._safe_refresh_next_at.get(proposal.team_id)
+            if next_at is not None and now < next_at:
+                return None
+            config = session.scalar(
+                select(models.DirectCapitalConfiguration).where(
+                    models.DirectCapitalConfiguration.team_id == proposal.team_id,
+                    models.DirectCapitalConfiguration.environment
+                    == domain.ExecutionEnvironment.LIVE.value,
+                    models.DirectCapitalConfiguration.active,
+                    models.DirectCapitalConfiguration.treasury_provider
+                    == "SAFE_SPENDING_LIMIT",
+                )
+            )
+            if (
+                config is None
+                or not self.settings.safe_spending_enabled
+                or self.settings.safe_spending_arbitrum_rpc_url is None
+                or config.safe_address is None
+                or config.safe_delegate_address is None
+            ):
+                return None
+            policy = session.scalar(
+                select(models.RiskPolicy).where(
+                    models.RiskPolicy.team_id == proposal.team_id,
+                    models.RiskPolicy.active,
+                )
+            )
+            if policy is None:
+                return None
+            fact = session.scalar(
+                select(models.AccountEquity).where(
+                    models.AccountEquity.team_id == proposal.team_id,
+                    models.AccountEquity.environment
+                    == domain.ExecutionEnvironment.LIVE.value,
+                    models.AccountEquity.account_id == config.safe_address,
+                    models.AccountEquity.venue == "VAULT",
+                    models.AccountEquity.currency == "USDC",
+                )
+            )
+            fact_time = None
+            if fact is not None:
+                fact_time = min(
+                    value
+                    for value in (fact.observed_at, fact.valuation_observed_at)
+                    if value is not None
+                )
+            fact_current = (
+                fact is not None
+                and fact.fact_status == domain.FactStatus.KNOWN.value
+                and fact.control_status == "CONTROLLED"
+                and fact_time is not None
+                and not scope_rules.fact_is_stale(
+                    fact_time,
+                    now,
+                    timedelta(seconds=policy.max_fact_age_seconds),
+                )
+            )
+            if fact_current:
+                return None
+            actor = session.scalar(
+                select(models.User)
+                .join(
+                    models.RoleAssignment,
+                    models.RoleAssignment.user_id == models.User.user_id,
+                )
+                .where(
+                    models.User.username == self.settings.runtime_sync_service_username,
+                    models.User.principal_type == domain.PrincipalType.SERVICE.value,
+                    models.User.active,
+                    models.RoleAssignment.team_id == proposal.team_id,
+                    models.RoleAssignment.role.in_(
+                        (
+                            domain.Role.TREASURY_ADMIN.value,
+                            domain.Role.SYSTEM_ADMIN.value,
+                        )
+                    ),
+                )
+            )
+            if actor is None:
+                raise domain.DomainRejected(
+                    "CAPITAL_FACT_ACTOR_UNAVAILABLE",
+                    "the configured capital fact service principal is unavailable",
+                )
+            team_id = proposal.team_id
+            actor_id = actor.user_id
+            safe_address = config.safe_address
+            safe_delegate = config.safe_delegate_address
+            rpc_url = self.settings.safe_spending_arbitrum_rpc_url
+        self._safe_refresh_next_at[team_id] = now + timedelta(
+            seconds=max(60, self.settings.runtime_sync_interval_seconds)
+        )
+        safe_fact = self.safe_spending_gateway.read_limit(
+            rpc_url=rpc_url,
+            safe=safe_address,
+            delegate=safe_delegate,
+        )
+        try:
+            scale = Decimal(10) ** 6
+            observed_at = datetime.fromtimestamp(
+                int(str(safe_fact["blockTimestamp"])),
+                UTC,
+            )
+            balance = Decimal(str(safe_fact["balance"])) / scale
+            available_limit = Decimal(str(safe_fact["available"])) / scale
+            module_enabled = bool(safe_fact["moduleEnabled"])
+        except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+            raise domain.DomainRejected(
+                "SAFE_RESPONSE_INVALID",
+                "Safe gateway returned invalid read-only fact data",
+            ) from exc
+        self.service.record_safe_spending_snapshot(
+            actor_id=actor_id,
+            safe_address=safe_address,
+            asset="USDC",
+            balance=balance,
+            available_limit=available_limit,
+            module_enabled=module_enabled,
+            observed_at=observed_at,
+            now=now,
+        )
+        return team_id
 
     def _worker_client(
         self,
@@ -325,10 +483,19 @@ class AutomaticExecutionWorker:
     def run_once(self) -> AutomaticExecutionReport:
         started_at = self.clock()
         blocked: dict[str, int] = {}
+        capital_facts_refreshed = 0
         risk_decisions_refreshed = 0
         proposals_advanced = 0
         for proposal_id in self._approved_proposal_ids(now=started_at):
             try:
+                if (
+                    self._refresh_safe_capital_fact(
+                        proposal_id=proposal_id,
+                        now=self.clock(),
+                    )
+                    is not None
+                ):
+                    capital_facts_refreshed += 1
                 if refresh_approved_proposal_risk(
                     self.service,
                     proposal_id=proposal_id,
@@ -400,6 +567,7 @@ class AutomaticExecutionWorker:
         return AutomaticExecutionReport(
             started_at=started_at.isoformat(),
             completed_at=completed_at.isoformat(),
+            capital_facts_refreshed=capital_facts_refreshed,
             risk_decisions_refreshed=risk_decisions_refreshed,
             proposals_advanced=proposals_advanced,
             intents_selected=len(intents),
@@ -429,6 +597,7 @@ class AutomaticExecutionWorker:
                     "event": "automatic_execution_cycle_completed",
                     "component": "execution-worker",
                     "result": "READY" if report.successful else "DEGRADED",
+                    "capital_facts_refreshed": report.capital_facts_refreshed,
                     "risk_decisions_refreshed": report.risk_decisions_refreshed,
                     "proposals_advanced": report.proposals_advanced,
                     "intents_selected": report.intents_selected,
