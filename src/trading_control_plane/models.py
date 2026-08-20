@@ -223,7 +223,7 @@ class ExchangeAccount(Base):
         CheckConstraint("version >= 1", name="ck_exchange_accounts_version"),
         CheckConstraint("credential_version >= 0", name="ck_exchange_accounts_credential_version"),
         CheckConstraint(
-            "freqtrade_worker_mode IN ('UNCONFIGURED','DRY_RUN','LIVE')",
+            "freqtrade_worker_mode IN ('UNCONFIGURED','DRY_RUN','TESTNET','LIVE')",
             name="ck_exchange_accounts_freqtrade_worker_mode",
         ),
         CheckConstraint(
@@ -240,7 +240,7 @@ class ExchangeAccount(Base):
             "AND freqtrade_worker_status = 'UNCONFIGURED' "
             "AND freqtrade_worker_name IS NULL AND freqtrade_worker_url IS NULL "
             "AND freqtrade_auth_ciphertext IS NULL AND freqtrade_auth_version = 0) OR "
-            "(freqtrade_worker_mode IN ('DRY_RUN','LIVE') "
+            "(freqtrade_worker_mode IN ('DRY_RUN','TESTNET','LIVE') "
             "AND freqtrade_worker_status <> 'UNCONFIGURED' "
             "AND freqtrade_worker_name IS NOT NULL AND freqtrade_worker_url IS NOT NULL "
             "AND freqtrade_auth_ciphertext IS NOT NULL AND freqtrade_auth_version >= 1 "

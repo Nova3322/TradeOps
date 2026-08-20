@@ -29,7 +29,7 @@ function accountCard(item) {
   const mode = fmtExecutionMode(item.environment);
   const disabled = !item.active;
   const permissions = item.permissions || {};
-  const unsupported = item.environment === 'TESTNET' && !['BINANCE','HYPERLIQUID'].includes(item.venue);
+  const unsupported = item.environment === 'TESTNET' && item.venue === 'OKX';
   return `<article class="card mode-exchange-account ${disabled ? 'is-muted' : ''}">
     <div class="card-heading"><div><p class="eyebrow">${escapeHtml(mode)} · ${escapeHtml(fmtVenueLabel(item.venue))}</p><h3>${escapeHtml(item.label)}</h3><p class="subtle">${escapeHtml(item.account_id)}</p></div><span class="status-pill status-${escapeHtml(item.connection.status)}">${escapeHtml(fmtStatus(item.connection.status))}</span></div>
     ${unsupported ? '<p class="callout is-warning">该交易所测试环境仅支持事实同步；执行保持不可用</p>' : ''}
@@ -54,7 +54,7 @@ async function renderAccountManagement() {
   const accountData = accountResponse.data;
   const accounts = (accountData.data || []).filter(item => item.environment === selectedEnvironment);
   const canManage = Boolean(accountData.can_manage);
-  const venueOptions = (accountData.supported_venues || []).map(venue => `<option value="${venue}">${escapeHtml(fmtVenueLabel(venue))}${selectedEnvironment === 'TESTNET' && !['BINANCE','HYPERLIQUID'].includes(venue) ? ' · 仅事实同步' : ''}</option>`).join('');
+  const venueOptions = (accountData.supported_venues || []).map(venue => `<option value="${venue}">${escapeHtml(fmtVenueLabel(venue))}${selectedEnvironment === 'TESTNET' && venue === 'OKX' ? ' · 仅事实同步' : ''}</option>`).join('');
   const createAccountLabel = selectedEnvironment === 'LIVE' ? '添加生产账户' : '添加测试账户';
   const createForm = canManage ? `<details class="card operation-toolbox"><summary><span><b>${createAccountLabel}</b><small>同时填写精确账户 ID 和账户名称</small></span><strong>展开</strong></summary><form id="exchange-account-create-form" class="toolbox-content"><div class="field-grid"><label>交易所<select name="venue">${venueOptions}</select></label><label>账户 ID（创建后不可修改）<input name="account_id" required maxlength="120" autocomplete="off" autocapitalize="off" spellcheck="false"></label><label>账户名称<input name="label" required maxlength="120" autocomplete="off"></label></div><p class="field-help">账户 ID 必须与服务端运行绑定一致；账户名称仅用于页面识别，可在创建后修改。</p><div class="field-grid" data-create-credentials></div><p class="safety-note">测试凭据只会加载到 TESTNET Adapter；生产凭据只会加载到 LIVE Adapter。</p><div class="form-error" role="alert"></div><button class="primary">添加账户</button></form></details>` : '';
   main.innerHTML = `<section class="page trading-mode-page mode-accounts-page"><header class="page-head"><div><p class="eyebrow">当前空间 · ${escapeHtml(activeSpaceName)}</p><h1>账户管理</h1><p class="lede">提前配置测试和生产账户；实际执行环境始终由服务端读取团队当前模式。</p></div><span class="status-pill ${mode.execution_mode === 'LIVE' ? 'status-ATTENTION' : 'status-APPROVED'}">当前模式：${fmtExecutionMode(mode.execution_mode)}</span></header>

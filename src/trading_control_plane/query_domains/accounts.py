@@ -432,8 +432,12 @@ class AccountQueries(QueryComponent):
             next_action = "enable the database-bound continuous read-only sync"
         elif item.freqtrade_worker_mode == "UNCONFIGURED":
             next_action = "bind one encrypted Freqtrade worker to this exact account"
-        elif item.freqtrade_worker_mode != "LIVE" or item.freqtrade_worker_status != "VERIFIED":
-            next_action = "verify an account-bound LIVE Freqtrade worker"
+        elif (
+            item.freqtrade_worker_mode
+            != ("LIVE" if item.environment == "LIVE" else "TESTNET")
+            or item.freqtrade_worker_status != "VERIFIED"
+        ):
+            next_action = "verify an account-bound Freqtrade worker for the exact environment"
         elif item.trading_status == "ELIGIBLE":
             next_action = "verify global, sender, risk, and task gates before LIVE execution"
         else:
@@ -517,6 +521,11 @@ class AccountQueries(QueryComponent):
                 },
                 "live_ready": (
                     item.freqtrade_worker_mode == "LIVE"
+                    and item.freqtrade_worker_status == "VERIFIED"
+                ),
+                "scope_ready": (
+                    item.freqtrade_worker_mode
+                    == ("LIVE" if item.environment == "LIVE" else "TESTNET")
                     and item.freqtrade_worker_status == "VERIFIED"
                 ),
                 "order_send": False,

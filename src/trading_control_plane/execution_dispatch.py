@@ -83,7 +83,9 @@ def unbound_worker_status(
     ]
 
 
-def _execution_mode(execution_scope: str) -> tuple[str, str, Literal["DRY_RUN", "LIVE"]]:
+def _execution_mode(
+    execution_scope: str,
+) -> tuple[str, str, Literal["TESTNET", "LIVE"]]:
     scope_parts = execution_scope.split(":")
     if len(scope_parts) != 3:
         raise DomainRejected(
@@ -96,7 +98,7 @@ def _execution_mode(execution_scope: str) -> tuple[str, str, Literal["DRY_RUN", 
             "EXECUTION_SCOPE_INVALID",
             "execution requires an explicit TESTNET or LIVE scope",
         )
-    return environment, venue, "LIVE" if environment == "LIVE" else "DRY_RUN"
+    return environment, venue, "LIVE" if environment == "LIVE" else "TESTNET"
 
 
 def execute_intent(

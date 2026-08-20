@@ -119,6 +119,26 @@ def test_live_freqtrade_workers_start_stopped_and_never_cancel_external_orders_o
         assert payload["telegram"]["enabled"] is False, path
 
 
+def test_bybit_external_testnet_worker_cannot_fall_back_to_mainnet_or_demo() -> None:
+    payload = json.loads((ROOT / "freqtrade" / "config-bybit-testnet.json").read_text())
+    assert payload["bot_name"] == "tradeops-bybit-testnet"
+    assert payload["dry_run"] is False
+    assert payload["initial_state"] == "stopped"
+    assert payload["force_entry_enable"] is False
+    assert payload["cancel_open_orders_on_exit"] is False
+    assert payload["exchange"]["name"] == "bybit"
+    assert payload["exchange"]["demo_trading"] is False
+    for key in ("ccxt_config", "ccxt_async_config"):
+        urls = payload["exchange"][key]["urls"]["api"]
+        assert set(urls) == {"spot", "futures", "v2", "public", "private"}
+        assert set(urls.values()) == {"https://api-testnet.bybit.com"}
+        assert not any(value == "https://api.bybit.com" for value in urls.values())
+    source = (ROOT / "compose.yaml").read_text()
+    assert "freqtrade-bybit-testnet:" in source
+    assert 'FREQTRADE__DRY_RUN: "false"' in source
+    assert "./freqtrade/config-bybit-testnet.json:/freqtrade/config.json:ro" in source
+
+
 def test_binance_live_freqtrade_worker_corrects_exchange_clock_skew() -> None:
     payload = json.loads(
         (ROOT / "freqtrade" / "config-binance-live-smoke.json").read_text()

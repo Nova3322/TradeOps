@@ -281,7 +281,7 @@ class FreqtradeWorkerClient:
     def probe(
         self,
         *,
-        expected_mode: Literal["DRY_RUN", "LIVE"] = "DRY_RUN",
+        expected_mode: Literal["DRY_RUN", "TESTNET", "LIVE"] = "DRY_RUN",
         required_pair: str | None = None,
     ) -> JsonObject:
         """Verify worker identity, mode and exact tradable scope without sending an order."""
@@ -323,9 +323,21 @@ class FreqtradeWorkerClient:
                 (
                     "FREQTRADE_LIVE_MODE_REQUIRED"
                     if expected_mode == "LIVE"
-                    else "FREQTRADE_LIVE_MODE_FORBIDDEN"
+                    else (
+                        "FREQTRADE_EXTERNAL_TESTNET_REQUIRED"
+                        if expected_mode == "TESTNET"
+                        else "FREQTRADE_LIVE_MODE_FORBIDDEN"
+                    )
                 ),
                 "Freqtrade worker mode does not match the requested execution boundary",
+            )
+        if expected_mode == "TESTNET" and (
+            config.get("demo_trading") is not False
+            or config.get("bot_name") != f"tradeops-{self.spec.venue.lower()}-testnet"
+        ):
+            raise DomainRejected(
+                "FREQTRADE_TESTNET_IDENTITY_MISMATCH",
+                "Freqtrade TESTNET worker identity is not the pinned exchange sandbox",
             )
         whitelist = whitelist_response.get("whitelist")
         if not isinstance(whitelist, list) or any(not isinstance(pair, str) for pair in whitelist):
@@ -378,7 +390,8 @@ class FreqtradeWorkerClient:
             "hip3_pair_count": len(hip3_pairs),
             "worker_command_available": True,
             "position_adjustment_enabled": True,
-            "external_order_send": expected_mode == "LIVE",
+            "external_order_send": expected_mode in {"TESTNET", "LIVE"},
+            "network": expected_mode,
         }
         if self.spec.exchange_account_id is not None:
             result["exchange_account_id"] = self.spec.exchange_account_id
@@ -521,7 +534,7 @@ class FreqtradeWorkerClient:
         self,
         command: FreqtradeEntryCommand,
         *,
-        expected_mode: Literal["DRY_RUN", "LIVE"] = "LIVE",
+        expected_mode: Literal["DRY_RUN", "TESTNET", "LIVE"] = "LIVE",
         trade_id: str | None = None,
         dispatch_started_at: datetime | None = None,
     ) -> FreqtradeTrade:

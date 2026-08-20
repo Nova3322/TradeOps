@@ -928,7 +928,11 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
         now=now,
     )
     first_probe = WorkerProbeFixture(exchange="binance", dry_run=False)
-    second_probe = WorkerProbeFixture(exchange="binance", dry_run=True)
+    second_probe = WorkerProbeFixture(
+        exchange="binance",
+        dry_run=False,
+        bot_name="tradeops-binance-testnet",
+    )
     workers = (
         FreqtradeWorkerClient(
             FreqtradeWorkerSpec(
@@ -1000,7 +1004,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
                     "http://127.0.0.1:18082",
                     "worker-b-user",
                     "worker-b-password",
-                    "DRY_RUN",
+                    "TESTNET",
                 ),
             )
             for index, (account, name, url, username, password, mode) in enumerate(
@@ -1051,6 +1055,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
             }
             assert by_account["binance-worker-a"]["execution_worker"]["live_ready"] is True
             assert by_account["binance-worker-b"]["execution_worker"]["live_ready"] is False
+            assert by_account["binance-worker-b"]["execution_worker"]["scope_ready"] is True
             assert "default_endpoint" not in by_account["binance-worker-a"]["execution_worker"]
             status = await client.get("/api/execution/freqtrade/status")
             assert status.status_code == 200
@@ -1105,7 +1110,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
             for item in stored
         } == {
             ("binance-worker-a", "VERIFIED", "LIVE"),
-            ("binance-worker-b", "VERIFIED", "DRY_RUN"),
+            ("binance-worker-b", "VERIFIED", "TESTNET"),
         }
 
 
@@ -1197,9 +1202,16 @@ class FakeExchangeConnectionVerifier:
 
 
 class WorkerProbeFixture:
-    def __init__(self, *, exchange: str, dry_run: bool) -> None:
+    def __init__(
+        self,
+        *,
+        exchange: str,
+        dry_run: bool,
+        bot_name: str = "tradeops-worker-fixture",
+    ) -> None:
         self.exchange = exchange
         self.dry_run = dry_run
+        self.bot_name = bot_name
         self.calls: list[str] = []
 
     def __call__(
@@ -1223,6 +1235,8 @@ class WorkerProbeFixture:
                 "exchange": self.exchange,
                 "trading_mode": "futures",
                 "dry_run": self.dry_run,
+                "demo_trading": False,
+                "bot_name": self.bot_name,
                 "force_entry_enable": True,
                 "position_adjustment_enable": True,
                 "state": "RUNNING",

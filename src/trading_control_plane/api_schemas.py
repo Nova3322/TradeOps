@@ -289,7 +289,7 @@ class ExchangeTradingEligibilityRequest(BaseModel):
 
 
 class FreqtradeWorkerConfigureRequest(BaseModel):
-    mode: Literal["UNCONFIGURED", "DRY_RUN", "LIVE"]
+    mode: Literal["UNCONFIGURED", "DRY_RUN", "TESTNET", "LIVE"]
     name: str | None = Field(
         default=None,
         min_length=1,
