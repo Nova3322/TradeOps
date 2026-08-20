@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -12,6 +13,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Protocol, cast
 from uuid import uuid4
 
+from trading_control_plane.binance_errors import (
+    BinanceApiRejected,
+    BinanceRequestState,
+    classify_binance_rate_limit,
+)
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.freqtrade_contracts import freqtrade_pair
 from trading_control_plane.runtime_contracts import ConnectionProbeResult
@@ -426,6 +432,7 @@ class CcxtProFactAdapter:
         *,
         credentials: Mapping[str, str],
         exchange_factory: ExchangeFactory = _default_exchange_factory,
+        binance_request_state: BinanceRequestState | None = None,
         history_window: timedelta = timedelta(hours=24),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -478,6 +485,7 @@ class CcxtProFactAdapter:
         self._exchange = exchange_factory(scope, normalized, options)
         self._history_window = history_window
         self._clock = clock
+        self._binance_request_state = binance_request_state
         self._snapshot_version = 0
         self._metrics = _MutableMetrics()
         self._markets_loaded = False
@@ -518,16 +526,109 @@ class CcxtProFactAdapter:
                 "the CCXT exchange does not match the exact account venue",
             )
 
-    def _record_external_failure(self, exc: Exception) -> None:
-        self._metrics.last_failure_at = _utc(self._clock()).isoformat()
+    @staticmethod
+    def _binance_error_payload(exc: Exception) -> tuple[int, int | None, str | None] | None:
+        """Extract only Binance's response code/message, never its signed request URL."""
+
+        raw = str(exc)
+        payload: Mapping[str, Any] = {}
+        body = re.search(r"(\{[^{}]*\})\s*$", raw)
+        if body is not None:
+            try:
+                decoded = json.loads(body.group(1))
+            except json.JSONDecodeError:
+                decoded = None
+            if isinstance(decoded, Mapping):
+                payload = decoded
         raw_status = getattr(exc, "status", getattr(exc, "status_code", None))
         status = _integer_status(raw_status)
+        code = _integer_status(payload.get("code"))
+        message_value = payload.get("msg")
+        message = (
+            str(message_value)[:500]
+            if isinstance(message_value, str) and message_value
+            else None
+        )
+        if status not in {418, 429}:
+            response_status = re.search(r"(?:^|\s)(418|429)(?=\s|\{)", raw)
+            status = None if response_status is None else int(response_status.group(1))
+        class_name = type(exc).__name__.replace("_", "").lower()
+        rate_limited = (
+            status in {418, 429}
+            or code == -1003
+            or "ratelimit" in class_name
+            or "ddosprotection" in class_name
+        )
+        if not rate_limited:
+            return None
+        if status not in {418, 429}:
+            status = (
+                418
+                if "banned" in (message or "").lower() or "ddosprotection" in class_name
+                else 429
+            )
+        return status, code, message
+
+    def _record_external_failure(self, exc: Exception) -> Exception:
+        failed_at = _utc(self._clock())
+        self._metrics.last_failure_at = failed_at.isoformat()
+        raw_status = getattr(exc, "status", getattr(exc, "status_code", None))
+        status = _integer_status(raw_status)
+        if self.scope.venue == "BINANCE" and self._binance_request_state is not None:
+            payload = self._binance_error_payload(exc)
+            if payload is not None:
+                status, error_code, error_message = payload
+                headers = getattr(self._exchange, "last_response_headers", {})
+                diagnostic = classify_binance_rate_limit(
+                    http_status=status,
+                    binance_error_code=error_code,
+                    binance_error_message=error_message,
+                    headers=(headers if isinstance(headers, Mapping) else {}),
+                    failed_at=failed_at,
+                )
+                self._binance_request_state.record_rate_limit(diagnostic)
+                self._metrics.next_retry_at = diagnostic.next_retry_at.isoformat()
+                if status == 418:
+                    self._metrics.rate_limit_418 += 1
+                else:
+                    self._metrics.rate_limit_429 += 1
+                return BinanceApiRejected(
+                    "BINANCE_RATE_LIMITED",
+                    "Binance read-only facts entered the deployment-wide cooldown",
+                    diagnostic,
+                )
         if status == 429:
             self._metrics.rate_limit_429 += 1
         elif status == 418:
             self._metrics.rate_limit_418 += 1
         elif "ratelimit" in type(exc).__name__.replace("_", "").lower():
             self._metrics.exchange_rate_limits += 1
+        return exc
+
+    def _ensure_binance_request_allowed(self) -> bool:
+        if self.scope.venue != "BINANCE" or self._binance_request_state is None:
+            return False
+        previous = self._binance_request_state.current_diagnostic()
+        diagnostic = self._binance_request_state.blocked_diagnostic(now=_utc(self._clock()))
+        if diagnostic is None:
+            return previous is not None
+        self._metrics.snapshot_suppressed += 1
+        self._metrics.cooldown_suppressions += 1
+        self._metrics.next_retry_at = diagnostic.next_retry_at.isoformat()
+        raise BinanceApiRejected(
+            "BINANCE_RATE_LIMITED_COOLDOWN",
+            "Binance read-only facts are deferred until the shared cooldown expires",
+            diagnostic,
+        )
+
+    def _record_binance_success(self) -> None:
+        if self.scope.venue != "BINANCE" or self._binance_request_state is None:
+            return
+        headers = getattr(self._exchange, "last_response_headers", {})
+        self._binance_request_state.record_success(
+            headers if isinstance(headers, Mapping) else {},
+            observed_at=_utc(self._clock()),
+        )
 
     @property
     def watch_channels(self) -> tuple[EventKind, ...]:
@@ -560,10 +661,21 @@ class CcxtProFactAdapter:
             )
         self._metrics.rest_requests[capability] = self._metrics.rest_requests.get(capability, 0) + 1
         try:
-            return await cast(Callable[..., Awaitable[Any]], method)(*args)
+            value = await cast(Callable[..., Awaitable[Any]], method)(*args)
         except Exception as exc:
-            self._record_external_failure(exc)
-            raise
+            recorded = self._record_external_failure(exc)
+            if recorded is exc:
+                raise
+            raise recorded from exc
+        if capability in {
+            "fetchBalance",
+            "fetchPositions",
+            "fetchOpenOrders",
+            "fetchMyTrades",
+            "fetchFundingHistory",
+        }:
+            self._record_binance_success()
+        return value
 
     async def _load_markets(self) -> Mapping[str, Any]:
         if self._markets_loaded:
@@ -582,8 +694,10 @@ class CcxtProFactAdapter:
         try:
             raw = await cast(Callable[[], Awaitable[Any]], method)()
         except Exception as exc:
-            self._record_external_failure(exc)
-            raise
+            recorded = self._record_external_failure(exc)
+            if recorded is exc:
+                raise
+            raise recorded from exc
         if not isinstance(raw, Mapping):
             raise DomainRejected(
                 "FACT_ADAPTER_RESPONSE_INVALID", "CCXT markets response is invalid"
@@ -600,6 +714,8 @@ class CcxtProFactAdapter:
             return None, capability
         try:
             return await self._rest(capability, *args), None
+        except BinanceApiRejected:
+            raise
         except Exception as exc:
             logger.warning(
                 "Optional exchange fact capability failed",
@@ -975,6 +1091,7 @@ class CcxtProFactAdapter:
     ) -> ExchangeFactSnapshot:
         if self._closed:
             raise DomainRejected("FACT_ADAPTER_CLOSED", "the fact adapter is closed")
+        binance_cooldown_probe = self._ensure_binance_request_allowed()
         self.validate_capabilities()
         now = _utc(self._clock() if observed_at is None else observed_at)
         markets = await self._load_markets()
@@ -994,7 +1111,14 @@ class CcxtProFactAdapter:
             # brief sync outage cannot leave otherwise valid fills unreconciled.
             history_window = timedelta(days=7)
         since = int((now - history_window).timestamp() * 1_000)
-        balance_task = asyncio.create_task(self._rest("fetchBalance"))
+        preflight_balance = (
+            await self._rest("fetchBalance") if binance_cooldown_probe else None
+        )
+        balance_task = (
+            None
+            if binance_cooldown_probe
+            else asyncio.create_task(self._rest("fetchBalance"))
+        )
         # Account facts deliberately use the account-wide unified calls.  Passing
         # the Freqtrade pair allowlist here would hide manual/non-Freqtrade
         # positions and orders from reconciliation.
@@ -1011,12 +1135,20 @@ class CcxtProFactAdapter:
                 self._optional_rest("fetchMyTrades", None, since, 1_000)
             )
         try:
-            balance, positions, orders = await asyncio.gather(
-                balance_task, positions_task, orders_task
-            )
+            if balance_task is None:
+                balance = preflight_balance
+                positions, orders = await asyncio.gather(positions_task, orders_task)
+            else:
+                balance, positions, orders = await asyncio.gather(
+                    balance_task, positions_task, orders_task
+                )
             optional = {name: await task for name, task in optional_tasks.items()}
         except Exception as exc:
-            required_tasks = (balance_task, positions_task, orders_task)
+            required_tasks = tuple(
+                task
+                for task in (balance_task, positions_task, orders_task)
+                if task is not None
+            )
             for task in (*required_tasks, *optional_tasks.values()):
                 task.cancel()
             await asyncio.gather(
@@ -1084,7 +1216,9 @@ class CcxtProFactAdapter:
                     list(tracked_symbols)
                 )
             except Exception as exc:
-                self._record_external_failure(exc)
+                recorded = self._record_external_failure(exc)
+                if isinstance(recorded, BinanceApiRejected):
+                    raise recorded from exc
                 logger.warning(
                     "Optional exchange ticker snapshot failed",
                     extra={
@@ -1180,7 +1314,16 @@ class CcxtProFactAdapter:
             args = (sorted(self._tracked_symbols),)
         else:
             args = ()
-        raw = await cast(Callable[..., Awaitable[Any]], method)(*args)
+        self._ensure_binance_request_allowed()
+        try:
+            raw = await cast(Callable[..., Awaitable[Any]], method)(*args)
+        except Exception as exc:
+            recorded = self._record_external_failure(exc)
+            if recorded is exc:
+                raise
+            raise recorded from exc
+        if kind != "MARK":
+            self._record_binance_success()
         observed_at = _utc(self._clock())
         markets = getattr(self._exchange, "markets", {})
         if not isinstance(markets, Mapping):
@@ -1226,9 +1369,11 @@ class FactAdapterConnectionProbe:
         *,
         bootstrap_symbols: Mapping[str, str],
         exchange_factory: ExchangeFactory = _default_exchange_factory,
+        binance_request_state: BinanceRequestState | None = None,
     ) -> None:
         self._bootstrap_symbols = dict(bootstrap_symbols)
         self._exchange_factory = exchange_factory
+        self._binance_request_state = binance_request_state
 
     async def _verify(
         self,
@@ -1263,6 +1408,7 @@ class FactAdapterConnectionProbe:
                 scope,
                 credentials=credentials,
                 exchange_factory=self._exchange_factory,
+                binance_request_state=self._binance_request_state,
             )
             adapter.validate_exchange_mapping()
             adapter.validate_capabilities()
@@ -1787,6 +1933,28 @@ class FactStreamSupervisor:
         fraction = int.from_bytes(digest[:8], "big") / ((1 << 64) - 1)
         return self.reconciliation_seconds * (0.8 + 0.2 * fraction)
 
+    @staticmethod
+    def _binance_cooldown(exc: BaseException) -> datetime | None:
+        current: BaseException | None = exc
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            if isinstance(current, BinanceApiRejected):
+                return current.diagnostic.next_retry_at
+            current = current.__cause__ or current.__context__
+        return None
+
+    @staticmethod
+    def _later_retry(current: str | None, candidate: datetime) -> str:
+        if current is not None:
+            try:
+                existing = datetime.fromisoformat(current).astimezone(UTC)
+            except ValueError:
+                existing = None
+            if existing is not None and existing > candidate:
+                return existing.isoformat()
+        return candidate.astimezone(UTC).isoformat()
+
     async def _persist_current(self) -> None:
         if self.snapshot_callback is None:
             return
@@ -1929,13 +2097,22 @@ class FactStreamSupervisor:
             await self.refresh("PERIODIC_RECONCILIATION")
         except Exception as exc:
             metrics = getattr(self.adapter, "_metrics", None)
+            binance_retry_at = self._binance_cooldown(exc)
             if isinstance(metrics, _MutableMetrics):
-                metrics.next_retry_at = (
-                    _utc() + timedelta(seconds=self.reconciliation_delay_seconds)
-                ).isoformat()
+                retry_at = _utc() + timedelta(seconds=self.reconciliation_delay_seconds)
+                if binance_retry_at is not None and binance_retry_at > retry_at:
+                    retry_at = binance_retry_at
+                metrics.next_retry_at = self._later_retry(
+                    metrics.next_retry_at,
+                    retry_at,
+                )
             await self.registry.mark_unknown(
                 self.adapter.scope.key,
-                field="FACT_ADAPTER_PERIODIC_RECONCILIATION_UNAVAILABLE",
+                field=(
+                    "FACT_ADAPTER_BINANCE_RATE_LIMITED_COOLDOWN"
+                    if binance_retry_at is not None
+                    else "FACT_ADAPTER_PERIODIC_RECONCILIATION_UNAVAILABLE"
+                ),
             )
             if self.snapshot_callback is not None:
                 await self._flush_callback()
@@ -1947,6 +2124,14 @@ class FactStreamSupervisor:
                     "venue": self.adapter.scope.venue,
                     "account_id": self.adapter.scope.account_id,
                     "error_type": type(exc).__name__,
+                    "error_code": (
+                        "FACT_ADAPTER_BINANCE_RATE_LIMITED_COOLDOWN"
+                        if binance_retry_at is not None
+                        else "FACT_ADAPTER_PERIODIC_RECONCILIATION_UNAVAILABLE"
+                    ),
+                    "retry_at": (
+                        None if binance_retry_at is None else binance_retry_at.isoformat()
+                    ),
                 },
             )
 
@@ -2115,6 +2300,18 @@ class FactStreamSupervisor:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                binance_retry_at = self._binance_cooldown(exc)
+                if binance_retry_at is not None:
+                    metrics = getattr(self.adapter, "_metrics", None)
+                    now = _utc()
+                    delay = max(1.0, (binance_retry_at - now).total_seconds())
+                    if isinstance(metrics, _MutableMetrics):
+                        metrics.next_retry_at = self._later_retry(
+                            metrics.next_retry_at,
+                            binance_retry_at,
+                        )
+                    await self.sleeper(delay)
+                    continue
                 self._reconnect_attempts += 1
                 metrics = getattr(self.adapter, "_metrics", None)
                 if isinstance(metrics, _MutableMetrics):
