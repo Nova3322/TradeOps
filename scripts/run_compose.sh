@@ -4,6 +4,7 @@ set -euo pipefail
 profiles=(--profile console)
 notification_delivery=false
 runtime_sync=false
+automatic_execution=false
 for option in "$@"; do
   case "$option" in
     --runtime)
@@ -22,8 +23,16 @@ for option in "$@"; do
       profiles+=(--profile notifications)
       notification_delivery=true
       ;;
+    --execution)
+      if [[ $automatic_execution == true ]]; then
+        echo "duplicate option: --execution" >&2
+        exit 2
+      fi
+      profiles+=(--profile execution)
+      automatic_execution=true
+      ;;
     *)
-      echo "usage: $0 [--runtime] [--notifications]" >&2
+      echo "usage: $0 [--runtime] [--notifications] [--execution]" >&2
       exit 2
       ;;
   esac
@@ -134,5 +143,10 @@ if [[ $runtime_sync == true ]]; then
   echo "Read-only runtime synchronization: enabled by explicit --runtime profile"
 else
   echo "Read-only runtime synchronization: disabled (add --runtime to enable the worker)"
+fi
+if [[ $automatic_execution == true ]]; then
+  echo "Approved-trade execution: enabled; database Gates and exact account bindings remain authoritative"
+else
+  echo "Approved-trade execution: disabled (add --execution to enable the worker)"
 fi
 exec docker compose --env-file "$env_file" "${profiles[@]}" up --build

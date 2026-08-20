@@ -71,10 +71,10 @@ async function renderHome() {
         workload.restoreTaskCount ? '<a class="text-link" href="/risk" data-link>查看风险恢复 →</a>' : '',
       ].filter(Boolean).join('');
       const reviewRows = [];
-      if (actionable.length) reviewRows.push(`<a class="home-priority attention" href="/reviews" data-link><span class="priority-number">1</span><div><small>独立审核</small><b>${actionable.length} 笔非本人提案等待判断</b><p>只包含未投票、未到期的当前提案；批准不会产生订单。</p></div><strong>打开审核队列</strong></a>`);
+      if (actionable.length) reviewRows.push(`<a class="home-priority attention" href="/reviews" data-link><span class="priority-number">1</span><div><small>独立审核</small><b>${actionable.length} 笔非本人提案等待判断</b><p>只包含未投票、未到期的当前提案；审核达标并通过实时风控后会自动执行。</p></div><strong>打开审核队列</strong></a>`);
       if (workload.restoreTaskCount) reviewRows.push(`<a class="home-priority attention" href="/risk" data-link><span class="priority-number">${reviewRows.length + 1}</span><div><small>风险恢复</small><b>1 项恢复申请等待独立处理</b><p>${escapeHtml(workload.restoreCopy)}；恢复不会沿用旧授权。</p></div><strong>查看恢复条件</strong></a>`);
       if (!reviewRows.length) reviewRows.push('<article class="home-priority clear"><span class="priority-number">—</span><div><small>当前无待办</small><b>审核队列已清空</b><p>自己的提案、已投票、已过期或已结束记录不会出现在待办中。</p></div><strong>无需操作</strong></article>');
-      main.innerHTML = `<section class="page home-page"><article class="home-status tone-${workload.needsAttention ? 'attention' : 'success'}"><div><p class="eyebrow">当前任务 · 审核员</p><h1>${escapeHtml(workload.headline)}</h1><p>只处理非本人提案与风险恢复申请；不能发起提案、查看资金或操作交易任务。</p></div>${actions ? `<div class="toolbar">${actions}</div>` : ''}</article><div class="stats home-stats"><div class="stat"><small>提案审核</small><b>${actionable.length}</b><span>${actionable.length ? '非本人 · 未投票 · 未到期' : '当前没有审核待办'}</span></div><div class="stat"><small>风险恢复</small><b>${escapeHtml(workload.restoreStatus)}</b><span>${escapeHtml(workload.restoreCopy)}</span></div><div class="stat"><small>工作范围</small><b class="status-copy">独立判断</b><span>生产与测试始终分开标记</span></div><div class="stat"><small>安全边界</small><b class="status-copy">只读执行</b><span>批准不下单 · 不能自审</span></div></div><section><div class="section-heading"><div><p class="eyebrow">处理顺序</p><h2>按到期与风险优先处理</h2></div><a class="secondary" href="/reviews" data-link>查看完整队列</a></div><div class="home-priority-list">${reviewRows.join('')}</div></section></section>`;
+      main.innerHTML = `<section class="page home-page"><article class="home-status tone-${workload.needsAttention ? 'attention' : 'success'}"><div><p class="eyebrow">当前任务 · 审核员</p><h1>${escapeHtml(workload.headline)}</h1><p>只处理非本人提案与风险恢复申请；不能发起提案、查看资金或手工操作交易任务。</p></div>${actions ? `<div class="toolbar">${actions}</div>` : ''}</article><div class="stats home-stats"><div class="stat"><small>提案审核</small><b>${actionable.length}</b><span>${actionable.length ? '非本人 · 未投票 · 未到期' : '当前没有审核待办'}</span></div><div class="stat"><small>风险恢复</small><b>${escapeHtml(workload.restoreStatus)}</b><span>${escapeHtml(workload.restoreCopy)}</span></div><div class="stat"><small>工作范围</small><b class="status-copy">独立判断</b><span>生产与测试始终分开标记</span></div><div class="stat"><small>安全边界</small><b class="status-copy">审核后自动执行</b><span>不能自审 · 实时风控失败即阻断</span></div></div><section><div class="section-heading"><div><p class="eyebrow">处理顺序</p><h2>按到期与风险优先处理</h2></div><a class="secondary" href="/reviews" data-link>查看完整队列</a></div><div class="home-priority-list">${reviewRows.join('')}</div></section></section>`;
       return;
     }
     if (hasCapability('proposal.create')) {
@@ -156,7 +156,7 @@ async function renderHome() {
             tone:'attention',
             eyebrow:'需要审核',
             title:`${actionableReviews.length} 笔提案等待独立审核`,
-            copy:`当前没有运行阻断。生产 ${liveReviewCount} 笔，测试 ${testnetReviewCount} 笔；打开队列逐项判断，批准不会直接产生订单。`,
+            copy:`当前没有运行阻断。生产 ${liveReviewCount} 笔，测试 ${testnetReviewCount} 笔；批准前核对冻结参数，审核达标并通过实时风控后系统会自动执行。`,
             href:'/reviews',
             action:'查看审核队列',
           }
@@ -165,7 +165,7 @@ async function renderHome() {
               tone:'attention',
               eyebrow:'交易待启动',
               title:`${approvedAwaitingLaunch.length} 笔已批准提案等待风险检查或启动`,
-              copy:'批准不会自动下单。风险管理需要按当前账户事实重新风控、签发短期授权，再创建交易任务。',
+              copy:'达到审核阈值后系统会按当前账户事实自动风控、签发短期授权、预留风险并创建交易任务。',
               href:'/reviews?view=current',
               action:'查看当前提案',
             }
@@ -194,7 +194,7 @@ async function renderHome() {
   if (exceptions.length) priorityCards.push(`<a class="home-priority danger" href="/campaigns/alerts" data-link><span class="priority-number">1</span><div><small>严重运行告警</small><b>${exceptions.length} 项运行问题</b><p>影响 ${exceptionCampaigns.size} 个交易任务；${canOperate ? '结果未知、保护不足和对账差异不会被自动忽略。' : '当前身份只能查看，处理与风险动作由风险管理人员负责。'}</p></div><strong>查看运行告警 →</strong></a>`);
   if (riskLimited) priorityCards.push(`<a class="home-priority attention" href="/risk" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>新增风险受限</small><b>${escapeHtml(riskControlStatusLabel(riskControl.policy.system_state))}</b><p>${riskControl.restore_conditions.blockers.length ? `${riskControl.restore_conditions.blockers.length} 项恢复条件尚未满足。` : '恢复条件已满足，仍需完成受控审核与执行。'} 减仓和退出不受阻断。</p></div><strong>查看恢复条件 →</strong></a>`);
   if (actionableReviews.length) priorityCards.push(`<a class="home-priority attention" href="/reviews" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>独立审核队列</small><b>${actionableReviews.length} 笔非本人提案等待审核</b><p>${expiringReviews.length ? `${expiringReviews.length} 笔将在 30 分钟内到期。` : `最早一笔到期于 ${fmtDate(nextReview.expires_at)}。`} 生产 ${liveReviewCount} 笔，测试 ${testnetReviewCount} 笔。</p></div><strong>打开审核队列 →</strong></a>`);
-  if (approvedAwaitingLaunch.length) priorityCards.push(`<a class="home-priority attention" href="/reviews?view=current" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>交易待启动</small><b>${approvedAwaitingLaunch.length} 笔已批准提案尚未形成交易任务</b><p>审批达标后系统自动运行实时风控；通过后再签发短期授权，缺少事实或安全开关未满足时仍会阻断。</p></div><strong>查看当前提案 →</strong></a>`);
+  if (approvedAwaitingLaunch.length) priorityCards.push(`<a class="home-priority attention" href="/reviews?view=current" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>自动流程处理中</small><b>${approvedAwaitingLaunch.length} 笔已批准提案尚未形成交易任务</b><p>系统会自动继续风控、授权、风险预留与任务创建；缺少事实或安全开关未满足时会安全阻断，不需要人工点击下一步。</p></div><strong>查看当前提案 →</strong></a>`);
   if (activeCampaigns.length) priorityCards.push(`<a class="home-priority" href="/campaigns" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>持续观察</small><b>${activeCampaigns.length} 个运行中交易任务</b><p>${escapeHtml(activeCampaigns.slice(0, 3).map(item => `${item.venue} · ${fmtDirection(item.direction)} · ${fmtStatus(item.status)}`).join('；'))}</p></div><strong>查看运行中任务 →</strong></a>`);
   if (!priorityCards.length) priorityCards.push(observerOnly
     ? '<article class="home-priority clear"><span class="priority-number">✓</span><div><small>当前无待办</small><b>继续观察，不必为了操作而操作</b><p>当前身份可以观察机会，但不能创建提案；如有判断请交由提案发起人保存参数。</p></div><strong>无需操作</strong></article>'

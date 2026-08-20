@@ -120,6 +120,9 @@ class Settings(BaseSettings):
     freqtrade_timeout_seconds: float = Field(default=5, ge=1, le=15)
     freqtrade_confirmation_timeout_seconds: float = Field(default=90, ge=10, le=120)
     freqtrade_live_leverage: Decimal = Field(default=Decimal(1), ge=1, le=20)
+    execution_worker_enabled: bool = False
+    execution_worker_interval_seconds: int = Field(default=5, ge=1, le=60)
+    execution_worker_batch_size: int = Field(default=20, ge=1, le=200)
     binance_recv_window_ms: int = Field(default=10_000, ge=1_000, le=60_000)
     binance_capital_base_url: str = "https://api.binance.com"
     binance_capital_api_key: str | None = Field(default=None, repr=False)
@@ -288,6 +291,8 @@ class Settings(BaseSettings):
                 "enabled Freqtrade workers require database credential encryption for "
                 "account-bound worker credentials"
             )
+        if self.execution_worker_enabled and not self.freqtrade_workers_enabled:
+            raise ValueError("automatic execution requires enabled Freqtrade workers")
         if self.hyperliquid_subaccount_address and not self.hyperliquid_account_address:
             raise ValueError("Hyperliquid subaccount requires the main account address")
         if self.notilt_enabled and not self.notilt_agent_address:

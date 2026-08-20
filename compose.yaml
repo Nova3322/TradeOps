@@ -19,7 +19,7 @@ services:
   migrate:
     build:
       context: .
-    profiles: ["console", "runtime", "notifications"]
+    profiles: ["console", "runtime", "notifications", "execution"]
     command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
     environment: &control-plane-environment
       TRADING_ENVIRONMENT: ${TRADING_ENVIRONMENT:-local}
@@ -32,6 +32,7 @@ services:
       TRADING_RUNTIME_SYNC_ENABLED: "false"
       TRADING_FACT_ADAPTER_ENABLED: "false"
       TRADING_NOTIFICATION_WORKER_ENABLED: "false"
+      TRADING_EXECUTION_WORKER_ENABLED: "false"
       TRADING_RUNTIME_BINANCE_SYMBOL: ${TRADING_RUNTIME_BINANCE_SYMBOL:-BTCUSDT}
       TRADING_RUNTIME_HYPERLIQUID_SYMBOL: ${TRADING_RUNTIME_HYPERLIQUID_SYMBOL:-BTC}
       TRADING_RUNTIME_OKX_SYMBOL: ${TRADING_RUNTIME_OKX_SYMBOL:-BTC-USDT-SWAP}
@@ -76,7 +77,7 @@ services:
   setup:
     build:
       context: .
-    profiles: ["console", "runtime", "notifications"]
+    profiles: ["console", "runtime", "notifications", "execution"]
     command: ["uv", "run", "--no-sync", "python", "scripts/setup_local.py"]
     environment:
       <<: *control-plane-environment
@@ -218,6 +219,39 @@ services:
         - trading-notification-worker
         - --healthcheck
       interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 20s
+
+  execution-worker:
+    build:
+      context: .
+    profiles: ["execution"]
+    command: ["uv", "run", "--no-sync", "trading-execution-worker"]
+    environment:
+      <<: *control-plane-environment
+      TRADING_EXECUTION_WORKER_ENABLED: "true"
+      TRADING_FREQTRADE_WORKERS_ENABLED: "true"
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - --no-sync
+        - trading-execution-worker
+        - --healthcheck
+      interval: 15s
       timeout: 10s
       retries: 3
       start_period: 5s

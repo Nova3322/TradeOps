@@ -54,6 +54,8 @@ def test_postgresql_psycopg_url_is_accepted() -> None:
     assert settings.fact_adapter_stale_after_seconds == 360
     assert settings.fact_adapter_reconciliation_seconds == 300
     assert settings.freqtrade_workers_enabled is False
+    assert settings.execution_worker_enabled is False
+    assert settings.execution_worker_interval_seconds == 5
     assert settings.notilt_enabled is False
     assert settings.notilt_vaults == {}
     assert "execution_backend" not in Settings.model_fields
@@ -213,6 +215,14 @@ def test_fact_and_freqtrade_runtimes_require_database_bound_credentials() -> Non
     )
     with pytest.raises(ValueError, match="database credential encryption"):
         missing_worker_key.validate_runtime_security()
+
+    execution_without_freqtrade = Settings(
+        database_url=database_url,
+        execution_worker_enabled=True,
+        _env_file=None,
+    )
+    with pytest.raises(ValueError, match="requires enabled Freqtrade"):
+        execution_without_freqtrade.validate_runtime_security()
 
 
 def test_notilt_uses_public_agent_and_three_fixed_mainnet_vault_slots() -> None:

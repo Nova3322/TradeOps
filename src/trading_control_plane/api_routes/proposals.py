@@ -33,6 +33,9 @@ from trading_control_plane.api_core import (
     timedelta,
 )
 from trading_control_plane.api_routes.context import ApiRouteContext
+from trading_control_plane.service_domains.proposal_automation import (
+    advance_approved_proposal,
+)
 
 
 class _ProposalsRoutes:
@@ -702,7 +705,8 @@ class _ProposalsRoutes:
                     object_version=payload.expected_version,
                     now=now,
                 )
-            result = self.service().review_proposal(
+            workflow_service = self.service()
+            result = workflow_service.review_proposal(
                 proposal_id,
                 identity.user_id,
                 ReviewDecision(payload.decision),
@@ -716,6 +720,22 @@ class _ProposalsRoutes:
                 ),
                 now=now,
             )
+            automation: dict[str, str | None] | None = None
+            if result is ProposalStatus.APPROVED:
+                try:
+                    automation = advance_approved_proposal(
+                        workflow_service,
+                        proposal_id=proposal_id,
+                        fallback_service_username=(
+                            self.resolved_settings.runtime_sync_service_username
+                        ),
+                        now=now,
+                    )
+                except DomainRejected as exc:
+                    automation = {
+                        "status": "BLOCKED",
+                        "error_code": exc.code,
+                    }
             detail = self.queries().proposal_detail(identity.user_id, proposal_id, now=now)
             if result is ProposalStatus.PENDING_REVIEW:
                 self.notify_reviewers(
@@ -726,6 +746,7 @@ class _ProposalsRoutes:
             return {
                 "proposal_id": str(proposal_id),
                 "status": result.value,
+                "automation": automation,
                 "detail": detail,
             }
 
