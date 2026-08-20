@@ -228,6 +228,19 @@ class FakeCcxtReconnectCompensationRetryExchange(FakeCcxtRestOnlyExchange):
         raise AssertionError("unreachable")
 
 
+class FakeCcxtPeriodicFailureExchange(FakeCcxtRestOnlyExchange):
+    def __init__(self) -> None:
+        super().__init__()
+        self.balance_calls = 0
+        self.fail_periodic = True
+
+    async def fetch_balance(self) -> Mapping[str, Any]:
+        self.balance_calls += 1
+        if self.fail_periodic and self.balance_calls == 2:
+            raise OSError("fixture periodic reconciliation failure")
+        return await super().fetch_balance()
+
+
 class FakeCcxtBlockingSnapshotExchange(FakeCcxtRestOnlyExchange):
     def __init__(self, *, fail: bool = False) -> None:
         super().__init__()
@@ -1085,6 +1098,65 @@ def test_failed_reconnect_compensation_preserves_exponential_backoff() -> None:
         supervisor.stop()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        await registry.close()
+
+    asyncio.run(scenario())
+
+
+def test_failed_periodic_reconciliation_keeps_stream_state_unknown_without_reconnect() -> None:
+    async def scenario() -> None:
+        exchange = FakeCcxtPeriodicFailureExchange()
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: exchange,
+            clock=lambda: datetime.now(UTC),
+        )
+        registry = FactAdapterRegistry()
+        await registry.register(adapter)
+        persisted: list[ExchangeFactSnapshot] = []
+
+        async def callback(snapshot: ExchangeFactSnapshot) -> None:
+            persisted.append(snapshot)
+
+        supervisor = FactStreamSupervisor(
+            registry,
+            adapter,
+            snapshot_callback=callback,
+            persistence_coalesce_seconds=0,
+        )
+        await supervisor.refresh("INITIAL")
+        await supervisor._run_periodic_reconciliation()
+
+        failed = await registry.latest(adapter.scope.key, stale_after=timedelta(days=1))
+        assert failed.data_status == "UNKNOWN"
+        assert failed.unknown_fields == (
+            "FACT_ADAPTER_PERIODIC_RECONCILIATION_UNAVAILABLE",
+        )
+        assert failed.metrics.snapshot_failed == 1
+        assert failed.metrics.websocket_reconnects == 0
+        assert failed.metrics.next_retry_at is not None
+        assert persisted[-1].data_status == "UNKNOWN"
+
+        await registry.publish(
+            adapter.scope.key,
+            "BALANCE",
+            {"balances": list(failed.balances)},
+        )
+        increment = await registry.latest(adapter.scope.key, stale_after=timedelta(days=1))
+        assert increment.reason == "WEBSOCKET_INCREMENT"
+        assert increment.data_status == "UNKNOWN"
+        assert increment.unknown_fields == failed.unknown_fields
+
+        exchange.fail_periodic = False
+        await supervisor._run_periodic_reconciliation()
+        recovered = await registry.latest(adapter.scope.key, stale_after=timedelta(days=1))
+        assert recovered.data_status == "CURRENT"
+        assert recovered.unknown_fields == ()
+        assert recovered.metrics.periodic_reconciliations == 1
+        assert recovered.metrics.snapshot_failed == 1
+        assert recovered.metrics.websocket_reconnects == 0
+        assert recovered.metrics.next_retry_at is None
         await registry.close()
 
     asyncio.run(scenario())
