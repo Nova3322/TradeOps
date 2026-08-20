@@ -9,9 +9,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from trading_control_plane import domain, models
 from trading_control_plane import execution_scope as scope_rules
@@ -91,6 +92,7 @@ class AutomaticExecutionWorker:
         )
         self._safe_refresh_next_at: dict[UUID, datetime] = {}
         self._sender_reconciliation_next_at: dict[str, datetime] = {}
+        self._worker_health_next_at: datetime | None = None
         self.clock = clock
 
     def _refresh_safe_capital_fact(
@@ -289,6 +291,7 @@ class AutomaticExecutionWorker:
         return tuple(ids)
 
     def _automatic_intents(self) -> tuple[AutomaticIntent, ...]:
+        now = self.clock()
         with self.database.session_factory() as session:
             live_gate = session.get(models.CapabilityGate, "LIVE_ORDER_SEND")
             live_enabled = (
@@ -325,6 +328,10 @@ class AutomaticExecutionWorker:
                     models.ExchangeAccount.active,
                     models.ExchangeAccount.deleted_at.is_(None),
                     models.ExchangeAccount.runtime_service_principal_id.is_not(None),
+                    or_(
+                        models.OrderIntent.execution_retry_at.is_(None),
+                        models.OrderIntent.execution_retry_at <= now,
+                    ),
                     (
                         (models.Campaign.environment != domain.ExecutionEnvironment.LIVE.value)
                         | live_enabled
@@ -345,6 +352,72 @@ class AutomaticExecutionWorker:
                 )
             )
         return tuple(results)
+
+    def _refresh_worker_health(self, *, now: datetime) -> dict[str, int]:
+        """Probe configured workers read-only and publish process/account heartbeats."""
+
+        if not hasattr(self.service, "runtime_freqtrade_worker_bindings"):
+            return {}
+        next_at = getattr(self, "_worker_health_next_at", None)
+        if next_at is not None and now < next_at:
+            return {}
+        interval = max(30, int(getattr(self.settings, "runtime_sync_interval_seconds", 60)))
+        self._worker_health_next_at = now + timedelta(seconds=interval)
+        blocked: dict[str, int] = {}
+        try:
+            bindings = self.service.runtime_freqtrade_worker_bindings(verified_only=False)
+        except domain.DomainRejected as exc:
+            return {exc.code: 1}
+        for binding in bindings:
+            if binding.service_principal_id is None:
+                blocked["FREQTRADE_RUNTIME_BINDING_INVALID"] = (
+                    blocked.get("FREQTRADE_RUNTIME_BINDING_INVALID", 0) + 1
+                )
+                continue
+            probe_result: dict[str, Any] | None = None
+            error_code: str | None = None
+            try:
+                probe_result = self.worker_factory(binding).probe(
+                    expected_mode=binding.worker_mode,  # type: ignore[arg-type]
+                )
+            except domain.DomainRejected as exc:
+                error_code = exc.code
+            try:
+                error_code = self.service.record_freqtrade_runtime_probe(
+                    binding,
+                    probe_result=probe_result,
+                    error_code=error_code,
+                    now=now,
+                )
+            except domain.DomainRejected as exc:
+                error_code = exc.code
+            status = "SUCCESS" if error_code is None else "FAILED"
+            try:
+                self.service.record_runtime_source_health(
+                    binding.service_principal_id,
+                    {
+                        "EXECUTION_WORKER": {
+                            "status": "SUCCESS",
+                            "items_observed": 1,
+                            "error_code": None,
+                        },
+                        "FREQTRADE_WORKER": {
+                            "status": status,
+                            "items_observed": 1 if error_code is None else 0,
+                            "error_code": error_code,
+                        },
+                    },
+                    scopes={
+                        "EXECUTION_WORKER": (binding.account_id, binding.venue),
+                        "FREQTRADE_WORKER": (binding.account_id, binding.venue),
+                    },
+                    now=now,
+                )
+            except domain.DomainRejected as exc:
+                error_code = error_code or exc.code
+            if error_code is not None:
+                blocked[error_code] = blocked.get(error_code, 0) + 1
+        return blocked
 
     def _reconciliation_intents(self) -> tuple[AutomaticIntent, ...]:
         with self.database.session_factory() as session:
@@ -483,7 +556,7 @@ class AutomaticExecutionWorker:
 
     def run_once(self) -> AutomaticExecutionReport:
         started_at = self.clock()
-        blocked: dict[str, int] = {}
+        blocked = self._refresh_worker_health(now=started_at)
         capital_facts_refreshed = 0
         risk_decisions_refreshed = 0
         proposals_advanced = 0
@@ -539,6 +612,38 @@ class AutomaticExecutionWorker:
                 )
             except domain.DomainRejected as exc:
                 blocked[exc.code] = blocked.get(exc.code, 0) + 1
+                try:
+                    if hasattr(self.service, "record_execution_blocker"):
+                        self.service.record_execution_blocker(
+                            intent.intent_id,
+                            actor_id=intent.actor_id,
+                            error_code=exc.code,
+                            now=self.clock(),
+                            retry_after_seconds=max(
+                                30,
+                                int(
+                                    getattr(
+                                        self.settings,
+                                        "runtime_sync_interval_seconds",
+                                        60,
+                                    )
+                                ),
+                            ),
+                        )
+                    if exc.code == "AUTHORIZATION_EXPIRED" and hasattr(
+                        self.service, "release_unfilled_intent"
+                    ):
+                        self.service.release_unfilled_intent(
+                            intent.intent_id,
+                            intent.actor_id,
+                            domain.OrderIntentStatus.CANCELLED,
+                            "authorization expired before any external send attempt",
+                            now=self.clock(),
+                        )
+                except domain.DomainRejected as persistence_error:
+                    blocked[persistence_error.code] = (
+                        blocked.get(persistence_error.code, 0) + 1
+                    )
                 continue
             if (
                 execution_result.venue_order_fact_id is not None

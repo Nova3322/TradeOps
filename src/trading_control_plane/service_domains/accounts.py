@@ -35,6 +35,53 @@ _reject = rejections.reject
 _scope_key = execution_scope.scope_key
 _scope_parts = execution_scope.scope_parts
 
+_EXECUTION_BLOCKER_GUIDANCE: dict[str, tuple[str, str]] = {
+    "FREQTRADE_LIVE_MODE_REQUIRED": (
+        "Worker 仍为模拟模式, 未满足生产下单条件。",
+        "将精确账户 Worker 切换到 LIVE, 重新探测并验证运行指纹。",
+    ),
+    "FREQTRADE_EXTERNAL_TESTNET_REQUIRED": (
+        "Worker 未连接精确交易所测试环境。",
+        "装配对应 TESTNET Worker, 重新探测并验证运行指纹。",
+    ),
+    "FREQTRADE_INSTRUMENT_NOT_ALLOWED": (
+        "交易对不在精确账户 Worker 的当前白名单。",
+        "核对 TradeOps Instrument Catalog 与 Worker 白名单后重新验证。",
+    ),
+    "FREQTRADE_FORCE_ENTRY_DISABLED": (
+        "Worker 未启用受控 Force Entry。",
+        "启用 Force Entry 并重新探测精确账户 Worker。",
+    ),
+    "FREQTRADE_POSITION_ADJUSTMENT_DISABLED": (
+        "Worker 未启用受控仓位调整。",
+        "启用 Position Adjustment 并重新探测精确账户 Worker。",
+    ),
+    "FREQTRADE_WORKER_NOT_RUNNING": (
+        "精确账户 Worker 当前未运行。",
+        "恢复该 Worker 后重新执行只读探测。",
+    ),
+    "FREQTRADE_RUNTIME_FINGERPRINT_CHANGED": (
+        "Worker 运行配置已变化, 旧 VERIFIED 绑定已失效。",
+        "确认新配置后重新探测并建立新的 VERIFIED 运行指纹。",
+    ),
+    "FREQTRADE_WORKER_NOT_VERIFIED": (
+        "精确账户 Worker 尚未通过当前运行配置验证。",
+        "对该账户运行无副作用 Worker 探测。",
+    ),
+    "FREQTRADE_WORKER_UNAVAILABLE": (
+        "精确账户 Worker 当前不可达。",
+        "恢复该 Worker 后等待自动有界重试。",
+    ),
+    "RECONCILIATION_REQUIRED": (
+        "最近一次计算型对账早于当前执行事实。",
+        "等待自动读取最新事实并完成 MATCH 对账。",
+    ),
+    "AUTHORIZATION_EXPIRED": (
+        "冻结交易授权已过期, 禁止继续发送。",
+        "取消旧 Intent、释放风险预留并创建新提案重新独立审核。",
+    ),
+}
+
 
 def ensure_exchange_account_reference(
     session: Session,
@@ -1135,6 +1182,8 @@ class AccountService(ServiceComponent):
                 account.freqtrade_auth_metadata = {}
                 account.freqtrade_auth_version = 0
                 account.freqtrade_hip3_dexes = []
+                account.freqtrade_runtime_fingerprint = None
+                account.freqtrade_runtime_metadata = {}
             else:
                 assert (
                     normalized_name is not None
@@ -1165,6 +1214,8 @@ class AccountService(ServiceComponent):
                 }
                 account.freqtrade_auth_version = next_auth_version
                 account.freqtrade_hip3_dexes = list(normalized_hip3)
+                account.freqtrade_runtime_fingerprint = None
+                account.freqtrade_runtime_metadata = {}
             account.freqtrade_error_code = None
             account.freqtrade_last_check_at = None
             account.freqtrade_last_verified_at = None
@@ -1318,6 +1369,7 @@ class AccountService(ServiceComponent):
             auth_version=account.freqtrade_auth_version,
             username=username,
             password=password,
+            runtime_fingerprint=account.freqtrade_runtime_fingerprint,
             hip3_dexes=tuple(account.freqtrade_hip3_dexes or []),
             ws_token=ws_token,
             service_principal_id=account.runtime_service_principal_id,
@@ -1331,6 +1383,7 @@ class AccountService(ServiceComponent):
         error_code: str | None,
         idempotency_key: str,
         now: datetime,
+        probe_result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_error = error_code
         if normalized_error is not None and (
@@ -1393,6 +1446,10 @@ class AccountService(ServiceComponent):
             account.freqtrade_error_code = normalized_error
             account.freqtrade_last_check_at = now
             if normalized_error is None:
+                if probe_result is not None:
+                    fingerprint, metadata = self._freqtrade_runtime_probe_values(probe_result)
+                    account.freqtrade_runtime_fingerprint = fingerprint
+                    account.freqtrade_runtime_metadata = metadata
                 account.freqtrade_last_verified_at = now
             account.version += 1
             account.updated_by = actor_id
@@ -1445,6 +1502,164 @@ class AccountService(ServiceComponent):
                 now=now,
             )
             return result
+
+    @staticmethod
+    def _freqtrade_runtime_probe_values(
+        probe_result: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        fingerprint = probe_result.get("runtime_fingerprint")
+        if (
+            not isinstance(fingerprint, str)
+            or len(fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in fingerprint)
+        ):
+            _reject(
+                "FREQTRADE_WORKER_RESPONSE_INVALID",
+                "Freqtrade runtime fingerprint is invalid",
+            )
+        whitelist = probe_result.get("whitelist")
+        if not isinstance(whitelist, list) or any(
+            not isinstance(pair, str) or not pair for pair in whitelist
+        ):
+            _reject(
+                "FREQTRADE_WORKER_RESPONSE_INVALID",
+                "Freqtrade runtime whitelist is invalid",
+            )
+        metadata = {
+            key: probe_result.get(key)
+            for key in (
+                "exchange",
+                "trading_mode",
+                "dry_run",
+                "demo_trading",
+                "worker_state",
+                "version",
+                "bot_name",
+                "force_entry_enabled",
+                "position_adjustment_enabled",
+                "external_order_send",
+                "network",
+            )
+        }
+        metadata["whitelist"] = sorted(whitelist)
+        metadata["active_pair_count"] = len(whitelist)
+        metadata["observed_fingerprint"] = fingerprint
+        return fingerprint, metadata
+
+    def record_freqtrade_runtime_probe(
+        self,
+        binding: PreparedFreqtradeWorkerBinding,
+        *,
+        probe_result: dict[str, Any] | None,
+        error_code: str | None,
+        now: datetime,
+    ) -> str | None:
+        """Persist a non-secret runtime heartbeat and invalidate changed bindings."""
+
+        normalized_error = error_code
+        if normalized_error is not None and (
+            CONNECTION_ERROR_CODE_PATTERN.fullmatch(normalized_error) is None
+        ):
+            normalized_error = "FREQTRADE_WORKER_PROBE_FAILED"
+        fingerprint: str | None = None
+        metadata: dict[str, Any] | None = None
+        if normalized_error is None:
+            if probe_result is None:
+                _reject(
+                    "FREQTRADE_WORKER_RESPONSE_INVALID",
+                    "Freqtrade runtime probe result is missing",
+                )
+            fingerprint, metadata = self._freqtrade_runtime_probe_values(probe_result)
+        with self.database.session_factory.begin() as session:
+            account = session.get(
+                models.ExchangeAccount,
+                binding.exchange_account_id,
+                with_for_update=True,
+            )
+            if (
+                account is None
+                or account.team_id != binding.team_id
+                or account.account_id != binding.account_id
+                or account.venue != binding.venue
+                or account.environment != binding.environment
+                or account.version != binding.account_version
+                or account.freqtrade_auth_version != binding.auth_version
+                or account.freqtrade_worker_name != binding.worker_name
+                or account.freqtrade_worker_url != binding.worker_url
+                or account.freqtrade_worker_mode != binding.worker_mode
+            ):
+                _reject(
+                    "FREQTRADE_WORKER_BINDING_CHANGED",
+                    "the exact account-bound Freqtrade worker changed during runtime probing",
+                )
+            result_error = normalized_error
+            if (
+                result_error is None
+                and account.freqtrade_runtime_fingerprint is not None
+                and account.freqtrade_runtime_fingerprint != fingerprint
+            ):
+                result_error = "FREQTRADE_RUNTIME_FINGERPRINT_CHANGED"
+            if (
+                result_error is None
+                and account.freqtrade_worker_status != "VERIFIED"
+            ):
+                result_error = (
+                    account.freqtrade_error_code or "FREQTRADE_WORKER_NOT_VERIFIED"
+                )
+            previous_status = account.freqtrade_worker_status
+            previous_error = account.freqtrade_error_code
+            previous_fingerprint = account.freqtrade_runtime_fingerprint
+            if metadata is not None:
+                account.freqtrade_runtime_metadata = metadata
+            if result_error is None:
+                account.freqtrade_worker_status = "VERIFIED"
+                account.freqtrade_error_code = None
+                if account.freqtrade_runtime_fingerprint is None:
+                    account.freqtrade_runtime_fingerprint = fingerprint
+                account.freqtrade_last_verified_at = now
+            else:
+                if result_error == "FREQTRADE_RUNTIME_FINGERPRINT_CHANGED":
+                    account.freqtrade_worker_status = "STALE"
+                account.freqtrade_error_code = result_error
+            account.freqtrade_last_check_at = now
+            changed = (
+                account.freqtrade_worker_status != previous_status
+                or account.freqtrade_error_code != previous_error
+                or (
+                    previous_fingerprint is not None
+                    and account.freqtrade_runtime_fingerprint != previous_fingerprint
+                )
+            )
+            if changed:
+                account.version += 1
+                account.updated_at = now
+                account.updated_by = binding.service_principal_id or account.updated_by
+                self.transactions.audit(
+                    session,
+                    actor_id=str(binding.service_principal_id or account.updated_by),
+                    event_type=(
+                        "FREQTRADE_RUNTIME_VERIFIED"
+                        if result_error is None
+                        else "FREQTRADE_RUNTIME_INVALIDATED"
+                    ),
+                    object_type="ExchangeAccount",
+                    object_id=account.exchange_account_id,
+                    reason=(
+                        f"venue={account.venue};mode={account.freqtrade_worker_mode.lower()};"
+                        f"status={account.freqtrade_worker_status.lower()};"
+                        f"error_code={result_error or 'none'};order_send=none"
+                    ),
+                    correlation_id=uuid4(),
+                    object_version=account.version,
+                    idempotency_key=(
+                        f"freqtrade-runtime-{account.version}-{result_error or 'verified'}"
+                    ),
+                    workspace_id=binding.workspace_id,
+                    team_id=account.team_id,
+                    account_id=account.account_id,
+                    now=now,
+                )
+            return result_error
 
     def freqtrade_worker_binding(
         self,
@@ -1558,6 +1773,79 @@ class AccountService(ServiceComponent):
                     "FREQTRADE_WORKER_BINDING_CHANGED",
                     "the exact account-bound Freqtrade worker changed before execution",
                 )
+
+    def record_execution_blocker(
+        self,
+        intent_id: UUID,
+        *,
+        actor_id: UUID,
+        error_code: str,
+        now: datetime,
+        retry_after_seconds: int = 60,
+    ) -> bool:
+        """Persist one pre-send blocker without treating it as an external attempt."""
+
+        normalized = error_code.strip().upper()
+        if CONNECTION_ERROR_CODE_PATTERN.fullmatch(normalized) is None:
+            normalized = "AUTOMATIC_EXECUTION_BLOCKED"
+        reason, next_action = _EXECUTION_BLOCKER_GUIDANCE.get(
+            normalized,
+            (
+                "自动执行的预发送检查未通过。",
+                "查看阻断码并修复对应账户、风险、对账或 Worker 条件。",
+            ),
+        )
+        with self.database.session_factory.begin() as session:
+            intent = session.get(models.OrderIntent, intent_id, with_for_update=True)
+            campaign = None if intent is None else session.get(models.Campaign, intent.campaign_id)
+            if intent is None or campaign is None:
+                _reject("ORDER_INTENT_NOT_FOUND", "execution blocker intent is unavailable")
+            team = self.transactions.require_role(
+                session,
+                actor_id,
+                "venue.record",
+                campaign.account_id,
+                campaign.venue,
+                team_id=campaign.team_id,
+            )
+            if (
+                intent.status != domain.OrderIntentStatus.READY.value
+                or intent.dispatch_backend is not None
+                or intent.dispatch_started_at is not None
+            ):
+                return False
+            changed = intent.execution_blocker_code != normalized
+            intent.execution_blocker_code = normalized
+            intent.execution_blocker_reason = reason
+            intent.execution_blocker_component = "execution-worker"
+            intent.execution_blocker_next_action = next_action
+            intent.execution_last_checked_at = now
+            intent.execution_retry_at = now + timedelta(
+                seconds=max(30, retry_after_seconds)
+            )
+            if changed or intent.execution_blocked_at is None:
+                intent.execution_blocked_at = now
+                intent.version += 1
+                intent.updated_at = now
+                campaign.updated_at = now
+                self.transactions.audit(
+                    session,
+                    actor_id=str(actor_id),
+                    event_type="AUTOMATIC_EXECUTION_PRE_SEND_BLOCKED",
+                    object_type="OrderIntent",
+                    object_id=intent.intent_id,
+                    reason=(
+                        f"code={normalized};component=execution-worker;external_send=none"
+                    ),
+                    correlation_id=intent.correlation_id,
+                    object_version=intent.version,
+                    idempotency_key=f"execution-blocker-{intent.version}-{normalized}",
+                    workspace_id=team.workspace_id,
+                    team_id=campaign.team_id,
+                    account_id=campaign.account_id,
+                    now=now,
+                )
+            return True
 
     def start_freqtrade_dispatch(
         self,
@@ -1782,6 +2070,13 @@ class AccountService(ServiceComponent):
                     "only a READY intent can begin a new Freqtrade dispatch",
                 )
             previous = intent.status
+            intent.execution_blocker_code = None
+            intent.execution_blocker_reason = None
+            intent.execution_blocker_component = None
+            intent.execution_blocker_next_action = None
+            intent.execution_blocked_at = None
+            intent.execution_last_checked_at = now
+            intent.execution_retry_at = None
             intent.status = domain.OrderIntentStatus.DISPATCHING.value
             intent.dispatch_backend = "FREQTRADE"
             intent.dispatch_account_version = binding.account_version
@@ -1946,22 +2241,25 @@ class AccountService(ServiceComponent):
 
     def runtime_freqtrade_worker_bindings(
         self,
+        *,
+        verified_only: bool = True,
     ) -> tuple[PreparedFreqtradeWorkerBinding, ...]:
-        """Return verified RPC bindings pinned to each exact runtime account."""
+        """Return configured RPC bindings pinned to each exact runtime account."""
 
         with self.database.session_factory() as session:
+            query = select(models.ExchangeAccount).where(
+                models.ExchangeAccount.runtime_sync_enabled,
+                models.ExchangeAccount.active.is_(True),
+                models.ExchangeAccount.deleted_at.is_(None),
+                models.ExchangeAccount.connection_status == "VERIFIED",
+                models.ExchangeAccount.freqtrade_worker_mode.in_(
+                    ("DRY_RUN", "TESTNET", "LIVE")
+                ),
+            )
+            if verified_only:
+                query = query.where(models.ExchangeAccount.freqtrade_worker_status == "VERIFIED")
             accounts = session.scalars(
-                select(models.ExchangeAccount)
-                .where(
-                    models.ExchangeAccount.runtime_sync_enabled,
-                    models.ExchangeAccount.active.is_(True),
-                    models.ExchangeAccount.deleted_at.is_(None),
-                    models.ExchangeAccount.connection_status == "VERIFIED",
-                    models.ExchangeAccount.freqtrade_worker_status == "VERIFIED",
-                    models.ExchangeAccount.freqtrade_worker_mode.in_(
-                        ("DRY_RUN", "TESTNET", "LIVE")
-                    ),
-                )
+                query
                 .order_by(
                     models.ExchangeAccount.team_id,
                     models.ExchangeAccount.venue,
@@ -1991,7 +2289,9 @@ class AccountService(ServiceComponent):
                 binding = self._prepared_freqtrade_worker_binding(
                     account,
                     team.workspace_id,
-                    expected_mode=account.freqtrade_worker_mode,
+                    expected_mode=(
+                        account.freqtrade_worker_mode if verified_only else None
+                    ),
                 )
                 if binding.ws_token is None:
                     _reject(

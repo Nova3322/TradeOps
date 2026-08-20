@@ -332,12 +332,24 @@ async function renderSystemStatus() {
       : 'Perptape 尚未配置；人工提案仍可使用。';
   const accountBoundWorkers = Array.isArray(freqtrade?.account_bindings) ? freqtrade.account_bindings : [];
   const configuredWorkers = accountBoundWorkers.filter(worker => worker.configured);
-  const verifiedWorkers = configuredWorkers.filter(worker => worker.status === 'VERIFIED');
+  const requiredPairsForWorker = worker => details
+    .filter(item => item.status !== 'CLOSED' && item.environment === worker.mode && item.account_id === worker.account_id && item.venue === worker.venue)
+    .filter(item => item.intents.some(intent => ['READY','DISPATCHING','SENT','PARTIALLY_FILLED','UNKNOWN'].includes(intent.status)))
+    .map(item => worker.venue === 'BINANCE' && item.instrument?.symbol?.endsWith('USDT') ? `${item.instrument.symbol.slice(0, -4)}/USDT:USDT` : null)
+    .filter(Boolean);
+  const verifiedWorkers = configuredWorkers.filter(worker => {
+    const requiredPairs = requiredPairsForWorker(worker);
+    return worker.status === 'VERIFIED'
+      && worker.runtime?.fingerprint_verified === true
+      && worker.runtime_health?.status === 'HEALTHY'
+      && requiredPairs.every(pair => (worker.runtime?.whitelist || []).includes(pair));
+  });
+  const executionWorkerHealthy = freqtrade?.execution_worker?.status === 'HEALTHY';
+  const liveOrderSendEnabled = freqtrade?.live_order_send === 'ENABLED';
   const workersReady = freqtrade?.backend === 'FREQTRADE'
-    && freqtrade?.workers_enabled === true
+    && executionWorkerHealthy
     && configuredWorkers.length > 0
     && verifiedWorkers.length === configuredWorkers.length;
-  const workersDisabled = freqtrade?.workers_enabled === false;
   const configuredVenueCounts = configuredWorkers.reduce((counts, worker) => {
     counts[worker.venue] = Number(counts[worker.venue] || 0) + 1;
     return counts;
@@ -346,16 +358,20 @@ async function renderSystemStatus() {
     .map(([venue, count]) => `${fmtVenueLabel(venue)} ${count}`)
     .join('、');
   const executionCopy = workersReady
-    ? `${verifiedWorkers.length} 个精确账户 Worker 已通过最近一次验证${configuredVenueSummary ? `：${configuredVenueSummary}` : ''}。`
-    : workersDisabled
-      ? configuredWorkers.length
-        ? `已保存 ${configuredWorkers.length} 个精确账户 Worker 绑定${configuredVenueSummary ? `（${configuredVenueSummary}）` : ''}；当前进程安全开关关闭，不会连接 Worker 或发送订单。`
-        : '当前没有已配置的精确账户 Freqtrade Worker；执行进程安全开关保持关闭。'
+    ? `${verifiedWorkers.length} 个精确账户 Worker 的运行指纹、模式和最近探针均已验证${configuredVenueSummary ? `：${configuredVenueSummary}` : ''}。`
     : freqtrade?.error
       ? friendlyApiError(freqtrade.error)
       : configuredWorkers.length
-        ? `${verifiedWorkers.length} / ${configuredWorkers.length} 个精确账户 Worker 已验证；未验证绑定禁止执行。`
+        ? `${verifiedWorkers.length} / ${configuredWorkers.length} 个精确账户 Worker 同时满足当前指纹、模式和运行探针；其余绑定禁止执行。`
         : '当前没有可由执行进程加载的精确账户 Freqtrade Worker。';
+  const workerScopeRows = configuredWorkers.map(worker => {
+    const runtimeState = worker.runtime || {};
+    const requiredPairs = requiredPairsForWorker(worker);
+    const missingPairs = requiredPairs.filter(pair => !(runtimeState.whitelist || []).includes(pair));
+    const conditionReady = worker.status === 'VERIFIED' && runtimeState.fingerprint_verified === true && worker.runtime_health?.status === 'HEALTHY' && !missingPairs.length;
+    return `<tr><td data-label="账户 / Venue"><b>${escapeHtml(worker.account_id)} · ${escapeHtml(fmtVenueLabel(worker.venue))}</b><br><span class="subtle">${escapeHtml(worker.name || '未命名 Worker')}</span></td><td data-label="运行条件"><span class="status-pill ${conditionReady ? 'status-APPROVED' : 'status-DENY'}">${conditionReady ? '当前条件通过' : '当前条件阻断'}</span><br><span class="subtle">${escapeHtml(worker.mode)} · ${runtimeState.dry_run === false ? 'LIVE' : '非 LIVE'} · ${escapeHtml(runtimeState.worker_state || 'UNKNOWN')} · 指纹${runtimeState.fingerprint_verified ? '已验证' : '未验证'}</span></td><td data-label="受控能力">Force Entry ${runtimeState.force_entry_enabled ? '已启用' : '未启用'}<br>Position Adjustment ${runtimeState.position_adjustment_enabled ? '已启用' : '未启用'}</td><td data-label="白名单 / 当前任务">${escapeHtml((runtimeState.whitelist || []).join('、') || '尚无已验证白名单')}${requiredPairs.length ? `<br><span class="subtle">当前任务：${escapeHtml(requiredPairs.join('、'))}${missingPairs.length ? `；缺少 ${escapeHtml(missingPairs.join('、'))}` : '；全部允许'}</span>` : '<br><span class="subtle">当前没有待执行任务交易对</span>'}</td><td data-label="最近探针">${fmtDate(worker.runtime_health?.checked_at)}${worker.runtime_health?.error_code ? `<br><code>${escapeHtml(worker.runtime_health.error_code)}</code>` : ''}</td></tr>`;
+  }).join('');
+  const workerScopePanel = configuredWorkers.length ? `<section><div class="section-heading"><div><p class="eyebrow">精确执行范围</p><h2>账户 Worker 的真实 LIVE 条件</h2></div><span class="status-pill">${verifiedWorkers.length} / ${configuredWorkers.length} 通过</span></div><div class="table-wrap"><table><thead><tr><th>账户 / Venue</th><th>运行条件</th><th>受控能力</th><th>白名单 / 当前任务</th><th>最近探针</th></tr></thead><tbody>${workerScopeRows}</tbody></table></div></section>` : '';
   const tradingConnectionsReady = Boolean(connections.BINANCE?.available && connections.HYPERLIQUID?.available);
   const activeMonitoring = campaigns.length > 0;
   const overallTone = !health.ready || !controlAvailable ? 'danger' : exceptions.length || !entryOpen || !perptapeAvailable || !workersReady || !tradingConnectionsReady || !telegramHealthy ? 'attention' : activeMonitoring ? 'success' : 'neutral';
@@ -370,7 +386,9 @@ async function renderSystemStatus() {
   const cards = [
     systemHealthCard({title:'核心服务', status:health.ready ? '服务可用' : '服务不可用', tone:health.ready ? 'success' : 'danger', copy:health.ready ? '业务数据库和交易服务运行正常。' : '核心服务检查失败；不能把缺失响应当成正常。', meta:'数据缺失时自动阻止交易'}),
     systemHealthCard({title:'开仓与加仓', status:entryStatus, tone:entryOpen ? (addOpen ? 'success' : 'attention') : 'danger', copy:entryCopy, meta:restoreConditions.ready ? '每笔新增风险仍会重新检查账户、交易所与授权' : `${restoreConditions.blockers?.length || blockedRiskChecks.length} 项实时条件待处理；查看风险控制了解精确原因`}),
-    systemHealthCard({title:'交易执行底座', status:workersReady ? '精确账户 Worker 已验证' : workersDisabled ? 'Freqtrade 执行进程未启动' : 'Freqtrade 执行进程检查未通过', tone:workersReady || workersDisabled ? 'attention' : 'danger', copy:executionCopy, meta:workersReady ? (freqtrade.live_order_send ? '真实订单发送已启用；账户资格、风险、授权与发送者租约仍会逐项复核' : '精确账户验证已通过；LIVE_ORDER_SEND 保持关闭') : workersDisabled ? `${configuredWorkers.length ? '数据库绑定已保留；' : ''}FREQTRADE_WORKERS_ENABLED 与 LIVE_ORDER_SEND 保持关闭` : '身份、模式或精确账户绑定不一致时禁止发送'}),
+    systemHealthCard({title:'自动执行进程', status:executionWorkerHealthy ? 'Execution Worker 健康' : 'Execution Worker 心跳异常', tone:executionWorkerHealthy ? 'success' : 'danger', copy:executionWorkerHealthy ? `最近心跳覆盖 ${Number(freqtrade?.execution_worker?.healthy_binding_count || 0)} 个精确账户绑定。` : '数据库中没有新鲜的 Execution Worker 账户心跳；不会把 API 进程环境变量当成独立进程状态。', meta:'来源：数据库运行心跳'}),
+    systemHealthCard({title:'Freqtrade Worker', status:workersReady ? '精确账户运行条件已验证' : '精确账户运行条件未通过', tone:workersReady ? 'success' : 'danger', copy:executionCopy, meta:'身份、LIVE/TESTNET 模式、白名单、Force Entry、仓位调整和运行指纹逐项核验'}),
+    systemHealthCard({title:'生产订单 Gate', status:liveOrderSendEnabled ? 'LIVE_ORDER_SEND 已启用' : `LIVE_ORDER_SEND ${fmtStatus(freqtrade?.live_order_send || 'UNKNOWN')}`, tone:liveOrderSendEnabled ? 'attention' : 'danger', copy:liveOrderSendEnabled ? '数据库 Gate 允许已审核 Intent 进入逐笔执行检查；它不会绕过 RBAC、独立审核、风控、对账、租约或 Worker 探针。' : '数据库 Gate 当前不允许发送生产订单。', meta:`来源：${freqtrade?.gate_source === 'DATABASE' ? '数据库' : '未知'} · 更新 ${fmtDate(freqtrade?.live_order_send_updated_at)}`}),
     systemHealthCard({title:'Telegram 审核通知', status:telegramStatus, tone:telegramHealthy ? 'success' : 'attention', copy:telegramHealthy ? 'Telegram 私聊机器人最近一次长轮询成功；批准和拒绝仍需二次确认并写入统一审计。' : telegramFailureCopy, meta:telegramHealthy ? `最近成功 ${fmtDate(telegramPolling.last_success_at)}` : '网页端审核队列保持可用；资金、订单、风险开关与权限操作不对 Telegram 机器人开放'}),
     systemHealthCard({title:'Perptape 机会源', status:perptapeStatus, tone:perptapeTone, copy:perptapeCopy, meta:`只读 · 最近数据 ${fmtDate(perptape.last_fetched_at)}${perptapeTransportIssue ? ` · ${perptapeTransportIssue}` : ''}`}),
   ].join('');
@@ -437,8 +455,8 @@ async function renderSystemStatus() {
     ? '只读控制台可用，但 Freqtrade 执行底座尚未就绪'
     : 'Freqtrade 执行底座已就绪，但交易所只读连接受限';
   const executionVerdictCopy = !workersReady
-    ? `${workersDisabled ? 'Freqtrade 执行进程尚未启动' : 'Freqtrade 执行进程尚未通过检查'}；${!tradingConnectionsReady ? '至少一个交易所只读连接也受限' : '交易所只读连接正常'}。系统不会把页面可访问误报为可执行交易。`
-    : '两个 Freqtrade 执行进程已通过仿真模式检查；至少一个交易所只读账户连接当前受限。真实下单继续关闭，系统不会把执行底座可用误报为生产交易就绪。';
+    ? `${executionWorkerHealthy ? 'Execution Worker 心跳正常，但至少一个精确账户 Worker 条件未通过' : 'Execution Worker 尚无新鲜数据库心跳'}；${!tradingConnectionsReady ? '至少一个交易所只读连接也受限' : '交易所只读连接正常'}。系统不会把页面可访问误报为可执行交易。`
+    : `Execution Worker、精确账户运行指纹和当前任务交易对白名单均已通过；LIVE_ORDER_SEND 数据库 Gate ${liveOrderSendEnabled ? '已启用' : '未启用'}，每笔订单仍需逐项通过审核、风控、对账和租约。`;
   const riskVerdictTitle = policy.system_state === 'NORMAL'
     ? blockedRiskScopeLabels.length
       ? `核心服务可用，但 ${blockedRiskScopeLabels.join('、')} 的实时开仓条件受阻`
@@ -466,6 +484,7 @@ async function renderSystemStatus() {
   main.innerHTML = `<section class="page system-status-page"><header class="page-head"><div><p class="eyebrow">交易系统状态</p><h1>系统状态</h1><p class="lede">这里直接说明系统能否工作、哪些能力受限，以及是否需要处理。绿色表示当前证据正常；黄色表示能力受限；红色表示必须先处理；灰色表示当前没有监控对象。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新状态</button></div></header>
     <article class="home-status tone-${overallTone}"><div><p class="eyebrow">当前结论</p><h2>${escapeHtml(verdictTitle)}</h2><p>${escapeHtml(verdictCopy)}</p></div>${verdictAction}</article>
     <div class="system-health-grid">${cards}</div>
+    ${workerScopePanel}
     ${monitoringDisclosure}
     <section><div class="section-heading"><div><p class="eyebrow">外部数据连接</p><h2>生产数据与资金连接</h2></div><span class="status-pill">${availableSources} / ${connectionSourceCount} 可用</span></div><div class="table-scroll-hint connection-scroll-hint" data-table-hint>左右滑动查看完整连接状态</div><div class="table-wrap connection-status-table"><table><thead><tr><th>数据源</th><th>读取状态与处理建议</th><th>运行范围</th><th>可用能力</th><th></th></tr></thead><tbody>${connectionRows}</tbody></table></div></section>
     ${codes.size ? `<section><div class="section-heading"><div><p class="eyebrow">交易任务运行告警</p><h2>需要处理的问题类型</h2></div><a class="secondary" href="/campaigns/alerts" data-link>查看运行告警</a></div><div class="exception-code-list">${[...codes].sort().map(code => `<span>${escapeHtml(explainException(code).title)}</span>`).join('')}</div></section>` : ''}
@@ -609,8 +628,13 @@ function campaignNextStep(item, active, truth) {
   if (item.status === 'CLOSED') return {key:'done', tone:'success', title:'交易任务已完成并关闭', copy:'风险预留已释放，成交与对账记录保留在当前交易任务中。', action:'<a class="secondary" href="/campaigns" data-link>返回交易任务</a>'};
   if (active?.status === 'DISPATCHING') return {key:'dispatch', tone:'attention', title:'已持久派发，等待原结果确认', copy:'系统已冻结 Worker、账户版本和发送者范围；现在只查询同一派发，不会再次触发订单写入。', action:'<a class="secondary" href="/campaigns/alerts" data-link>查看派发告警</a><p class="microcopy">不要创建第二个意图；查询超时会转为结果未知并继续占用风险。</p>'};
   if (active?.status === 'UNKNOWN') return {key:'reconcile', tone:'danger', title:'结果不确定，先对账', copy:'风险继续占用，禁止重发、加仓或释放；先核对交易所订单、成交、仓位和保护。', action:canOperate ? '<button class="danger" data-reconcile>立即运行对账</button>' : '<p class="microcopy">等待风险管理人员运行对账。</p>'};
+  if (active?.status === 'READY' && active.execution_blocker) {
+    const blocker = active.execution_blocker;
+    const detail = `<dl class="definition-grid">${definition('阻断码', blocker.code)}${definition('发生时间', fmtDate(blocker.occurred_at))}${definition('最近检查', fmtDate(blocker.last_checked_at))}${definition('负责组件', blocker.component || 'execution-worker')}${definition('下一步', blocker.next_action || '等待系统修复后自动有界重试')}</dl>`;
+    return {key:'intent-blocked', tone:'danger', title:blocker.reason || '自动执行预发送检查未通过', copy:'订单尚未发生任何外部发送；系统已持久化真实阻断并按有界间隔重试。', action:`${detail}<a class="secondary" href="/system" data-link>查看执行系统状态</a>`};
+  }
   if (active?.status === 'READY') return item.environment === 'LIVE'
-    ? {key:'intent', tone:'attention', title:`等待${fmtIntentKind(active.kind)}发送`, copy:'实盘意图只能由受控发送进程在控制开关、短期授权和有效租约内推进；页面不会合成交易所回执。', action:'<a class="secondary" href="/campaigns/alerts" data-link>查看运行告警</a><p class="microcopy">若超过预期仍未推进，再按告警事实处理；不要重复创建意图。</p>'}
+    ? {key:'intent', tone:'attention', title:`正在自动推进${fmtIntentKind(active.kind)}`, copy:'审核完成后，系统会自动刷新风险、事实与对账，校验租约和 Worker 后发送；页面不再要求人工点击。', action:'<a class="secondary" href="/system" data-link>查看执行系统状态</a><p class="microcopy">超时或结果不明只查询原结果，不会重复发送。</p>'}
     : {key:'intent', tone:'attention', title:`记录${fmtIntentKind(active.kind)}发送结果`, copy:'当前只有这个意图可以推进；获取发送租约后记录模拟订单，不会连接交易所。', action:canOperate ? operationForm(active, item) : '<p class="microcopy">等待风险管理人员处理待发送意图。</p>'};
   if (active && ['SENT','PARTIALLY_FILLED'].includes(active.status)) return {key:'intent', tone:'attention', title:`确认${fmtIntentKind(active.kind)}成交结果`, copy:'先记录已确认成交，或在确实无法判断时标记为“结果未知”；不要创建第二个意图。', action:canOperate ? operationForm(active, item) : '<p class="microcopy">等待风险管理人员记录成交结果。</p>'};
   if (!truth.positionCurrent && filledIntent) return {key:'position', tone:'attention', title:'同步成交后的当前仓位', copy:'成交已经记录，但仓位数据早于最新成交或尚未确认；在此之前不能判断保护和下一步。', action:canRecordSyntheticFacts ? positionFactForm(item) : `<a class="secondary" href="${venueFactsHref}" data-link>查看交易账户</a><p class="microcopy">生产仓位只能来自交易所只读事实，不能在页面手工补写。</p>`};
@@ -622,7 +646,7 @@ function campaignNextStep(item, active, truth) {
   return {key:'reconcile', tone:'attention', title:'确认当前范围数据', copy:'当前没有可确认仓位；先运行对账，避免把缺失数据误认为已经平仓。', action:canOperate ? '<button class="primary" data-reconcile>运行当前范围对账</button>' : '<p class="microcopy">等待风险管理人员运行对账。</p>'};
 }
 
-function intentCard(intent, environment = 'TESTNET') { const dispatch = intent.dispatch ? `<p class="subtle">受控派发 · ${escapeHtml(intent.dispatch.backend)} · 账户版本 ${escapeHtml(intent.dispatch.account_version)} · ${fmtDate(intent.dispatch.started_at)}</p>` : ''; return `<div class="intent-row"><div><b>${escapeHtml(fmtIntentKind(intent.kind))} · ${escapeHtml(fmtSide(intent.side))} ${fmtNumber(intent.quantity)}</b><br><span class="subtle">${shortId(intent.intent_id)} · ${intent.reduce_only ? '只减仓' : '会增加风险'} · ${fmtDate(intent.updated_at)}</span></div><b class="status-${escapeHtml(intent.status)}">${escapeHtml(fmtStatus(intent.status))}</b></div>${dispatch}${intent.order ? `<p class="subtle">${escapeHtml(fmtEnvironment(environment, true))}订单 ${escapeHtml(intent.order.venue_order_id)} · 已成交 ${fmtNumber(intent.order.filled_quantity)} / ${fmtNumber(intent.order.ordered_quantity)}</p>` : ''}`; }
+function intentCard(intent, environment = 'TESTNET') { const dispatch = intent.dispatch ? `<p class="subtle">受控派发 · ${escapeHtml(intent.dispatch.backend)} · 账户版本 ${escapeHtml(intent.dispatch.account_version)} · ${fmtDate(intent.dispatch.started_at)}</p>` : ''; const blocker = intent.execution_blocker ? `<div class="callout"><b>${escapeHtml(intent.execution_blocker.code)}</b> · ${escapeHtml(intent.execution_blocker.reason || '预发送检查未通过')}<br><span class="subtle">${fmtDate(intent.execution_blocker.occurred_at)} · 最近检查 ${fmtDate(intent.execution_blocker.last_checked_at)} · ${escapeHtml(intent.execution_blocker.component || 'execution-worker')}</span><br><span class="subtle">下一步：${escapeHtml(intent.execution_blocker.next_action || '等待自动有界重试')}</span></div>` : ''; return `<div class="intent-row"><div><b>${escapeHtml(fmtIntentKind(intent.kind))} · ${escapeHtml(fmtSide(intent.side))} ${fmtNumber(intent.quantity)}</b><br><span class="subtle">${shortId(intent.intent_id)} · ${intent.reduce_only ? '只减仓' : '会增加风险'} · ${fmtDate(intent.updated_at)}</span></div><b class="status-${escapeHtml(intent.status)}">${escapeHtml(fmtStatus(intent.status))}</b></div>${blocker}${dispatch}${intent.order ? `<p class="subtle">${escapeHtml(fmtEnvironment(environment, true))}订单 ${escapeHtml(intent.order.venue_order_id)} · 已成交 ${fmtNumber(intent.order.filled_quantity)} / ${fmtNumber(intent.order.ordered_quantity)}</p>` : ''}`; }
 
 function operationForm(intent, item) {
   const label = item.environment === 'LIVE' ? '生产执行' : '测试网执行';

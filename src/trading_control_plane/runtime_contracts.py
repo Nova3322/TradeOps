@@ -59,6 +59,7 @@ class PreparedFreqtradeWorkerBinding:
     auth_version: int
     username: str = field(repr=False)
     password: str = field(repr=False)
+    runtime_fingerprint: str | None = None
     hip3_dexes: tuple[str, ...] = ()
     ws_token: str | None = field(default=None, repr=False)
     service_principal_id: UUID | None = None

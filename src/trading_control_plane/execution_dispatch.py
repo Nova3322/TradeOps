@@ -131,7 +131,18 @@ def execute_intent(
         leverage=live_leverage,
         now=clock(),
     )
-    worker.probe(expected_mode=expected_mode, required_pair=command.pair)
+    probe_result = worker.probe(expected_mode=expected_mode, required_pair=command.pair)
+    runtime_error = service.record_freqtrade_runtime_probe(
+        binding,
+        probe_result=probe_result,
+        error_code=None,
+        now=clock(),
+    )
+    if runtime_error is not None:
+        raise DomainRejected(
+            runtime_error,
+            "Freqtrade runtime identity changed and requires a new explicit verification",
+        )
     service.validate_freqtrade_worker_binding(binding)
     external_trade_id = None
     if isinstance(command, FreqtradeExitCommand) or command.position_adjustment:

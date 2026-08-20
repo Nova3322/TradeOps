@@ -1170,6 +1170,21 @@ class ExecutionQueries(QueryComponent):
                             "trigger_observed_at": iso_datetime(item.trigger_observed_at),
                             "add_unit_consumed": item.add_unit_consumed,
                             "status": item.status,
+                            "execution_blocker": (
+                                None
+                                if item.execution_blocker_code is None
+                                else {
+                                    "code": item.execution_blocker_code,
+                                    "reason": item.execution_blocker_reason,
+                                    "component": item.execution_blocker_component,
+                                    "next_action": item.execution_blocker_next_action,
+                                    "occurred_at": iso_datetime(item.execution_blocked_at),
+                                    "last_checked_at": iso_datetime(
+                                        item.execution_last_checked_at
+                                    ),
+                                    "retry_at": iso_datetime(item.execution_retry_at),
+                                }
+                            ),
                             "dispatch": (
                                 None
                                 if item.dispatch_backend is None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import http.client
 import json
 import time
@@ -383,16 +384,43 @@ class FreqtradeWorkerClient:
             "exchange": exchange,
             "trading_mode": "futures",
             "dry_run": expected_dry_run,
+            "demo_trading": config.get("demo_trading"),
             "worker_state": config.get("state"),
             "version": version.get("version"),
+            "bot_name": config.get("bot_name"),
+            "whitelist": sorted(whitelist),
             "hip3_dexes": list(self.spec.hip3_dexes),
             "active_pair_count": len(whitelist),
             "hip3_pair_count": len(hip3_pairs),
             "worker_command_available": True,
+            "force_entry_enabled": True,
             "position_adjustment_enabled": True,
             "external_order_send": expected_mode in {"TESTNET", "LIVE"},
             "network": expected_mode,
         }
+        fingerprint_payload = {
+            key: result[key]
+            for key in (
+                "exchange",
+                "trading_mode",
+                "dry_run",
+                "demo_trading",
+                "worker_state",
+                "version",
+                "bot_name",
+                "whitelist",
+                "force_entry_enabled",
+                "position_adjustment_enabled",
+                "network",
+            )
+        }
+        result["runtime_fingerprint"] = hashlib.sha256(
+            json.dumps(
+                fingerprint_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
         if self.spec.exchange_account_id is not None:
             result["exchange_account_id"] = self.spec.exchange_account_id
             result["team_id"] = self.spec.team_id

@@ -412,6 +412,7 @@ class AccountQueries(QueryComponent):
     @staticmethod
     def _exchange_account_projection(item: ExchangeAccount) -> dict[str, Any]:
         metadata = dict(item.credential_metadata or {})
+        worker_runtime = dict(item.freqtrade_runtime_metadata or {})
         credential_state = "UNCONFIGURED" if item.credential_version == 0 else "CONFIGURED"
         if item.trading_status == "ELIGIBLE":
             trading_reason = "account policy is eligible; global and task gates still apply"
@@ -510,6 +511,18 @@ class AccountQueries(QueryComponent):
                 "error_code": item.freqtrade_error_code,
                 "checked_at": _iso(item.freqtrade_last_check_at),
                 "last_verified_at": _iso(item.freqtrade_last_verified_at),
+                "runtime": {
+                    **worker_runtime,
+                    "fingerprint_verified": bool(
+                        item.freqtrade_runtime_fingerprint
+                        and item.freqtrade_runtime_fingerprint
+                        == worker_runtime.get("observed_fingerprint")
+                        and item.freqtrade_worker_status == "VERIFIED"
+                    ),
+                    "verified_fingerprint_present": bool(
+                        item.freqtrade_runtime_fingerprint
+                    ),
+                },
                 "hip3_dexes": list(item.freqtrade_hip3_dexes or []),
                 "auth": {
                     "state": ("CONFIGURED" if item.freqtrade_auth_version > 0 else "UNCONFIGURED"),

@@ -384,7 +384,9 @@ def test_freqtrade_backend_status_is_explicit_and_order_send_remains_closed(
             assert payload["backend"] == "FREQTRADE"
             assert payload["workers_enabled"] is False
             assert payload["direct_venue_send"] is False
-            assert payload["live_order_send"] == "DATABASE_GATE"
+            assert payload["live_order_send"] == "DISABLED"
+            assert payload["gate_source"] == "DATABASE"
+            assert payload["execution_worker"]["status"] == "UNKNOWN"
             assert payload["workers"] == []
             assert len(payload["account_bindings"]) == 1
             binding = payload["account_bindings"][0]
