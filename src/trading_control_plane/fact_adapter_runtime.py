@@ -20,6 +20,8 @@ from trading_control_plane.adapters.facts import (
     FactStreamSupervisor,
     Venue,
 )
+from trading_control_plane.binance_errors import BinanceRequestState
+from trading_control_plane.binance_state import DatabaseBinanceRequestState
 from trading_control_plane.config import Settings, get_settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, ExecutionEnvironment
@@ -72,6 +74,7 @@ class FactAdapterRuntime:
         symbol_provider: SymbolProvider,
         exchange_factory: ExchangeFactory | None = None,
         snapshot_consumer: SnapshotConsumer | None = None,
+        binance_request_state: BinanceRequestState | None = None,
     ) -> None:
         self.settings = settings
         self.registry = registry
@@ -79,6 +82,7 @@ class FactAdapterRuntime:
         self.symbol_provider = symbol_provider
         self.exchange_factory = exchange_factory
         self.snapshot_consumer = snapshot_consumer
+        self.binance_request_state = binance_request_state
         self._running: dict[str, _RunningAdapter] = {}
         self._stop = asyncio.Event()
         self._reconcile_task: asyncio.Task[None] | None = None
@@ -119,6 +123,7 @@ class FactAdapterRuntime:
         scope = self._scope(binding)
         kwargs: dict[str, Any] = {
             "credentials": binding.credentials,
+            "binance_request_state": self.binance_request_state,
         }
         if self.exchange_factory is not None:
             kwargs["exchange_factory"] = self.exchange_factory
@@ -482,6 +487,7 @@ def create_runtime_app(
         symbol_provider=_bootstrap_symbol_provider(resolved_settings),
         exchange_factory=exchange_factory,
         snapshot_consumer=persist_snapshot,
+        binance_request_state=DatabaseBinanceRequestState(resolved_database),
     )
     rpc_runtime: FreqtradeRpcRuntime | None = None
     if resolved_settings.freqtrade_workers_enabled:

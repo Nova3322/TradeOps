@@ -20,6 +20,7 @@ from trading_control_plane.adapters.facts import (
     FactAdapterScope,
     FactStreamSupervisor,
 )
+from trading_control_plane.binance_errors import BinanceApiRejected, BinanceRequestState
 from trading_control_plane.config import Settings
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.fact_adapter_api import create_fact_adapter_app
@@ -185,6 +186,60 @@ class FakeCcxtRestOnlyExchange(FakeCcxtProExchange):
             "watchTickers",
         ):
             self.has[capability] = False
+
+
+class DDoSProtection(Exception):
+    pass
+
+
+class FakeCcxtBinanceBannedExchange(FakeCcxtRestOnlyExchange):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_response_headers = {"Retry-After": "3600"}
+        self.private_calls = 0
+
+    def _banned(self) -> None:
+        self.private_calls += 1
+        raise DDoSProtection(
+            'binanceusdm 418 {"code":-1003,"msg":"IP banned until 1787104923000"}'
+        )
+
+    async def fetch_balance(self) -> Mapping[str, Any]:
+        self._banned()
+        raise AssertionError("unreachable")
+
+    async def fetch_positions(self) -> list[Mapping[str, Any]]:
+        self._banned()
+        raise AssertionError("unreachable")
+
+    async def fetch_open_orders(self) -> list[Mapping[str, Any]]:
+        self._banned()
+        raise AssertionError("unreachable")
+
+
+class FakeCcxtCooldownProbeExchange(FakeCcxtRestOnlyExchange):
+    def __init__(self) -> None:
+        super().__init__()
+        self.load_calls = 0
+        self.balance_calls = 0
+        self.position_calls = 0
+        self.order_calls = 0
+
+    async def load_markets(self) -> Mapping[str, Any]:
+        self.load_calls += 1
+        return await super().load_markets()
+
+    async def fetch_balance(self) -> Mapping[str, Any]:
+        self.balance_calls += 1
+        return await super().fetch_balance()
+
+    async def fetch_positions(self) -> list[Mapping[str, Any]]:
+        self.position_calls += 1
+        return await super().fetch_positions()
+
+    async def fetch_open_orders(self) -> list[Mapping[str, Any]]:
+        self.order_calls += 1
+        return await super().fetch_open_orders()
 
 
 class FakeCcxtReconnectingExchange(FakeCcxtRestOnlyExchange):
@@ -445,6 +500,150 @@ def test_fact_adapter_rejects_trading_signing_material() -> None:
             },
             exchange_factory=lambda *_args: FakeCcxtProExchange(),
         )
+
+
+def test_binance_418_enters_shared_cooldown_and_suppresses_all_followup_reads() -> None:
+    async def scenario() -> None:
+        started = datetime.now(UTC)
+        request_state = BinanceRequestState()
+        banned_exchange = FakeCcxtBinanceBannedExchange()
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: banned_exchange,
+            binance_request_state=request_state,
+            clock=lambda: started,
+        )
+        with pytest.raises(DomainRejected) as first:
+            await adapter.snapshot(reason="INITIAL")
+        assert first.value.code == "FACT_ADAPTER_SNAPSHOT_UNAVAILABLE"
+        cause: BaseException | None = first.value
+        causes: list[BaseException] = []
+        while cause is not None and cause not in causes:
+            causes.append(cause)
+            cause = cause.__cause__ or cause.__context__
+        assert any(
+            isinstance(item, BinanceApiRejected) and item.code == "BINANCE_RATE_LIMITED"
+            for item in causes
+        )
+        diagnostic = request_state.current_diagnostic()
+        assert diagnostic is not None
+        assert diagnostic.category == "IP_TEMPORARILY_BANNED"
+        assert diagnostic.http_status == 418
+        assert diagnostic.next_retry_at == started + timedelta(hours=1)
+        assert adapter.metrics.rate_limit_418 >= 1
+        await adapter.close()
+
+        cooldown_exchange = FakeCcxtCooldownProbeExchange()
+        blocked_adapter = CcxtProFactAdapter(
+            _scope(account_id="account-b"),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: cooldown_exchange,
+            binance_request_state=request_state,
+            clock=lambda: started + timedelta(minutes=1),
+        )
+        with pytest.raises(BinanceApiRejected) as blocked:
+            await blocked_adapter.snapshot(reason="INITIAL")
+        assert blocked.value.code == "BINANCE_RATE_LIMITED_COOLDOWN"
+        assert cooldown_exchange.load_calls == 0
+        assert blocked_adapter.metrics.cooldown_suppressions == 1
+        await blocked_adapter.close()
+
+        supervised_exchange = FakeCcxtCooldownProbeExchange()
+        supervised_adapter = CcxtProFactAdapter(
+            _scope(account_id="account-c"),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: supervised_exchange,
+            binance_request_state=request_state,
+            clock=lambda: started + timedelta(minutes=1),
+        )
+        registry = FactAdapterRegistry()
+        await registry.register(supervised_adapter)
+        delays: list[float] = []
+        supervisor: FactStreamSupervisor
+
+        async def sleeper(delay: float) -> None:
+            delays.append(delay)
+            supervisor.stop()
+
+        supervisor = FactStreamSupervisor(
+            registry,
+            supervised_adapter,
+            sleeper=sleeper,
+        )
+        await supervisor.run()
+        assert len(delays) == 1
+        assert 3_500 <= delays[0] <= 3_600
+        assert supervised_adapter.metrics.websocket_reconnects == 0
+        assert supervised_exchange.load_calls == 0
+        await registry.close()
+
+        periodic_exchange = FakeCcxtCooldownProbeExchange()
+        periodic_adapter = CcxtProFactAdapter(
+            _scope(account_id="account-periodic"),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: periodic_exchange,
+            clock=lambda: started + timedelta(minutes=1),
+        )
+        periodic_registry = FactAdapterRegistry()
+        await periodic_registry.register(periodic_adapter)
+        await periodic_registry.publish_snapshot(
+            await periodic_adapter.snapshot(reason="INITIAL")
+        )
+        periodic_adapter._binance_request_state = request_state
+        periodic_supervisor = FactStreamSupervisor(
+            periodic_registry,
+            periodic_adapter,
+        )
+        await periodic_supervisor._run_periodic_reconciliation()
+        periodic = await periodic_registry.latest(
+            periodic_adapter.scope.key,
+            stale_after=timedelta(days=1),
+        )
+        assert periodic.data_status == "UNKNOWN"
+        assert periodic.unknown_fields == (
+            "FACT_ADAPTER_BINANCE_RATE_LIMITED_COOLDOWN",
+        )
+        assert periodic.metrics.next_retry_at == diagnostic.next_retry_at.isoformat()
+        assert periodic_exchange.load_calls == 1
+        await periodic_registry.close()
+
+        probe = FactAdapterConnectionProbe(
+            bootstrap_symbols={"BINANCE": "BTCUSDT"},
+            exchange_factory=lambda *_args: cooldown_exchange,
+            binance_request_state=request_state,
+        )
+        result = await probe._verify(
+            workspace_id="workspace-a",
+            team_id="team-a",
+            account_id="account-d",
+            venue="BINANCE",
+            environment="LIVE",
+            account_mode="STANDARD",
+            credentials=_credentials("BINANCE"),
+        )
+        assert result.success is False
+        assert result.error_code == "BINANCE_RATE_LIMITED_COOLDOWN"
+        assert cooldown_exchange.load_calls == 0
+
+        recovery_exchange = FakeCcxtCooldownProbeExchange()
+        recovery_adapter = CcxtProFactAdapter(
+            _scope(account_id="account-recovery"),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: recovery_exchange,
+            binance_request_state=request_state,
+            clock=lambda: started + timedelta(hours=1, seconds=1),
+        )
+        recovered = await recovery_adapter.snapshot(reason="INITIAL")
+        assert recovered.data_status == "CURRENT"
+        assert recovery_exchange.load_calls == 1
+        assert recovery_exchange.balance_calls == 1
+        assert recovery_exchange.position_calls == 1
+        assert recovery_exchange.order_calls == 1
+        assert request_state.current_diagnostic() is None
+        await recovery_adapter.close()
+
+    asyncio.run(scenario())
 
 
 def test_fact_adapter_derives_stable_ids_for_zero_hash_funding_payments() -> None:

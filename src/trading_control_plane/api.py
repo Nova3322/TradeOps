@@ -265,7 +265,8 @@ def create_app(
                 "HYPERLIQUID": resolved_settings.runtime_hyperliquid_symbol,
                 "OKX": resolved_settings.runtime_okx_symbol,
                 "BYBIT": resolved_settings.runtime_bybit_symbol,
-            }
+            },
+            binance_request_state=binance_request_state,
         )
     )
 
