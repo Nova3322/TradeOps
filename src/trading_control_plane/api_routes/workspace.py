@@ -21,6 +21,7 @@ from trading_control_plane.api_core import (
     NotificationTestRequest,
     PasswordChangeRequest,
     PasswordLoginRequest,
+    PasswordStepUpRequest,
     Query,
     Request,
     Response,
@@ -33,6 +34,7 @@ from trading_control_plane.api_core import (
     TeamTradingModeRequest,
     WorkspaceCreateRequest,
     _now,
+    datetime,
     status,
     timedelta,
 )
@@ -62,6 +64,76 @@ class _WorkspaceRoutes:
                 "HUMAN_WEB_CONFIRMATION_REQUIRED",
                 "this action requires the owner to use an interactive web session",
             )
+
+    def issue_action_grant(
+        self,
+        payload: MockStepUpRequest | PasswordStepUpRequest,
+        identity: SessionIdentity,
+        *,
+        authentication_method: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        if payload.action == "proposal.approve":
+            current_version = self.queries().proposal_version(payload.object_id)
+            detail = self.queries().proposal_detail(identity.user_id, payload.object_id)
+            review_action = "proposal.review"
+        elif payload.action == "capital.approve":
+            current_version = self.queries().transfer_proposal_version(
+                identity.user_id,
+                payload.object_id,
+            )
+            detail = self.queries().transfer_proposal_detail(
+                identity.user_id, payload.object_id
+            )
+            review_action = "capital.review"
+        elif payload.action in {"risk.restore.review", "risk.restore.execute"}:
+            current_version = self.service().risk_control_change_version(
+                payload.object_id,
+                identity.user_id,
+            )
+            detail = {"account_id": None, "venue": None}
+            review_action = payload.action
+        elif payload.action == "risk.restore.direct":
+            status_detail = self.service().risk_control_status(
+                identity.user_id,
+                self.configured_risk_scopes(identity.user_id),
+                require_live_scope=True,
+                now=now,
+            )
+            current_version = int(status_detail["policy"]["revision"])
+            if payload.object_id != UUID(str(status_detail["policy"]["policy_id"])):
+                raise DomainRejected("VERSION_CONFLICT", "risk policy changed before step-up")
+            detail = {"account_id": None, "venue": None}
+            review_action = payload.action
+        else:
+            raise DomainRejected("STEP_UP_ACTION_INVALID", "step-up action is not supported")
+        if current_version != payload.object_version:
+            raise DomainRejected("VERSION_CONFLICT", "proposal changed before step-up")
+        if not self.service().can_user(
+            identity.user_id,
+            review_action,
+            str(detail["account_id"]),
+            str(detail["venue"]),
+        ):
+            raise DomainRejected("RBAC_DENIED", "approval is outside the current scope")
+        token = self.token_service.issue_action_grant(
+            user_id=identity.user_id,
+            action=payload.action,
+            object_id=payload.object_id,
+            object_version=payload.object_version,
+            now=now,
+            ttl=timedelta(seconds=self.resolved_settings.action_token_ttl_seconds),
+            authentication_method=authentication_method,
+        )
+        return {
+            "action_grant": token,
+            "authentication_method": (
+                "PASSWORD"
+                if authentication_method == "password-scrypt-step-up"
+                else "MOCK_PASSKEY_NON_PRODUCTION"
+            ),
+            "expires_in_seconds": self.resolved_settings.action_token_ttl_seconds,
+        }
 
     def register_auth(self) -> None:
         @self.app.get("/api/auth/status")
@@ -630,6 +702,72 @@ class _WorkspaceRoutes:
             }
 
     def register_notification(self) -> None:
+        @self.app.post("/api/auth/step-up")
+        def password_step_up(
+            payload: PasswordStepUpRequest,
+            request: Request,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_human_session(identity)
+            if identity.authentication_method != "password-scrypt":
+                raise DomainRejected(
+                    "PASSWORD_AUTH_REQUIRED",
+                    "action step-up requires a password-authenticated session",
+                )
+            now = _now()
+            client_host = request.client.host if request.client is not None else "unknown"
+            limiter_key = f"step-up:{client_host}:{identity.user_id}"
+            retry_after = self.login_limiter.retry_after(limiter_key, now=now)
+            if retry_after is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail={
+                        "error_code": "STEP_UP_RATE_LIMITED",
+                        "message": "密码验证尝试过多，请稍后再试",  # noqa: RUF001
+                    },
+                    headers={"Retry-After": str(retry_after)},
+                )
+            credential = self.queries().password_credential(identity.username)
+            encoded = (
+                str(credential["password_hash"])
+                if credential is not None and credential["password_hash"] is not None
+                else self.password_hasher.dummy_hash
+            )
+            password_valid = self.password_hasher.verify(
+                payload.plaintext_password(), encoded
+            )
+            credential_valid = bool(
+                credential is not None
+                and credential["user_id"] == identity.user_id
+                and credential["auth_version"] == identity.auth_version
+                and credential["active"]
+                and credential["principal_type"] == "HUMAN"
+                and credential["password_hash"] is not None
+                and password_valid
+            )
+            if not credential_valid:
+                locked_for = self.login_limiter.fail(limiter_key, now=now)
+                if locked_for is not None:
+                    raise HTTPException(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        detail={
+                            "error_code": "STEP_UP_RATE_LIMITED",
+                            "message": "密码验证尝试过多，请稍后再试",  # noqa: RUF001
+                        },
+                        headers={"Retry-After": str(locked_for)},
+                    )
+                raise DomainRejected(
+                    "STEP_UP_PASSWORD_INVALID",
+                    "the current account password is incorrect",
+                )
+            self.login_limiter.success(limiter_key)
+            return self.issue_action_grant(
+                payload,
+                identity,
+                authentication_method="password-scrypt-step-up",
+                now=now,
+            )
+
         @self.app.post("/api/auth/mock/step-up")
         def mock_step_up(
             payload: MockStepUpRequest,
@@ -645,63 +783,12 @@ class _WorkspaceRoutes:
                 and self.resolved_settings.environment in {"local", "test"}
             ):
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-            if payload.action == "proposal.approve":
-                current_version = self.queries().proposal_version(payload.object_id)
-                detail = self.queries().proposal_detail(identity.user_id, payload.object_id)
-                review_action = "proposal.review"
-            elif payload.action == "capital.approve":
-                current_version = self.queries().transfer_proposal_version(
-                    identity.user_id,
-                    payload.object_id,
-                )
-                detail = self.queries().transfer_proposal_detail(
-                    identity.user_id, payload.object_id
-                )
-                review_action = "capital.review"
-            elif payload.action in {"risk.restore.review", "risk.restore.execute"}:
-                current_version = self.service().risk_control_change_version(
-                    payload.object_id,
-                    identity.user_id,
-                )
-                detail = {"account_id": None, "venue": None}
-                review_action = payload.action
-            elif payload.action == "risk.restore.direct":
-                status_detail = self.service().risk_control_status(
-                    identity.user_id,
-                    self.configured_risk_scopes(identity.user_id),
-                    require_live_scope=True,
-                    now=_now(),
-                )
-                current_version = int(status_detail["policy"]["revision"])
-                if payload.object_id != UUID(str(status_detail["policy"]["policy_id"])):
-                    raise DomainRejected("VERSION_CONFLICT", "risk policy changed before step-up")
-                detail = {"account_id": None, "venue": None}
-                review_action = payload.action
-            else:
-                raise DomainRejected("STEP_UP_ACTION_INVALID", "step-up action is not supported")
-            if current_version != payload.object_version:
-                raise DomainRejected("VERSION_CONFLICT", "proposal changed before step-up")
-            if not self.service().can_user(
-                identity.user_id,
-                review_action,
-                str(detail["account_id"]),
-                str(detail["venue"]),
-            ):
-                raise DomainRejected("RBAC_DENIED", "approval is outside the current scope")
-            token = self.token_service.issue_action_grant(
-                user_id=identity.user_id,
-                action=payload.action,
-                object_id=payload.object_id,
-                object_version=payload.object_version,
-                now=_now(),
-                ttl=timedelta(seconds=self.resolved_settings.action_token_ttl_seconds),
+            return self.issue_action_grant(
+                payload,
+                identity,
                 authentication_method="mock-passkey-step-up",
+                now=_now(),
             )
-            return {
-                "action_grant": token,
-                "authentication_method": "MOCK_PASSKEY_NON_PRODUCTION",
-                "expires_in_seconds": self.resolved_settings.action_token_ttl_seconds,
-            }
 
         @self.app.get("/api/notifications")
         def notifications(

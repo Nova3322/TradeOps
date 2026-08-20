@@ -63,6 +63,7 @@
   "POST /api/auth/mock/login",
   "POST /api/auth/mock/step-up",
   "POST /api/auth/password",
+  "POST /api/auth/step-up",
   "POST /api/authorizations/{authorization_id}/intents",
   "POST /api/campaigns/{campaign_id}/auto-add",
   "POST /api/campaigns/{campaign_id}/auto-add/disable",

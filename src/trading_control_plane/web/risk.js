@@ -179,17 +179,33 @@ async function bindRiskControlActions() {
   });
   document.querySelector('#risk-direct-restore-form')?.addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const reason = new FormData(form).get('reason'); const button = event.submitter || form.querySelector('button');
-    const confirmed = await confirmAction({title:'最高管理员直接恢复？', message:'系统会再次验证全部生产账户条件并创建新的 NORMAL 政策。AUTO_ADD 保持关闭，旧 TradingAuthorization 不会恢复。', confirmLabel:'确认并恢复'}); if (!confirmed) return;
-    await withPending(button, '验证中…', async () => { try { const status = await api('/api/risk-controls'); const policy = status.policy; const grant = await api('/api/auth/mock/step-up', {method:'POST', body:JSON.stringify({action:'risk.restore.direct', object_id:policy.policy_id, object_version:policy.revision})}); await api('/api/risk-controls/restore-direct', {method:'POST', body:JSON.stringify({reason, idempotency_key:crypto.randomUUID(), action_grant:grant.action_grant})}); showToast('已创建新的正常风险政策；AUTO_ADD 与旧授权保持失效'); await route(); } catch (error) { showApiError(error, form.querySelector('.form-error')); } });
+    let grant;
+    try {
+      const status = await api('/api/risk-controls');
+      const policy = status.policy;
+      grant = await confirmStepUpAction({title:'最高管理员直接恢复？', message:'系统会再次验证全部生产账户条件并创建新的 NORMAL 政策。AUTO_ADD 保持关闭，旧 TradingAuthorization 不会恢复。', confirmLabel:'验证身份并恢复', action:'risk.restore.direct', objectId:policy.policy_id, objectVersion:policy.revision});
+    } catch (error) { showApiError(error, form.querySelector('.form-error')); return; }
+    if (!grant) return;
+    await withPending(button, '验证中…', async () => { try { await api('/api/risk-controls/restore-direct', {method:'POST', body:JSON.stringify({reason, idempotency_key:crypto.randomUUID(), action_grant:grant.action_grant})}); showToast('已创建新的正常风险政策；AUTO_ADD 与旧授权保持失效'); await route(); } catch (error) { showApiError(error, form.querySelector('.form-error')); } });
   });
   document.querySelectorAll('[data-risk-review]').forEach(button => button.addEventListener('click', async () => {
     const requestId = button.dataset.riskReview; const version = Number(button.dataset.version); const decision = button.dataset.decision; const reason = document.querySelector(`#risk-review-${requestId}`)?.value || '独立审核拒绝';
-    if (decision === 'APPROVE') { const confirmed = await confirmAction({title:'批准这份恢复申请？', message:'本次只记录独立审核票，不会立即恢复。执行时仍会重新验证全部实时条件；AUTO_ADD 保持关闭，旧授权不会恢复。', confirmLabel:'确认批准'}); if (!confirmed) return; }
-    await withPending(button, '提交中…', async () => { try { let action_grant = null; if (decision === 'APPROVE') { const grant = await api('/api/auth/mock/step-up', {method:'POST', body:JSON.stringify({action:'risk.restore.review', object_id:requestId, object_version:version})}); action_grant = grant.action_grant; } await api(`/api/risk-controls/restores/${requestId}/reviews`, {method:'POST', body:JSON.stringify({decision, reason, expected_version:version, idempotency_key:crypto.randomUUID(), action_grant})}); showToast(decision === 'APPROVE' ? '独立审核票已记录' : '恢复申请已拒绝'); await route(); } catch (error) { showApiError(error); } });
+    let action_grant = null;
+    if (decision === 'APPROVE') {
+      try {
+        const grant = await confirmStepUpAction({title:'批准这份恢复申请？', message:'本次只记录独立审核票，不会立即恢复。执行时仍会重新验证全部实时条件；AUTO_ADD 保持关闭，旧授权不会恢复。', confirmLabel:'验证身份并批准', action:'risk.restore.review', objectId:requestId, objectVersion:version});
+        if (!grant) return;
+        action_grant = grant.action_grant;
+      } catch (error) { showApiError(error); return; }
+    }
+    await withPending(button, '提交中…', async () => { try { await api(`/api/risk-controls/restores/${requestId}/reviews`, {method:'POST', body:JSON.stringify({decision, reason, expected_version:version, idempotency_key:crypto.randomUUID(), action_grant})}); showToast(decision === 'APPROVE' ? '独立审核票已记录' : '恢复申请已拒绝'); await route(); } catch (error) { showApiError(error); } });
   }));
   document.querySelectorAll('[data-risk-execute]').forEach(button => button.addEventListener('click', async () => {
     const requestId = button.dataset.riskExecute; const version = Number(button.dataset.version);
-    const confirmed = await confirmAction({title:'执行受审核恢复？', message:'系统将重新验证所有受控范围、当前数据、对账结果、未决订单、冷却期和控制版本。只会创建新的正常风险政策；旧授权和旧的可用加仓次数不会恢复。', confirmLabel:'重新验证并执行'}); if (!confirmed) return;
-    await withPending(button, '验证中…', async () => { try { const grant = await api('/api/auth/mock/step-up', {method:'POST', body:JSON.stringify({action:'risk.restore.execute', object_id:requestId, object_version:version})}); await api(`/api/risk-controls/restores/${requestId}/execute`, {method:'POST', body:JSON.stringify({expected_version:version, idempotency_key:crypto.randomUUID(), action_grant:grant.action_grant})}); showToast('新的正常风险政策已创建；旧授权保持失效'); await route(); } catch (error) { showApiError(error); } });
+    let grant;
+    try { grant = await confirmStepUpAction({title:'执行受审核恢复？', message:'系统将重新验证所有受控范围、当前数据、对账结果、未决订单、冷却期和控制版本。只会创建新的正常风险政策；旧授权和旧的可用加仓次数不会恢复。', confirmLabel:'验证身份并执行', action:'risk.restore.execute', objectId:requestId, objectVersion:version}); }
+    catch (error) { showApiError(error); return; }
+    if (!grant) return;
+    await withPending(button, '验证中…', async () => { try { await api(`/api/risk-controls/restores/${requestId}/execute`, {method:'POST', body:JSON.stringify({expected_version:version, idempotency_key:crypto.randomUUID(), action_grant:grant.action_grant})}); showToast('新的正常风险政策已创建；旧授权保持失效'); await route(); } catch (error) { showApiError(error); } });
   }));
 }

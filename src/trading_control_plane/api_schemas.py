@@ -663,6 +663,13 @@ class MockStepUpRequest(BaseModel):
     object_version: int = Field(ge=1)
 
 
+class PasswordStepUpRequest(MockStepUpRequest):
+    password: SecretStr = Field(min_length=12, max_length=128)
+
+    def plaintext_password(self) -> str:
+        return self.password.get_secret_value()
+
+
 class RiskDecisionRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
     requested_quantity: Decimal | None = Field(default=None, gt=0)

@@ -952,6 +952,91 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
     asyncio.run(scenario())
 
 
+def test_password_step_up_issues_production_compatible_review_grant(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    reviewer_password = "reviewer-one-password"  # noqa: S105
+    service.ensure_local_human_password(
+        "reviewer-1",
+        reviewer_password,
+        now=datetime.now(UTC),
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, MockTelegramGateway())),
+            base_url="http://test",
+        ) as client:
+            await login(client, "proposer")
+            created = await client.post(
+                "/api/proposals/manual",
+                json={
+                    "environment": "TESTNET",
+                    "account_id": "acct-1",
+                    "venue": "BINANCE",
+                    "instrument_id": str(ids["instrument"]),
+                    "direction": "LONG",
+                    "risk_tier": "LOW",
+                    "quantity": "0.001",
+                    "max_risk": "1",
+                    "expires_in_minutes": 480,
+                    "trigger_price": "120000",
+                    "invalidation_price": "118000",
+                    "rationale": "verify password step-up before an independent review",
+                    "idempotency_key": "password-step-up-proposal",
+                },
+            )
+            assert created.status_code == 200, created.text
+            proposal_id = created.json()["proposal_id"]
+            version = created.json()["version"]
+            await logout(client)
+
+            password_login = await client.post(
+                "/api/auth/login",
+                json={"username": "reviewer-1", "password": reviewer_password},
+            )
+            assert password_login.status_code == 200, password_login.text
+            invalid = await client.post(
+                "/api/auth/step-up",
+                json={
+                    "action": "proposal.approve",
+                    "object_id": proposal_id,
+                    "object_version": version,
+                    "password": "incorrect-reviewer-password",
+                },
+            )
+            assert invalid.status_code == 422, invalid.text
+            assert invalid.json()["error"]["code"] == "STEP_UP_PASSWORD_INVALID"
+            assert (await client.get("/api/auth/session")).status_code == 200
+
+            grant = await client.post(
+                "/api/auth/step-up",
+                json={
+                    "action": "proposal.approve",
+                    "object_id": proposal_id,
+                    "object_version": version,
+                    "password": reviewer_password,
+                },
+            )
+            assert grant.status_code == 200, grant.text
+            assert grant.json()["authentication_method"] == "PASSWORD"
+            assert reviewer_password not in grant.text
+            reviewed = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={
+                    "decision": "APPROVE",
+                    "reason": "password-authenticated independent review",
+                    "expected_version": version,
+                    "action_grant": grant.json()["action_grant"],
+                },
+            )
+            assert reviewed.status_code == 200, reviewed.text
+            assert reviewed.json()["status"] == "APPROVED"
+
+    asyncio.run(scenario())
+
+
 def test_manual_proposal_accepts_u_margin_amount_and_resolves_frozen_quantity(
     database: Database, service: TradingService
 ) -> None:
