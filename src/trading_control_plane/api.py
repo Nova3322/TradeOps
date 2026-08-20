@@ -107,6 +107,9 @@ from trading_control_plane.request_context import (
     bind_api_client_context,
     reset_api_client_context,
 )
+from trading_control_plane.service_domains.proposal_automation import (
+    advance_approved_proposal,
+)
 
 
 def create_app(
@@ -748,11 +751,13 @@ def create_app(
         update_id: int,
     ) -> str:
         del update_id
+        now = _now()
         decision = (
             ReviewDecision.APPROVE if action.action == "APPROVE_PROPOSAL" else ReviewDecision.REJECT
         )
+        workflow_service = service()
         try:
-            result = service().review_proposal(
+            result = workflow_service.review_proposal(
                 action.proposal_id,
                 action.recipient_id,
                 decision,
@@ -763,10 +768,23 @@ def create_app(
                     if decision is ReviewDecision.APPROVE
                     else None
                 ),
-                now=_now(),
+                now=now,
             )
         except DomainRejected as exc:
             return f"未执行: {exc.code}"
+        automation: dict[str, str | None] | None = None
+        if result is ProposalStatus.APPROVED:
+            try:
+                automation = advance_approved_proposal(
+                    workflow_service,
+                    proposal_id=action.proposal_id,
+                    fallback_service_username=(
+                        resolved_settings.runtime_sync_service_username
+                    ),
+                    now=now,
+                )
+            except DomainRejected as exc:
+                automation = {"status": "BLOCKED", "error_code": exc.code}
         if result is ProposalStatus.PENDING_REVIEW:
             detail = queries().proposal_detail(action.recipient_id, action.proposal_id)
             notify_reviewers(
@@ -779,7 +797,18 @@ def create_app(
         risk_copy = ""
         if result is ProposalStatus.APPROVED and isinstance(risk, dict):
             risk_copy = f" 系统风控已自动运行: {risk['result']}。"
-        return f"审核已记录: {result.value}。{risk_copy} 未创建授权、订单或资金动作。"
+        workflow_copy = ""
+        if automation is not None and automation.get("status") == "READY":
+            workflow_copy = " 已自动签发短期授权、预留风险并创建受控交易任务。"
+        elif automation is not None and automation.get("status") == "RISK_DENIED":
+            workflow_copy = " 风控拒绝, 未创建授权或交易任务。"
+        elif automation is not None:
+            workflow_copy = f" 自动流程已安全阻断: {automation.get('error_code')}。"
+        return (
+            f"审核已记录: {result.value}。{risk_copy}{workflow_copy} "
+            "交易所发送仅由受控执行进程在 Gate、租约与幂等边界内自动推进; "
+            "审核 Bot 本身不直接发送订单或资金动作。"
+        )
 
     authenticated_dependencies = AuthenticatedRouteDependencies(
         identity=identity_dependency,

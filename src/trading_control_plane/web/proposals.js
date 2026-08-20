@@ -155,12 +155,12 @@ async function renderProposalList(status, title, historyMode = false) {
     ? '<section class="empty-state"><div><h2>当前没有待你审核的提案</h2><p>自己的提案、已经投过票、已到期或已结束的提案不会留在这里。</p><div class="toolbar empty-actions"><a class="secondary" href="/home" data-link>返回当前任务</a><a class="primary" href="/reviews?view=current" data-link>查看全部提案</a></div></div></section>'
     : `<section class="empty-state"><div><h2>${historyMode ? '当前没有历史提案' : '当前没有进行中的提案'}</h2><p>${historyMode ? '已批准、已过期或已拒绝的提案会保留在这里供审计。' : canPropose ? '可以从机会页一键创建，或提交一份人工提案。' : '当前作用域内还没有需要继续跟踪的提案。'}</p>${historyMode ? '<a class="secondary" href="/reviews?view=current" data-link>返回当前提案</a>' : createActions}</div></section>`;
   const proposalScopeCopy = operationsView
-    ? '这里展示草稿、等待审核，以及仍在启动窗口内的已批准提案；批准后仍须完成实时风险检查与短期授权。'
-    : '这里只展示仍在草稿或等待审核中的提案；批准后进入历史，后续交易生命周期由风险管理接手。';
+    ? '这里展示草稿、等待审核，以及仍在启动窗口内的已批准提案；审核达标后系统自动完成实时风控、授权和执行。'
+    : '这里只展示仍在草稿或等待审核中的提案；批准后进入历史，后续交易生命周期由系统自动推进。';
   const proposalHistoryCopy = operationsView
     ? '这里保留已进入交易任务的提案、启动窗口已过期的批准记录，以及已过期或已拒绝记录；仍可启动的提案留在当前列表。'
     : '这里只保留已批准、已过期或已拒绝的审计记录，不会把历史数量混入当前待办。';
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">提案审核</p><h1>${escapeHtml(title)}</h1><p class="lede">${status ? '统一汇总当前团队内需要你独立判断、尚未到期且尚未投票的提案。生产与测试环境始终分开标记；批准不等于下单。' : historyMode ? proposalHistoryCopy : proposalScopeCopy}</p></div>${createActions}</header>
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">提案审核</p><h1>${escapeHtml(title)}</h1><p class="lede">${status ? '统一汇总当前团队内需要你独立判断、尚未到期且尚未投票的提案。生产与测试环境始终分开标记；达到审批阈值并通过实时风控后会自动执行。' : historyMode ? proposalHistoryCopy : proposalScopeCopy}</p></div>${createActions}</header>
     ${reviewEnvironmentSwitcher}
     <div class="stats proposal-stats">${status
       ? `<div class="stat"><small>待我审核</small><b>${items.length}</b></div><div class="stat"><small>需两人审核</small><b class="${doubleReview ? 'warning-text' : ''}">${doubleReview}</b></div><div class="stat"><small>30 分钟内到期</small><b class="${expiring ? 'danger-text' : ''}">${expiring}</b></div><div class="stat"><small>最早到期</small><b class="stat-date">${earliestExpiry ? fmtDate(earliestExpiry) : '—'}</b></div>`
@@ -232,7 +232,7 @@ function formatProposalRationale(value) {
     ? '风险参数来自管理员保存的默认配置。'
     : configuredRationale;
   const normalizedRiskCopy = riskCopy ? `${riskCopy.replace(/[。；;]\s*$/, '')}。` : '';
-  return `创建提案时，突破榜单中同一精确合约、同一方向在 ${timeframes} 同时突破。${normalizedRiskCopy}来源与参数已冻结，仍需人工审核；不会自动授权或下单。`;
+  return `创建提案时，突破榜单中同一精确合约、同一方向在 ${timeframes} 同时突破。${normalizedRiskCopy}来源与参数已冻结；达到人工审核阈值并通过实时风控后，系统自动推进受控交易。`;
 }
 
 async function renderProposalDetail(id) {
@@ -256,7 +256,6 @@ async function renderProposalDetail(id) {
   const isExpired = item.status === 'PENDING_REVIEW' && new Date(item.expires_at).getTime() <= Date.now();
   const launchWindowExpired = proposalLaunchWindowExpired(item);
   const canReview = Boolean(item.actionable_for_current_user);
-  const canOperate = roleNames().includes('OPERATOR') || roleNames().includes('SYSTEM_ADMIN');
   const details = item.frozen_payload?.details || {};
   const candidate = details.candidate || {};
   const triggerPrice = details.trigger_price || candidate.reference_price || candidate.threshold_price;
@@ -284,7 +283,7 @@ async function renderProposalDetail(id) {
   const sourceFacts = item.source === 'SYSTEM'
     ? `<div class="source-facts"><div><small>创建时来源快照</small><b class="${item.source_readiness === 'READY' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.source_readiness === 'READY' ? '创建时可用' : fmtReadiness(item.source_readiness))}</b></div><div><small>共振周期</small><b>${escapeHtml(resonanceTimeframes.join(' / ') || '—')}</b></div><div><small>成交量</small><b>${fmtCompact(candidate.quote_volume)}</b></div><div><small>持仓量</small><b>${fmtCompact(candidate.open_interest)}</b></div><div><small>快照时间</small><b>${fmtDate(item.source_observed_at)}</b></div></div>`
     : '<div class="source-facts manual-source"><div><small>来源</small><b>人工输入</b></div><div><small>审核依据</small><b>保存参数与提案理由</b></div></div>';
-  const highRiskReviewCopy = item.risk_tier === 'HIGH' ? `高风险提案需要两名不同审核人；当前已记录 ${item.approvals.length} 票。达到所需票数后系统会自动运行风控。` : '批准后系统会自动运行风控。';
+  const highRiskReviewCopy = item.risk_tier === 'HIGH' ? `高风险提案需要两名不同审核人；当前已记录 ${item.approvals.length} 票。达到所需票数并通过实时风控后，系统会自动授权、预留并交给 Freqtrade 执行。` : '批准并通过实时风控后，系统会自动授权、预留并交给 Freqtrade 执行。';
   const nextAction = launchWindowExpired
     ? {title:'审核已批准，但启动窗口已过期', copy:'审核结论已保留，但不能再运行风险检查、签发授权或创建交易任务。需要按当前市场条件创建新提案。', tone:'danger'}
     : terminal
@@ -296,7 +295,7 @@ async function renderProposalDetail(id) {
           ? {title:'你的审核已记录', copy:'这笔提案仍在等待另一名独立审核人；你无需再次操作。', tone:'success'}
           : {title:'等待独立审核', copy:item.proposer_id === session.user_id ? '你是提案创建者，不能审核自己的提案。' : '当前角色没有审核权限。', tone:'neutral'}
       : initialEntry
-        ? {title:'初仓意图已经创建', copy:'该提案不能再创建第二个初仓意图；后续执行、保护和异常处理统一进入交易任务。', tone:'success'}
+        ? {title:'交易任务已进入自动执行', copy:'该提案不能再创建第二个初仓意图；Freqtrade 发送、成交确认、Facts 和异常处理统一在交易任务中自动推进。', tone:'success'}
         : item.status === 'APPROVED' && (!riskDone || riskDenied)
           ? riskDenied
             ? {title:riskHelp.label, copy:riskHelp.action, tone:'danger'}
@@ -304,20 +303,17 @@ async function renderProposalDetail(id) {
         : needsFreshRisk
           ? {title:'短期授权已经失效', copy:'重新读取当前账户事实并运行风险检查；通过后才能签发新的短期授权。', tone:'danger'}
         : needsAuthorization
-          ? {title:'下一步：签发短期授权', copy:'风险检查已通过，可签发限时、限数量、限风险的交易授权。', tone:'attention'}
+          ? {title:'系统正在签发短期授权', copy:'风险检查已通过；系统正在自动签发限时、限数量、限风险的交易授权。', tone:'attention'}
           : authorizationUsable
-            ? {title:'已准备创建初仓意图', copy:'授权仍在有效期内；创建后只记录风险占用和订单意图，后续执行仍受服务端控制开关和发送租约限制。', tone:'success'}
+            ? {title:'系统正在创建交易任务', copy:'系统正在自动预留风险并创建唯一初仓意图；随后由受控执行进程在 Gate、租约和幂等边界内推进。', tone:'attention'}
             : {title:'当前没有待办动作', copy:'请核对授权有效期和当前状态。', tone:'neutral'};
-  const canRunRisk = item.status === 'APPROVED' && !launchWindowExpired && canOperate && (riskDenied || needsFreshRisk);
   const executionAction = initialEntry
     ? `<a class="primary wide-action" href="/campaigns/${initialEntry.campaign_id}" data-link>进入交易任务</a><p class="microcopy">初仓意图 ${shortId(initialEntry.intent_id)} · ${escapeHtml(fmtStatus(initialEntry.intent_status))}</p>`
-    : canRunRisk
-      ? `<button class="primary wide-action" data-risk>${riskDenied ? '处理后重新检查' : needsFreshRisk ? '重新检查当前风险' : '运行风险检查'}</button>`
-      : needsAuthorization && canOperate
-        ? '<button class="primary wide-action" data-authorize>签发 30 分钟授权</button>'
-        : authorizationUsable && canOperate
-          ? '<button class="primary wide-action" data-initial>创建一次性初仓意图</button>'
-          : '';
+    : item.status === 'APPROVED' && !riskDenied
+        ? '<p class="microcopy">无需人工点击；系统会从当前持久状态继续推进。</p>'
+        : item.status === 'APPROVED' && riskDenied
+          ? '<p class="microcopy">无需人工重试；相关事实、风险容量或政策发生变化后，系统会自动重新检查。静态边界不满足时保持阻断。</p>'
+        : '';
   const riskOutcomeCopy = launchWindowExpired
     ? '启动窗口已过期；以下是该提案最后一次风险检查结果，仅供审计。'
     : !riskDone
@@ -344,7 +340,7 @@ async function renderProposalDetail(id) {
   const authorizationPanel = launchWindowExpired
     ? '<div class="empty-inline"><b>当前提案不可再签发</b><span>启动窗口已经过期；审核结论继续保留，重新交易必须创建新提案。</span></div>'
     : authorizationDone
-    ? `<dl class="definition-grid authorization-grid">${definition('批准数量', fmtNumber(item.authorization.quantity_limit))}${definition('已使用', fmtNumber(item.authorization.used_quantity))}${definition('剩余数量', fmtNumber(item.authorization.remaining_quantity))}${definition('风险上限', fmtAmount(item.authorization.risk_limit, item.collateral_currency))}${definition('可用加仓次数', `${item.authorization.used_adds} / ${item.authorization.allowed_adds}`)}${definition('到期', fmtDate(item.authorization.expires_at))}</dl>${initialEntry ? `<div class="entry-boundary"><b>一次性初仓已使用</b><span>意图 ${shortId(initialEntry.intent_id)} · ${escapeHtml(fmtStatus(initialEntry.intent_status))}</span><a href="/campaigns/${initialEntry.campaign_id}" data-link>查看交易任务 →</a></div>` : '<p class="microcopy">授权仍不是订单；创建初仓意图时还会再次读取数据并预留风险。</p>'}`
+    ? `<dl class="definition-grid authorization-grid">${definition('批准数量', fmtNumber(item.authorization.quantity_limit))}${definition('已使用', fmtNumber(item.authorization.used_quantity))}${definition('剩余数量', fmtNumber(item.authorization.remaining_quantity))}${definition('风险上限', fmtAmount(item.authorization.risk_limit, item.collateral_currency))}${definition('可用加仓次数', `${item.authorization.used_adds} / ${item.authorization.allowed_adds}`)}${definition('到期', fmtDate(item.authorization.expires_at))}</dl>${initialEntry ? `<div class="entry-boundary"><b>一次性初仓已使用</b><span>意图 ${shortId(initialEntry.intent_id)} · ${escapeHtml(fmtStatus(initialEntry.intent_status))}</span><a href="/campaigns/${initialEntry.campaign_id}" data-link>查看交易任务 →</a></div>` : '<p class="microcopy">系统正在读取最新事实、预留风险并创建唯一初仓意图。</p>'}`
     : '<div class="empty-inline"><b>风险通过后可签发</b><span>授权同时限制有效期、数量、风险金额、权限范围和可用加仓次数。</span></div>';
   main.innerHTML = `<section class="page proposal-detail"><header class="page-head"><div><p class="eyebrow">${escapeHtml(fmtEnvironment(item.environment, true))} · ${escapeHtml(item.source === 'SYSTEM' ? 'Perptape 机会' : '人工提案')}</p><div class="proposal-title-row"><h1>${escapeHtml(item.symbol || candidate.symbol || '交易提案')}</h1><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))}</span><span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span></div><p class="lede">${escapeHtml(item.venue)} · ${testnetProposal ? '测试账户范围' : '生产账户范围'} · 提案 ${shortId(item.proposal_id)} · 版本 ${item.version}</p></div><div class="toolbar"><a class="secondary" href="${escapeHtml(returnDestination.href)}" data-link>返回${escapeHtml(returnDestination.label)}</a>${sourceLink ? `<a class="secondary" href="${escapeHtml(sourceLink)}" target="_blank" rel="noreferrer">突破详情 ↗</a>` : ''}${chartLink ? `<a class="secondary" href="${escapeHtml(chartLink)}" target="_blank" rel="noreferrer">交易所图表 ↗</a>` : ''}</div></header>
     <ol class="workflow-stepper" aria-label="提案流程"><li class="done"><span>1</span><div><b>提案已保存</b><small>${fmtDate(item.frozen_at)}</small></div></li><li class="${reviewDone ? 'done' : 'current'}"><span>2</span><div><b>独立审核</b><small>${isExpired ? '已到期' : reviewDone ? fmtStatus(item.status) : reviewedByMe ? '你的审核已记录' : '等待判断'}</small></div></li><li class="${launchWindowExpired || riskDenied ? 'blocked' : riskDone ? 'done' : reviewDone && !terminal ? 'current' : ''}"><span>3</span><div><b>风险检查</b><small>${launchWindowExpired ? '启动窗口已过期' : riskDone ? fmtStatus(item.risk_decision.result) : '尚未运行'}</small></div></li><li class="${initialEntry || authorizationUsable ? 'done' : needsAuthorization ? 'current' : ''}"><span>4</span><div><b>短期授权</b><small>${initialEntry ? '已生成初仓意图' : authorizationDone ? (authorizationUsable ? '有效' : '已失效') : '尚未签发'}</small></div></li></ol>
@@ -353,15 +349,12 @@ async function renderProposalDetail(id) {
       <article class="card frozen-scope"><div class="card-heading"><div><p class="eyebrow">已保存参数</p><h2>提案范围</h2></div><span class="status-pill">不可编辑</span></div><dl class="definition-grid spacious">${definition('账户', testnetProposal ? '测试账户范围' : '生产账户范围')}${definition('创建人', item.source === 'SYSTEM' ? '系统自动创建' : item.proposer_username || shortId(item.proposer_id))}${definition('交易所', item.venue)}${definition('方向', fmtDirection(item.direction))}${definition('风险档位', fmtRisk(item.risk_tier))}${definition('限价', fmtNumber(details.limit_price))}${definition('有效期 / 结果', `${fmtDate(proposalExpiryPresentation(item).at)} · ${proposalExpiryPresentation(item).state}`)}${definition('自动加仓', details.allow_auto_add ? `允许 · ${details.requested_adds} 次` : '关闭')}${definition('加仓触发价', fmtNumber(details.add_trigger_price))}${definition('来源候选', item.source === 'SYSTEM' ? '已冻结来源快照' : '人工创建')}${definition('来源快照时间', fmtDate(item.source_observed_at))}</dl></article>
       <article class="card review-trail"><div class="card-heading"><div><p class="eyebrow">独立判断</p><h2>审核历史</h2></div><span class="subtle">${item.approvals.length} 条记录</span></div>${item.approvals.length ? `<div class="review-timeline">${item.approvals.map(a => `<div class="review-event"><span class="${a.decision === 'APPROVE' ? 'approve-dot' : 'reject-dot'}"></span><div><b>${a.decision === 'APPROVE' ? '批准提案' : '拒绝提案'}</b><p>${escapeHtml(a.reason)}</p><small>${escapeHtml(a.reviewer_username || shortId(a.reviewer_id))} · ${fmtDate(a.created_at)}</small></div></div>`).join('')}</div>` : '<div class="empty-inline"><b>尚无审核记录</b><span>审核人的独立判断会按时间出现在这里。</span></div>'}</article>
     </div><aside class="stack proposal-actions-column">
-      <article class="card next-action tone-${nextAction.tone}"><p class="eyebrow">下一步</p><h2>${escapeHtml(nextAction.title)}</h2><p>${escapeHtml(nextAction.copy)}</p>${item.status === 'PENDING_REVIEW' && canReview ? `<label>审核意见<span class="field-help">说明你核对了什么，以及判断依据</span><textarea id="review-reason" rows="4">已核对交易逻辑、保存参数与最大风险边界</textarea></label><div class="review-actions"><button class="primary" data-approve>批准提案</button><button class="danger" data-reject>拒绝提案</button></div><p class="microcopy">批准或拒绝前都需要再次确认；不会直接下单。</p><div class="form-error" id="review-error"></div>` : ''}${executionAction}<div class="form-error" id="execution-error"></div></article>
+      <article class="card next-action tone-${nextAction.tone}"><p class="eyebrow">下一步</p><h2>${escapeHtml(nextAction.title)}</h2><p>${escapeHtml(nextAction.copy)}</p>${item.status === 'PENDING_REVIEW' && canReview ? `<label>审核意见<span class="field-help">说明你核对了什么，以及判断依据</span><textarea id="review-reason" rows="4">已核对交易逻辑、保存参数与最大风险边界</textarea></label><div class="review-actions"><button class="primary" data-approve>批准提案</button><button class="danger" data-reject>拒绝提案</button></div><p class="microcopy">批准是最后一个常规人工节点；达到审核阈值并通过实时风控后，系统会自动完成生产交易。</p><div class="form-error" id="review-error"></div>` : ''}${executionAction}<div class="form-error" id="execution-error"></div></article>
       <article class="card risk-engine-card"><div class="card-heading"><div><p class="eyebrow">风险检查</p><h2>${launchWindowExpired ? '最后一次风险检查' : '系统允许开多少'}</h2></div>${item.risk_decision ? `<span class="status-pill status-${escapeHtml(item.risk_decision.result)}">${escapeHtml(fmtStatus(item.risk_decision.result))}</span>` : '<span class="status-pill">未运行</span>'}</div>${riskDecisionPanel}</article>
       <article class="card authorization-card"><div class="card-heading"><div><p class="eyebrow">限时授权</p><h2>这份许可还能做什么</h2></div><span class="status-pill ${authorizationUsable ? 'status-APPROVED' : authorizationDone ? 'status-EXPIRED' : ''}">${escapeHtml(localizedText(authorizationState))}</span></div>${authorizationPanel}</article>
     </aside></div></section>`;
   document.querySelector('[data-approve]')?.addEventListener('click', (event) => approveProposal(item, event.currentTarget));
   document.querySelector('[data-reject]')?.addEventListener('click', (event) => rejectProposal(item, event.currentTarget));
-  document.querySelector('[data-risk]')?.addEventListener('click', (event) => runRisk(item, event.currentTarget));
-  document.querySelector('[data-authorize]')?.addEventListener('click', (event) => authorize(item, event.currentTarget));
-  document.querySelector('[data-initial]')?.addEventListener('click', (event) => createInitialIntent(item, event.currentTarget));
 }
 
 const definition = (label, value) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value ?? '—')}</dd></div>`;
@@ -372,7 +365,7 @@ async function approveProposal(item, button) {
   try {
     grant = await confirmStepUpAction({
       title:'批准这份冻结提案？',
-      message:'系统将记录你的一次独立批准。达到所需审批票数后会自动运行风控；不会签发交易授权、创建订单或下单。',
+      message:`系统将记录你的一次独立批准。达到所需审批票数并通过实时风控后，会按已冻结的 ${item.venue} / ${fmtDirection(item.direction)} / 数量 ${fmtNumber(item.quantity)} / 最大风险 ${fmtAmount(item.max_risk, item.collateral_currency)} 自动签发授权、预留风险并由 Freqtrade 发送${item.environment === 'TESTNET' ? '测试环境订单' : '生产真实订单'}；后续不再要求人工点击。`,
       confirmLabel:'验证身份并批准',
       action:'proposal.approve',
       objectId:item.proposal_id,
@@ -399,31 +392,6 @@ async function rejectProposal(item, button) {
       await api(`/api/proposals/${item.proposal_id}/reviews`, {method:'POST', body:JSON.stringify({decision:'REJECT', reason:document.querySelector('#review-reason').value, expected_version:item.version})});
       showToast('提案已拒绝，当前流程已结束'); await route();
     } catch (error) { showApiError(error, document.querySelector('#review-error')); }
-  });
-}
-
-async function runRisk(item, button) {
-  await withPending(button, '检查中…', async () => {
-    try { await api(`/api/proposals/${item.proposal_id}/risk-decisions`, {method:'POST', body:JSON.stringify({idempotency_key:crypto.randomUUID()})}); showToast('风险检查已完成'); await route(); }
-    catch (error) { showApiError(error, document.querySelector('#execution-error')); }
-  });
-}
-
-async function authorize(item, button) {
-  const allowedAdds = item.frozen_payload?.details?.allow_auto_add ? Number(item.frozen_payload.details.requested_adds || 0) : 0;
-  await withPending(button, '签发中…', async () => {
-    try { await api(`/api/proposals/${item.proposal_id}/authorizations`, {method:'POST', body:JSON.stringify({idempotency_key:crypto.randomUUID(), expires_in_minutes:30, allowed_adds:allowedAdds})}); showToast('短期授权已签发'); await route(); }
-    catch (error) { showApiError(error, document.querySelector('#execution-error')); }
-  });
-}
-
-async function createInitialIntent(item, button) {
-  await withPending(button, '创建中…', async () => {
-    try {
-      const initialQuantity = item.frozen_payload?.details?.initial_quantity || item.authorization.quantity_limit;
-      const result = await api(`/api/authorizations/${item.authorization.authorization_id}/intents`, {method:'POST', body:JSON.stringify({kind:'INITIAL', account_id:item.account_id, venue:item.venue, instrument_id:item.instrument_id, direction:item.direction, quantity:initialQuantity, idempotency_key:crypto.randomUUID()})});
-      showToast('风险已原子预留，初仓意图已创建'); navigate(`/campaigns/${result.campaign_id}`);
-    } catch (error) { showApiError(error, document.querySelector('#execution-error')); }
   });
 }
 

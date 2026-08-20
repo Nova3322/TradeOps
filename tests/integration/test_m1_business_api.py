@@ -17,14 +17,26 @@ from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
+    Direction,
+    ExecutionEnvironment,
     ProposalSource,
+    ReviewDecision,
     RiskTier,
     Role,
+    SystemRiskState,
 )
 from trading_control_plane.models import (
+    AccountEquity,
     AuditEvent,
+    Campaign,
     Instrument,
+    OrderIntent,
+    Position,
     Proposal,
+    RiskDecision,
+    RiskReservation,
+    TradingAuthorization,
+    VenueOrder,
 )
 from trading_control_plane.perptape import (
     PerptapeClient,
@@ -32,6 +44,10 @@ from trading_control_plane.perptape import (
 )
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
+from trading_control_plane.service_domains.proposal_automation import (
+    advance_approved_proposal,
+    refresh_approved_proposal_risk,
+)
 from trading_control_plane.telegram import MockTelegramGateway
 from trading_control_plane.venue_read_only import VenueInstrument
 
@@ -1039,8 +1055,181 @@ def test_password_step_up_issues_production_compatible_review_grant(
             assert reviewed.status_code == 200, reviewed.text
             assert reviewed.json()["status"] == "APPROVED"
             assert reviewed.json()["detail"]["risk_decision"]["result"] == "ALLOW"
+            assert reviewed.json()["automation"]["status"] == "READY"
+            assert reviewed.json()["detail"]["authorization"] is not None
+            assert reviewed.json()["detail"]["initial_entry"]["intent_status"] == "READY"
+            replay = advance_approved_proposal(
+                service,
+                proposal_id=UUID(proposal_id),
+                fallback_service_username="runtime-sync",
+                now=datetime.now(UTC),
+            )
+            assert replay["status"] == "READY"
+            assert replay["authorization_id"] == reviewed.json()["automation"][
+                "authorization_id"
+            ]
+            assert replay["intent_id"] == reviewed.json()["automation"]["intent_id"]
+
+        with database.session_factory() as session:
+            assert session.scalar(select(func.count()).select_from(TradingAuthorization)) == 1
+            assert session.scalar(select(func.count()).select_from(Campaign)) == 1
+            assert session.scalar(select(func.count()).select_from(RiskReservation)) == 1
+            assert session.scalar(select(func.count()).select_from(OrderIntent)) == 1
+            assert session.scalar(select(func.count()).select_from(VenueOrder)) == 0
+            authorization = session.scalar(select(TradingAuthorization))
+            intent = session.scalar(select(OrderIntent))
+            assert authorization is not None
+            assert intent is not None
+            assert authorization.actor_id == str(ids["runtime_sync"])
+            assert intent.actor_id == str(ids["runtime_sync"])
 
     asyncio.run(scenario())
+
+
+def test_approved_proposal_rechecks_denied_risk_only_after_new_facts(
+    database: Database,
+    service: TradingService,
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    stale_at = now - timedelta(minutes=10)
+    with database.session_factory.begin() as session:
+        for position in session.scalars(
+            select(Position).where(
+                Position.account_id == "acct-1",
+                Position.venue == "BINANCE",
+                Position.environment == "TESTNET",
+            )
+        ):
+            position.observed_at = stale_at
+            position.updated_at = stale_at
+        for equity in session.scalars(
+            select(AccountEquity).where(
+                AccountEquity.account_id == "acct-1",
+                AccountEquity.venue == "BINANCE",
+                AccountEquity.environment == "TESTNET",
+            )
+        ):
+            equity.observed_at = stale_at
+            equity.updated_at = stale_at
+
+    proposal_id = service.create_proposal(
+        actor_id=ids["proposer"],
+        source=ProposalSource.MANUAL,
+        risk_tier=RiskTier.LOW,
+        account_id="acct-1",
+        venue="BINANCE",
+        instrument_id=ids["instrument"],
+        direction=Direction.LONG,
+        quantity=Decimal("0.001"),
+        max_risk=Decimal(1),
+        expires_at=now + timedelta(hours=8),
+        idempotency_key="automatic-risk-retry-proposal",
+        environment=ExecutionEnvironment.TESTNET,
+        submit_for_review=True,
+        now=now,
+    )
+    assert (
+        service.review_proposal(
+            proposal_id,
+            ids["reviewer_one"],
+            ReviewDecision.APPROVE,
+            "approve frozen testnet proposal",
+            automatic_risk_service_username="runtime-sync",
+            now=now,
+        ).value
+        == "APPROVED"
+    )
+    with database.session_factory() as session:
+        first = session.scalar(
+            select(RiskDecision)
+            .where(RiskDecision.proposal_id == proposal_id)
+            .order_by(RiskDecision.created_at.desc())
+        )
+        assert first is not None
+        assert first.result == "DENY"
+        assert first.reasons == ["STALE_FACTS"]
+        assert (
+            session.scalar(
+                select(func.count()).select_from(RiskDecision).where(
+                    RiskDecision.proposal_id == proposal_id
+                )
+            )
+            == 1
+        )
+
+    assert not refresh_approved_proposal_risk(
+        service,
+        proposal_id=proposal_id,
+        fallback_service_username="runtime-sync",
+        now=now + timedelta(seconds=1),
+    )
+
+    refreshed_at = now + timedelta(seconds=2)
+    with database.session_factory.begin() as session:
+        for position in session.scalars(
+            select(Position).where(
+                Position.account_id == "acct-1",
+                Position.venue == "BINANCE",
+                Position.environment == "TESTNET",
+            )
+        ):
+            position.observed_at = refreshed_at
+            position.updated_at = refreshed_at
+        for equity in session.scalars(
+            select(AccountEquity).where(
+                AccountEquity.account_id == "acct-1",
+                AccountEquity.venue == "BINANCE",
+                AccountEquity.environment == "TESTNET",
+            )
+        ):
+            equity.observed_at = refreshed_at
+            equity.updated_at = refreshed_at
+
+    assert refresh_approved_proposal_risk(
+        service,
+        proposal_id=proposal_id,
+        fallback_service_username="runtime-sync",
+        now=now + timedelta(seconds=3),
+    )
+    assert not refresh_approved_proposal_risk(
+        service,
+        proposal_id=proposal_id,
+        fallback_service_username="runtime-sync",
+        now=now + timedelta(seconds=4),
+    )
+    service.set_risk_policy(
+        actor_id=ids["admin"],
+        version="m1-risk-v2",
+        system_state=SystemRiskState.NORMAL,
+        max_total_risk=Decimal(100),
+        max_account_risk=Decimal(100),
+        max_single_loss=Decimal(100),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
+        max_fact_age=timedelta(minutes=5),
+        now=now + timedelta(seconds=5),
+    )
+    assert refresh_approved_proposal_risk(
+        service,
+        proposal_id=proposal_id,
+        fallback_service_username="runtime-sync",
+        now=now + timedelta(seconds=6),
+    )
+    assert not refresh_approved_proposal_risk(
+        service,
+        proposal_id=proposal_id,
+        fallback_service_username="runtime-sync",
+        now=now + timedelta(seconds=7),
+    )
+    with database.session_factory() as session:
+        decisions = session.scalars(
+            select(RiskDecision)
+            .where(RiskDecision.proposal_id == proposal_id)
+            .order_by(RiskDecision.created_at)
+        ).all()
+        assert [item.result for item in decisions] == ["DENY", "ALLOW", "ALLOW"]
+        assert decisions[-1].actor_id == str(ids["runtime_sync"])
 
 
 def test_manual_proposal_accepts_u_margin_amount_and_resolves_frozen_quantity(

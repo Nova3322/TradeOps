@@ -26,6 +26,10 @@ from trading_control_plane.domain import (
     TargetCandidate,
     TargetUrgency,
 )
+from trading_control_plane.execution_runtime import (
+    AUTOMATIC_EXECUTION_OWNER,
+    AutomaticExecutionWorker,
+)
 from trading_control_plane.freqtrade import (
     FreqtradeRpcMessage,
     FreqtradeWorkerClient,
@@ -443,14 +447,7 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
         allowed_adds=1 if lifecycle else 0,
     )
     scope = f"{environment}:{account_id}:{venue}"
-    owner_id = f"{slug}-sender"
-    fencing_token = service.acquire_sender(
-        scope,
-        owner_id,
-        fixture.ids["operator"],
-        NOW,
-        lease_duration=timedelta(minutes=5),
-    )
+    owner_id = AUTOMATIC_EXECUTION_OWNER if lifecycle else f"{slug}-sender"
     if environment == "LIVE":
         service.set_capability_gate(
             "LIVE_ORDER_SEND",
@@ -484,6 +481,31 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
         confirmation_timeout_seconds=10,
         fetcher=worker_fixture,
     )
+    if lifecycle:
+        automatic_settings = _settings(database, workers=True).model_copy(
+            update={"execution_worker_enabled": True}
+        )
+        automatic_worker = AutomaticExecutionWorker(
+            settings=automatic_settings,
+            database=database,
+            worker_factory=lambda _binding: worker,
+            clock=lambda: NOW,
+        )
+        automatic_report = automatic_worker.run_once()
+        assert automatic_report.intents_selected == 1
+        assert automatic_report.intents_completed == 1
+        assert automatic_report.blocked == {}
+        assert worker_fixture.writes == 1
+        replay_report = automatic_worker.run_once()
+        assert replay_report.intents_selected == 0
+        assert worker_fixture.writes == 1
+    fencing_token = service.acquire_sender(
+        scope,
+        owner_id,
+        fixture.ids["operator"],
+        NOW,
+        lease_duration=timedelta(minutes=5),
+    )
     app = create_app(
         _settings(database, workers=True),
         database,
@@ -508,20 +530,21 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
                 "fencing_token": fencing_token,
                 "idempotency_key": f"{slug}-dispatch",
             }
-            response = await client.post(
-                f"/api/intents/{opening.intent_id}/execute",
-                json=action,
-            )
-            assert response.status_code == 200, response.text
-            assert response.json()["backend"] == "FREQTRADE"
-            assert response.json()["environment"] == environment
-            assert response.json()["pair"] == pair
-            replayed = await client.post(
-                f"/api/intents/{opening.intent_id}/execute",
-                json=action,
-            )
-            assert replayed.status_code == 200, replayed.text
-            assert replayed.json()["replayed"] is True
+            if not lifecycle:
+                response = await client.post(
+                    f"/api/intents/{opening.intent_id}/execute",
+                    json=action,
+                )
+                assert response.status_code == 200, response.text
+                assert response.json()["backend"] == "FREQTRADE"
+                assert response.json()["environment"] == environment
+                assert response.json()["pair"] == pair
+                replayed = await client.post(
+                    f"/api/intents/{opening.intent_id}/execute",
+                    json=action,
+                )
+                assert replayed.status_code == 200, replayed.text
+                assert replayed.json()["replayed"] is True
             if lifecycle:
                 fresh = datetime.now(UTC)
                 worker_fixture.mark = Decimal(101)
@@ -565,7 +588,7 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
                     json=add_action,
                 )
                 assert add_response.status_code == 200, add_response.text
-                assert add_response.json()["trade_id"] == response.json()["trade_id"]
+                assert add_response.json()["trade_id"] == f"{exchange}-trade-1"
 
                 fresh = datetime.now(UTC)
                 service.record_position(

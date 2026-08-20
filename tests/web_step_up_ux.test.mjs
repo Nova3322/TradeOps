@@ -22,11 +22,15 @@ test('production approval requests current-password step-up instead of the mock-
   assert.match(sharedSource, /STEP_UP_RATE_LIMITED:/);
 });
 
-test('proposal approval delegates the initial risk check to the server', () => {
-  assert.match(proposalSource, /达到所需审批票数后会自动运行风控/);
-  assert.match(
-    proposalSource,
-    /const canRunRisk =[^;]+\(riskDenied \|\| needsFreshRisk\)/,
-  );
-  assert.doesNotMatch(proposalSource, /canRunRisk =[^;]+!riskDone/);
+test('proposal approval is the final normal click before automatic execution', () => {
+  assert.match(proposalSource, /达到所需审批票数并通过实时风控后/);
+  assert.match(proposalSource, /自动签发授权、预留风险并由 Freqtrade 发送/);
+  assert.match(proposalSource, /批准是最后一个常规人工节点/);
+  assert.match(proposalSource, /相关事实、风险容量或政策发生变化后，系统会自动重新检查/);
+  assert.doesNotMatch(proposalSource, /<button[^>]+data-risk/);
+  assert.doesNotMatch(proposalSource, /async function runRisk/);
+  assert.doesNotMatch(proposalSource, /data-authorize/);
+  assert.doesNotMatch(proposalSource, /data-initial/);
+  assert.doesNotMatch(proposalSource, /async function authorize/);
+  assert.doesNotMatch(proposalSource, /async function createInitialIntent/);
 });
