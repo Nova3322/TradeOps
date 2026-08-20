@@ -1026,6 +1026,12 @@ class RuntimeSourceHealth(Base):
             name="ck_runtime_source_health_failures_nonnegative",
         ),
         CheckConstraint(
+            "source_name NOT IN ('BINANCE','HYPERLIQUID','OKX','BYBIT') "
+            "OR error_code IS NULL OR error_code NOT LIKE '%RATE_LIMITED%' "
+            "OR retry_at IS NULL",
+            name="ck_runtime_source_health_exchange_cooldown_ephemeral",
+        ),
+        CheckConstraint(
             "(account_id IS NULL AND venue IS NULL) OR "
             "(account_id IS NOT NULL AND venue IN "
             "('BINANCE','HYPERLIQUID','OKX','BYBIT'))",
@@ -1061,22 +1067,16 @@ class RuntimeSourceHealth(Base):
 
 
 class BinanceApiState(Base):
-    """One deployment-wide Binance request budget and clock state.
+    """Deployment-wide Binance caches, schedules, and clock state.
 
-    Binance request-weight bans are IP-scoped, so this row intentionally has no
-    team, account, or API-key dimension.
+    IP-scoped cooldowns and request-weight headers are deliberately process-local
+    so a changed production egress IP cannot inherit a previous IP's ban.
     """
 
     __tablename__ = "binance_api_state"
 
     scope_key: Mapped[str] = mapped_column(String(64), primary_key=True)
     host: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    diagnostic: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    rate_limit_headers: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, default=dict)
-    headers_observed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
     clock_offset_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     clock_synchronized_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -1087,10 +1087,6 @@ class BinanceApiState(Base):
     )
     history_schedules: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict
-    )
-    probe_owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    probe_started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
     )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

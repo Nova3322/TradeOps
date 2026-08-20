@@ -1623,16 +1623,18 @@ def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enabl
             assert replay.json()["version"] == results["BINANCE"]["version"]
             assert len(verifier.calls) == 4
 
-            cooldown_reuse = await client.post(
+            recent_success_reuse = await client.post(
                 f"/api/exchange-accounts/{account_ids['BINANCE']}/connection-verifications",
                 json={
                     "expected_version": results["BINANCE"]["version"],
                     "idempotency_key": "verify-binance-team-account-cooldown-reuse",
                 },
             )
-            assert cooldown_reuse.status_code == 200, cooldown_reuse.text
-            assert cooldown_reuse.json()["version"] == results["BINANCE"]["version"]
-            assert cooldown_reuse.json()["connection"] == results["BINANCE"]["connection"]
+            assert recent_success_reuse.status_code == 200, recent_success_reuse.text
+            assert recent_success_reuse.json()["version"] == results["BINANCE"]["version"]
+            assert (
+                recent_success_reuse.json()["connection"] == results["BINANCE"]["connection"]
+            )
             assert len(verifier.calls) == 4
 
             for venue in {"BINANCE", "HYPERLIQUID", "BYBIT"}:
@@ -1703,26 +1705,52 @@ def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enabl
     assert "api_wallet_private_key" not in hyperliquid_binding.credentials
 
 
-def test_binance_connection_rate_limit_diagnostics_are_persisted_and_defer_reprobe(
+@pytest.mark.parametrize(
+    ("venue", "account_credentials"),
+    [
+        ("BINANCE", {"api_key": "binance-key", "api_secret": "binance-secret"}),
+        (
+            "HYPERLIQUID",
+            {
+                "account_address": "0x1111111111111111111111111111111111111111",
+                "api_wallet_address": "0x2222222222222222222222222222222222222222",
+                "api_wallet_private_key": "hyperliquid-private-key",
+            },
+        ),
+        (
+            "OKX",
+            {
+                "api_key": "okx-key",
+                "api_secret": "okx-secret",
+                "passphrase": "okx-passphrase",
+            },
+        ),
+        ("BYBIT", {"api_key": "bybit-key", "api_secret": "bybit-secret"}),
+    ],
+)
+def test_exchange_connection_rate_limit_cooldowns_are_ephemeral_and_allow_reprobe(
     database: Database,
+    venue: str,
+    account_credentials: dict[str, str],
 ) -> None:
     now = datetime.now(UTC)
     service = TradingService(database, credential_encryption_key=encryption_key())
-    admin = service.bootstrap_admin("binance-rate-limit-admin", now=now)
+    venue_slug = venue.lower()
+    admin = service.bootstrap_admin(f"{venue_slug}-rate-limit-admin", now=now)
     account_id = service.create_exchange_account(
         actor_id=admin,
-        account_id="binance-rate-limited",
-        venue="BINANCE",
-        label="Binance Rate Limited",
-        credentials={"api_key": "rate-key", "api_secret": "rate-secret"},
-        idempotency_key="binance-rate-limit-create",
+        account_id=f"{venue_slug}-rate-limited",
+        venue=venue,
+        label=f"{venue} Rate Limited",
+        credentials=account_credentials,
+        idempotency_key=f"{venue_slug}-rate-limit-create",
         now=now,
     )
     prepared, replay = service.prepare_exchange_account_connection_verification(
         account_id,
         actor_id=admin,
         expected_version=1,
-        idempotency_key="binance-rate-limit-first-probe",
+        idempotency_key=f"{venue_slug}-rate-limit-first-probe",
         now=now,
     )
     assert replay is None and prepared is not None
@@ -1741,26 +1769,35 @@ def test_binance_connection_rate_limit_diagnostics_are_persisted_and_defer_repro
     }
     result = service.record_exchange_account_connection_verification(
         prepared,
-        ConnectionProbeResult(False, "BINANCE_RATE_LIMITED", diagnostics),
+        ConnectionProbeResult(False, f"{venue}_RATE_LIMITED", diagnostics),
         actor_id=admin,
-        idempotency_key="binance-rate-limit-first-probe",
+        idempotency_key=f"{venue_slug}-rate-limit-first-probe",
         now=now,
     )
 
-    assert result["connection"]["error_code"] == "BINANCE_RATE_LIMITED"
-    assert result["connection"]["diagnostics"] == diagnostics
+    assert result["connection"]["error_code"] == f"{venue}_RATE_LIMITED"
+    assert result["connection"].get("diagnostics") is None
     projected = TradingQueries(database).exchange_accounts(admin)["data"][0]
-    assert projected["connection"]["diagnostics"] == diagnostics
-    with pytest.raises(DomainRejected) as deferred:
-        service.prepare_exchange_account_connection_verification(
-            account_id,
-            actor_id=admin,
-            expected_version=2,
-            idempotency_key="binance-rate-limit-early-reprobe",
-            now=now + timedelta(seconds=30),
-        )
-    assert deferred.value.code == "BINANCE_CONNECTION_RETRY_DEFERRED"
-    assert deferred.value.metadata == diagnostics
+    assert projected["connection"].get("diagnostics") is None
+    _prepared_replay, persisted_replay = service.prepare_exchange_account_connection_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key=f"{venue_slug}-rate-limit-first-probe",
+        now=now + timedelta(milliseconds=500),
+    )
+    assert _prepared_replay is None
+    assert persisted_replay is not None
+    assert persisted_replay["connection"].get("diagnostics") is None
+    prepared_again, replay = service.prepare_exchange_account_connection_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=2,
+        idempotency_key=f"{venue_slug}-rate-limit-new-egress-reprobe",
+        now=now + timedelta(seconds=1),
+    )
+    assert replay is None
+    assert prepared_again is not None
 
 
 def test_connection_result_is_not_committed_after_credential_rotation(database: Database) -> None:

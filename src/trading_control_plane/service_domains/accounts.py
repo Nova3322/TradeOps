@@ -35,6 +35,11 @@ _reject = rejections.reject
 _scope_key = execution_scope.scope_key
 _scope_parts = execution_scope.scope_parts
 
+
+def _is_exchange_rate_limit(error_code: str | None) -> bool:
+    return error_code is not None and "RATE_LIMITED" in error_code
+
+
 _EXECUTION_BLOCKER_GUIDANCE: dict[str, tuple[str, str]] = {
     "FREQTRADE_LIVE_MODE_REQUIRED": (
         "Worker 仍为模拟模式, 未满足生产下单条件。",
@@ -2457,7 +2462,8 @@ class AccountService(ServiceComponent):
             current_time = (now or datetime.now(UTC)).astimezone(UTC)
             last_check = account.last_connection_check_at
             if (
-                last_check is not None
+                account.connection_status == "VERIFIED"
+                and last_check is not None
                 and timedelta(0)
                 <= current_time - last_check.astimezone(UTC)
                 < timedelta(seconds=30)
@@ -2488,7 +2494,7 @@ class AccountService(ServiceComponent):
                     object_id=account.exchange_account_id,
                     reason=(
                         f"venue={account.venue};credential_version={account.credential_version};"
-                        "probe=server-cooldown-reuse"
+                        "probe=recent-success-reuse"
                     ),
                     correlation_id=uuid4(),
                     object_version=account.version,
@@ -2501,19 +2507,6 @@ class AccountService(ServiceComponent):
                 return None, response
             if account.version != expected_version:
                 _reject("VERSION_CONFLICT", "exchange account version changed")
-            diagnostics = (account.credential_metadata or {}).get("last_connection_error")
-            if account.venue == "BINANCE" and isinstance(diagnostics, dict):
-                raw_next_retry = diagnostics.get("next_retry_at")
-                try:
-                    next_retry_at = datetime.fromisoformat(str(raw_next_retry))
-                except (TypeError, ValueError):
-                    next_retry_at = None
-                if next_retry_at is not None and current_time < next_retry_at.astimezone(UTC):
-                    raise domain.DomainRejected(
-                        "BINANCE_CONNECTION_RETRY_DEFERRED",
-                        "Binance connection verification is deferred until next_retry_at",
-                        metadata=dict(diagnostics),
-                    )
             if account.credentials_ciphertext is None or account.credential_version < 1:
                 _reject(
                     "EXCHANGE_ACCOUNT_CREDENTIALS_MISSING",
@@ -2622,10 +2615,12 @@ class AccountService(ServiceComponent):
             account.connection_status = "VERIFIED" if outcome.success else "FAILED"
             account.connection_error_code = error_code
             credential_metadata = dict(account.credential_metadata or {})
+            rate_limited = not outcome.success and _is_exchange_rate_limit(error_code)
+            persisted_diagnostics = None if rate_limited else outcome.diagnostics
             if outcome.success:
                 credential_metadata.pop("last_connection_error", None)
-            elif outcome.diagnostics is not None:
-                credential_metadata["last_connection_error"] = dict(outcome.diagnostics)
+            elif persisted_diagnostics is not None:
+                credential_metadata["last_connection_error"] = dict(persisted_diagnostics)
             else:
                 credential_metadata.pop("last_connection_error", None)
             account.credential_metadata = credential_metadata
@@ -2648,8 +2643,8 @@ class AccountService(ServiceComponent):
                 account,
                 checked_at=now,
                 diagnostics=(
-                    outcome.diagnostics
-                    if not outcome.success and outcome.diagnostics is not None
+                    persisted_diagnostics
+                    if not outcome.success and persisted_diagnostics is not None
                     else None
                 ),
             )
@@ -2700,13 +2695,13 @@ class AccountService(ServiceComponent):
                         "error_code": error_code,
                         "error_category": (
                             None
-                            if outcome.diagnostics is None
-                            else outcome.diagnostics.get("category")
+                            if persisted_diagnostics is None
+                            else persisted_diagnostics.get("category")
                         ),
                         "next_retry_at": (
                             None
-                            if outcome.diagnostics is None
-                            else outcome.diagnostics.get("next_retry_at")
+                            if persisted_diagnostics is None
+                            else persisted_diagnostics.get("next_retry_at")
                         ),
                         "trading_status": account.trading_status,
                     },

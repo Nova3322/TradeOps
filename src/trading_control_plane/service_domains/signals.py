@@ -1748,7 +1748,17 @@ class SignalService(ServiceComponent):
                     else 0
                 )
                 retry_at = None
-                if status == "FAILED" and error_code is not None and "RATE_LIMITED" in error_code:
+                exchange_rate_limited = bool(
+                    source_name in credentials.SUPPORTED_EXCHANGE_VENUES
+                    and error_code is not None
+                    and "RATE_LIMITED" in error_code
+                )
+                if (
+                    status == "FAILED"
+                    and error_code is not None
+                    and "RATE_LIMITED" in error_code
+                    and not exchange_rate_limited
+                ):
                     raw_retry_at = result.get("retry_at")
                     try:
                         retry_at = (

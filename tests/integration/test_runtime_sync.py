@@ -1070,7 +1070,7 @@ def test_runtime_invalid_clock_executes_zero_postgres_statements(
     assert statements == []
 
 
-def test_runtime_health_preserves_last_success_and_rate_limit_backoff(
+def test_runtime_health_preserves_last_success_without_persisting_exchange_backoff(
     database: Database,
 ) -> None:
     service = TradingService(database)
@@ -1099,7 +1099,7 @@ def test_runtime_health_preserves_last_success_and_rate_limit_backoff(
     assert failed["status"] == "FAILED"
     assert failed["checked_at"] == first_failure.isoformat()
     assert failed["last_success_at"] == NOW.isoformat()
-    assert failed["retry_at"] == (first_failure + timedelta(seconds=60)).isoformat()
+    assert failed["retry_at"] is None
     assert failed["consecutive_failures"] == 1
 
     service.record_runtime_source_health(
@@ -1127,7 +1127,7 @@ def test_runtime_health_preserves_last_success_and_rate_limit_backoff(
     )
     repeated = queries.runtime_source_health(actor, "HYPERLIQUID")
     assert repeated is not None
-    assert repeated["retry_at"] == (second_failure + timedelta(seconds=120)).isoformat()
+    assert repeated["retry_at"] is None
     assert repeated["consecutive_failures"] == 2
     assert repeated["last_success_at"] == NOW.isoformat()
 
