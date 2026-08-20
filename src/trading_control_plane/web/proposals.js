@@ -237,6 +237,7 @@ function formatProposalRationale(value) {
 
 async function renderProposalDetail(id) {
   const item = await api(`/api/proposals/${id}`);
+  const preview = item.execution_preview;
   if (!['LIVE','TESTNET'].includes(item.environment)) {
     main.innerHTML = '<section class="page"><section class="empty-state"><div><h1>该提案不属于当前控制台</h1><p>这里只展示生产或严格隔离的测试提案。</p><a class="primary" href="/reviews?view=current" data-link>返回审核队列</a></div></section></section>';
     return;
@@ -349,7 +350,7 @@ async function renderProposalDetail(id) {
       <article class="card frozen-scope"><div class="card-heading"><div><p class="eyebrow">已保存参数</p><h2>提案范围</h2></div><span class="status-pill">不可编辑</span></div><dl class="definition-grid spacious">${definition('账户', testnetProposal ? '测试账户范围' : '生产账户范围')}${definition('创建人', item.source === 'SYSTEM' ? '系统自动创建' : item.proposer_username || shortId(item.proposer_id))}${definition('交易所', item.venue)}${definition('方向', fmtDirection(item.direction))}${definition('风险档位', fmtRisk(item.risk_tier))}${definition('限价', fmtNumber(details.limit_price))}${definition('有效期 / 结果', `${fmtDate(proposalExpiryPresentation(item).at)} · ${proposalExpiryPresentation(item).state}`)}${definition('自动加仓', details.allow_auto_add ? `允许 · ${details.requested_adds} 次` : '关闭')}${definition('加仓触发价', fmtNumber(details.add_trigger_price))}${definition('来源候选', item.source === 'SYSTEM' ? '已冻结来源快照' : '人工创建')}${definition('来源快照时间', fmtDate(item.source_observed_at))}</dl></article>
       <article class="card review-trail"><div class="card-heading"><div><p class="eyebrow">独立判断</p><h2>审核历史</h2></div><span class="subtle">${item.approvals.length} 条记录</span></div>${item.approvals.length ? `<div class="review-timeline">${item.approvals.map(a => `<div class="review-event"><span class="${a.decision === 'APPROVE' ? 'approve-dot' : 'reject-dot'}"></span><div><b>${a.decision === 'APPROVE' ? '批准提案' : '拒绝提案'}</b><p>${escapeHtml(a.reason)}</p><small>${escapeHtml(a.reviewer_username || shortId(a.reviewer_id))} · ${fmtDate(a.created_at)}</small></div></div>`).join('')}</div>` : '<div class="empty-inline"><b>尚无审核记录</b><span>审核人的独立判断会按时间出现在这里。</span></div>'}</article>
     </div><aside class="stack proposal-actions-column">
-      <article class="card next-action tone-${nextAction.tone}"><p class="eyebrow">下一步</p><h2>${escapeHtml(nextAction.title)}</h2><p>${escapeHtml(nextAction.copy)}</p>${item.status === 'PENDING_REVIEW' && canReview ? `<label>审核意见<span class="field-help">说明你核对了什么，以及判断依据</span><textarea id="review-reason" rows="4">已核对交易逻辑、保存参数与最大风险边界</textarea></label><div class="review-actions"><button class="primary" data-approve>批准提案</button><button class="danger" data-reject>拒绝提案</button></div><p class="microcopy">批准是最后一个常规人工节点；达到审核阈值并通过实时风控后，系统会自动完成生产交易。</p><div class="form-error" id="review-error"></div>` : ''}${executionAction}<div class="form-error" id="execution-error"></div></article>
+      <article class="card next-action tone-${nextAction.tone}"><p class="eyebrow">下一步</p><h2>${escapeHtml(nextAction.title)}</h2><p>${escapeHtml(nextAction.copy)}</p>${item.status === 'PENDING_REVIEW' && canReview ? `<div class="empty-inline"><b>审批后自动执行</b><span>账户 ${escapeHtml(preview?.account_id || '—')} · 场所 ${escapeHtml(preview?.venue || '—')} · 标的 ${escapeHtml(preview?.symbol || '—')} · 方向 ${escapeHtml(preview?.side || '—')} · 类型 ${escapeHtml(preview?.order_type || '—')} · 数量 ${escapeHtml(fmtNumber(preview?.quantity))} · 预计名义价值 ${preview?.estimated_notional ? escapeHtml(fmtAmount(preview.estimated_notional, preview.quote_currency)) : '—'} · 杠杆 ${escapeHtml(fmtNumber(preview?.leverage))}x · 最大风险 ${escapeHtml(fmtAmount(item.max_risk, item.collateral_currency))}。达到审核阈值后自动签发授权、预留风险并由 Freqtrade 发送；超时或状态不明时只查询，不重复下单。</span></div><label>审核意见<span class="field-help">说明你核对了什么，以及判断依据</span><textarea id="review-reason" rows="4">已核对交易逻辑、保存参数与最大风险边界</textarea></label><div class="review-actions"><button class="primary" data-approve>批准提案</button><button class="danger" data-reject>拒绝提案</button></div><p class="microcopy">批准是最后一个常规人工节点。登录会话、Reviewer 权限、账户与场所范围、版本、幂等和审计仍由服务端强制检查；不再重复输入当前密码。</p><div class="form-error" id="review-error"></div>` : ''}${executionAction}<div class="form-error" id="execution-error"></div></article>
       <article class="card risk-engine-card"><div class="card-heading"><div><p class="eyebrow">风险检查</p><h2>${launchWindowExpired ? '最后一次风险检查' : '系统允许开多少'}</h2></div>${item.risk_decision ? `<span class="status-pill status-${escapeHtml(item.risk_decision.result)}">${escapeHtml(fmtStatus(item.risk_decision.result))}</span>` : '<span class="status-pill">未运行</span>'}</div>${riskDecisionPanel}</article>
       <article class="card authorization-card"><div class="card-heading"><div><p class="eyebrow">限时授权</p><h2>这份许可还能做什么</h2></div><span class="status-pill ${authorizationUsable ? 'status-APPROVED' : authorizationDone ? 'status-EXPIRED' : ''}">${escapeHtml(localizedText(authorizationState))}</span></div>${authorizationPanel}</article>
     </aside></div></section>`;
@@ -366,35 +367,18 @@ async function approveProposal(item, button) {
     showApiError({code:'EXECUTION_PREVIEW_UNAVAILABLE', message:'生产订单确认字段不完整；审核保持未提交。'}, errorBox);
     return;
   }
-  let grant;
-  try {
-    grant = await confirmStepUpAction({
-      title:'批准这份冻结提案？',
-      message:`系统将记录你的一次独立批准。达到所需审批票数并通过实时风控后，会按已冻结的账户 ${preview.account_id} / 场所 ${preview.venue} / 标的 ${preview.symbol} / 方向 ${fmtDirection(item.direction)}（${preview.side}）/ 类型 ${preview.order_type} / 数量 ${fmtNumber(preview.quantity)} / 预计名义价值 ${fmtAmount(preview.estimated_notional, preview.quote_currency)} / 杠杆 ${fmtNumber(preview.leverage)}x / 最大风险 ${fmtAmount(item.max_risk, item.collateral_currency)} 自动签发授权、预留风险并由 Freqtrade 发送${item.environment === 'TESTNET' ? '测试环境订单' : '生产真实订单'}、查询成交和对账；后续不再要求人工点击。超时或状态不明时只查询，不重复下单。`,
-      confirmLabel:'验证身份并批准',
-      action:'proposal.approve',
-      objectId:item.proposal_id,
-      objectVersion:item.version,
-    });
-  } catch (error) {
-    showApiError(error, errorBox);
-    return;
-  }
-  if (!grant) return;
   await withPending(button, '提交中…', async () => {
     try {
-      await api(`/api/proposals/${item.proposal_id}/reviews`, {method:'POST', body:JSON.stringify({decision:'APPROVE', reason:document.querySelector('#review-reason').value, expected_version:item.version, action_grant:grant.action_grant})});
+      await api(`/api/proposals/${item.proposal_id}/reviews`, {method:'POST', body:JSON.stringify({decision:'APPROVE', reason:document.querySelector('#review-reason').value, expected_version:item.version, idempotency_key:crypto.randomUUID()})});
       showToast('审核结果已记录'); await route();
     } catch (error) { showApiError(error, errorBox); }
   });
 }
 
 async function rejectProposal(item, button) {
-  const confirmed = await confirmAction({title:'拒绝并结束这份提案？', message:'拒绝后当前冻结提案会立即结束，不能继续审核、运行风险检查或创建交易任务；如需重新评估必须创建新提案。', confirmLabel:'确认拒绝'});
-  if (!confirmed) return;
   await withPending(button, '提交中…', async () => {
     try {
-      await api(`/api/proposals/${item.proposal_id}/reviews`, {method:'POST', body:JSON.stringify({decision:'REJECT', reason:document.querySelector('#review-reason').value, expected_version:item.version})});
+      await api(`/api/proposals/${item.proposal_id}/reviews`, {method:'POST', body:JSON.stringify({decision:'REJECT', reason:document.querySelector('#review-reason').value, expected_version:item.version, idempotency_key:crypto.randomUUID()})});
       showToast('提案已拒绝，当前流程已结束'); await route();
     } catch (error) { showApiError(error, document.querySelector('#review-error')); }
   });

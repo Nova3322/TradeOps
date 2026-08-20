@@ -924,21 +924,13 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
 
             await logout(client)
             await login(client, "reviewer-1")
-            first_grant = await client.post(
-                "/api/auth/mock/step-up",
-                json={
-                    "action": "proposal.approve",
-                    "object_id": proposal_id,
-                    "object_version": first_version,
-                },
-            )
             first_review = await client.post(
                 f"/api/proposals/{proposal_id}/reviews",
                 json={
                     "decision": "APPROVE",
                     "reason": "first independent review",
                     "expected_version": first_version,
-                    "action_grant": first_grant.json()["action_grant"],
+                    "idempotency_key": "high-risk-first-review",
                 },
             )
             assert first_review.status_code == 200, first_review.text
@@ -959,21 +951,13 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
 
             await logout(client)
             await login(client, "reviewer-2")
-            second_grant = await client.post(
-                "/api/auth/mock/step-up",
-                json={
-                    "action": "proposal.approve",
-                    "object_id": proposal_id,
-                    "object_version": current_version,
-                },
-            )
             second_review = await client.post(
                 f"/api/proposals/{proposal_id}/reviews",
                 json={
                     "decision": "APPROVE",
                     "reason": "second independent review",
                     "expected_version": current_version,
-                    "action_grant": second_grant.json()["action_grant"],
+                    "idempotency_key": "high-risk-second-review",
                 },
             )
             assert second_review.status_code == 200, second_review.text
@@ -988,7 +972,172 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
     asyncio.run(scenario())
 
 
-def test_password_step_up_issues_production_compatible_review_grant(
+def test_session_review_keeps_auth_rbac_scope_version_and_identity_fail_closed(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    scoped_account_id = "scope-acct-2"
+    add_exchange_account_fixture(
+        database,
+        ids["admin"],
+        scoped_account_id,
+        "BINANCE",
+        environment="TESTNET",
+    )
+    service.assign_role(
+        ids["proposer"],
+        Role.PROPOSER,
+        ids["admin"],
+        scoped_account_id,
+        "BINANCE",
+        now=now,
+    )
+    scope_proposal_id = service.create_proposal(
+        actor_id=ids["proposer"],
+        source=ProposalSource.MANUAL,
+        risk_tier=RiskTier.LOW,
+        account_id=scoped_account_id,
+        venue="BINANCE",
+        instrument_id=ids["instrument"],
+        direction=Direction.LONG,
+        quantity=Decimal("0.001"),
+        max_risk=Decimal("1"),
+        expires_at=now + timedelta(hours=2),
+        idempotency_key="scope-mismatch-proposal",
+        environment=ExecutionEnvironment.TESTNET,
+        now=now,
+    )
+    service.submit_proposal(scope_proposal_id, ids["proposer"], now=now)
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, MockTelegramGateway())),
+            base_url="http://test",
+        ) as client:
+            await login(client, "proposer")
+            created = await client.post(
+                "/api/proposals/manual",
+                json={
+                    "environment": "TESTNET",
+                    "account_id": "acct-1",
+                    "venue": "BINANCE",
+                    "instrument_id": str(ids["instrument"]),
+                    "direction": "LONG",
+                    "risk_tier": "HIGH",
+                    "quantity": "0.001",
+                    "max_risk": "1",
+                    "expires_in_minutes": 480,
+                    "trigger_price": "120000",
+                    "invalidation_price": "118000",
+                    "rationale": "exercise session review fail-closed boundaries",
+                    "idempotency_key": "session-review-boundaries",
+                },
+            )
+            assert created.status_code == 200, created.text
+            proposal_id = created.json()["proposal_id"]
+            original_version = created.json()["version"]
+            payload = {
+                "decision": "APPROVE",
+                "reason": "independent session review",
+                "expected_version": original_version,
+                "idempotency_key": "unauthenticated-review",
+            }
+
+            await logout(client)
+            unauthenticated = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json=payload,
+            )
+            assert unauthenticated.status_code == 401, unauthenticated.text
+
+            await login(client, "proposer")
+            self_review = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={**payload, "idempotency_key": "self-review"},
+            )
+            assert self_review.status_code == 403, self_review.text
+            assert self_review.json()["error"]["code"] == "SELF_REVIEW_FORBIDDEN"
+
+            await logout(client)
+            await login(client, "operator")
+            insufficient_role = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={**payload, "idempotency_key": "operator-review"},
+            )
+            assert insufficient_role.status_code == 403, insufficient_role.text
+            assert insufficient_role.json()["error"]["code"] == "RBAC_DENIED"
+
+            await logout(client)
+            await login(client, "reviewer-1")
+            scope_mismatch = await client.post(
+                f"/api/proposals/{scope_proposal_id}/reviews",
+                json={
+                    "decision": "REJECT",
+                    "reason": "must not cross the exact account scope",
+                    "expected_version": 2,
+                    "idempotency_key": "scope-mismatch-review",
+                },
+            )
+            assert scope_mismatch.status_code == 403, scope_mismatch.text
+            assert scope_mismatch.json()["error"]["code"] == "RBAC_DENIED"
+
+            first = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={**payload, "idempotency_key": "first-session-review"},
+            )
+            assert first.status_code == 200, first.text
+            assert first.json()["status"] == "PENDING_REVIEW"
+            current_version = first.json()["detail"]["version"]
+
+            duplicate = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={
+                    **payload,
+                    "expected_version": current_version,
+                    "idempotency_key": "duplicate-session-review",
+                },
+            )
+            assert duplicate.status_code == 409, duplicate.text
+            assert duplicate.json()["error"]["code"] == "REVIEW_ALREADY_RECORDED"
+
+            await logout(client)
+            await login(client, "reviewer-2")
+            stale = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={**payload, "idempotency_key": "stale-session-review"},
+            )
+            assert stale.status_code == 409, stale.text
+            assert stale.json()["error"]["code"] == "VERSION_CONFLICT"
+
+            second = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={
+                    **payload,
+                    "expected_version": current_version,
+                    "idempotency_key": "second-session-review",
+                },
+            )
+            assert second.status_code == 200, second.text
+            assert second.json()["status"] == "APPROVED"
+
+        with database.session_factory() as session:
+            reviewers = session.scalars(
+                select(AuditEvent.actor_id).where(
+                    AuditEvent.event_type == "PROPOSAL_REVIEWED",
+                    AuditEvent.object_id == proposal_id,
+                )
+            ).all()
+            assert len(reviewers) == 2
+            assert set(reviewers) == {
+                str(ids["reviewer_one"]),
+                str(ids["reviewer_two"]),
+            }
+
+    asyncio.run(scenario())
+
+
+def test_authenticated_reviewer_approves_without_password_step_up(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
@@ -1019,8 +1168,8 @@ def test_password_step_up_issues_production_compatible_review_grant(
                     "expires_in_minutes": 480,
                     "trigger_price": "120000",
                     "invalidation_price": "118000",
-                    "rationale": "verify password step-up before an independent review",
-                    "idempotency_key": "password-step-up-proposal",
+                    "rationale": "verify the authenticated reviewer session is sufficient",
+                    "idempotency_key": "session-review-proposal",
                 },
             )
             assert created.status_code == 200, created.text
@@ -1033,38 +1182,13 @@ def test_password_step_up_issues_production_compatible_review_grant(
                 json={"username": "reviewer-1", "password": reviewer_password},
             )
             assert password_login.status_code == 200, password_login.text
-            invalid = await client.post(
-                "/api/auth/step-up",
-                json={
-                    "action": "proposal.approve",
-                    "object_id": proposal_id,
-                    "object_version": version,
-                    "password": "incorrect-reviewer-password",
-                },
-            )
-            assert invalid.status_code == 422, invalid.text
-            assert invalid.json()["error"]["code"] == "STEP_UP_PASSWORD_INVALID"
-            assert (await client.get("/api/auth/session")).status_code == 200
-
-            grant = await client.post(
-                "/api/auth/step-up",
-                json={
-                    "action": "proposal.approve",
-                    "object_id": proposal_id,
-                    "object_version": version,
-                    "password": reviewer_password,
-                },
-            )
-            assert grant.status_code == 200, grant.text
-            assert grant.json()["authentication_method"] == "PASSWORD"
-            assert reviewer_password not in grant.text
             reviewed = await client.post(
                 f"/api/proposals/{proposal_id}/reviews",
                 json={
                     "decision": "APPROVE",
-                    "reason": "password-authenticated independent review",
+                    "reason": "session-authenticated independent review",
                     "expected_version": version,
-                    "action_grant": grant.json()["action_grant"],
+                    "idempotency_key": "session-authenticated-review",
                 },
             )
             assert reviewed.status_code == 200, reviewed.text
