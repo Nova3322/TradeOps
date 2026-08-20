@@ -1113,6 +1113,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
 .dialog-actions { justify-content: flex-end; margin-top: 18px; }
 .dialog-form > label { margin-top: 16px; }
 .confirm-message { color: var(--muted); line-height: 1.65; margin: 18px 0 0; }
+.confirm-password-field { margin-top: 16px; }
 .toast { position: fixed; right: 20px; bottom: 20px; max-width: 380px; padding: 13px 16px; border-radius: 11px; background: var(--ink); color: var(--panel); box-shadow: var(--testnet); transform: translateY(120px); opacity: 0; transition: .2s ease; z-index: 30; font-size: 13px; }
 .toast.show { transform: translateY(0); opacity: 1; }
 .toast.error { background: var(--danger); color: #fff; }

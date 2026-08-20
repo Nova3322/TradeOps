@@ -260,6 +260,8 @@ const apiErrorGuidance = {
   PASSWORD_UNCHANGED:'新密码必须与当前密码不同。',
   AUTH_VERSION_CONFLICT:'登录身份已变化，请刷新页面后重新验证。',
   PASSWORD_AUTH_REQUIRED:'当前会话不是密码登录，请使用密码重新登录后修改。',
+  STEP_UP_PASSWORD_INVALID:'当前账户密码不正确，本次操作未执行。',
+  STEP_UP_RATE_LIMITED:'密码验证尝试过多，请稍后再试；本次操作未执行。',
   AGENT_TOKEN_INVALID:'该 API Key 已失效、已轮换或不匹配。请使用当前凭证。',
   AGENT_TOKEN_EXPIRED:'该 API Key 已到期。请在网页中轮换凭证。',
   API_CLIENT_RATE_LIMITED:'该 API Key 请求过于频繁，请稍后重试。',

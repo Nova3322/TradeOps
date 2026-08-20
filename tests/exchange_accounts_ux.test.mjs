@@ -34,10 +34,10 @@ test('production account cards expose the exact-account detail workflow', () => 
   );
   assert.match(routerSource, /venueAccountMatch = path\.match\(\/\^\\\/venues\\\/\(\[\^\/\]\+\)\$\/\)/);
   assert.match(routerSource, /renderVenueAccountDetail\(venueAccountMatch\[1\]\)/);
-  assert.match(indexSource, /execution\.js\?v=193/);
-  assert.match(indexSource, /shared\.js\?v=15/);
+  assert.match(indexSource, /execution\.js\?v=194/);
+  assert.match(indexSource, /shared\.js\?v=16/);
   assert.match(indexSource, /accounts\.js\?v=182/);
-  assert.match(serviceWorkerSource, /trading-shell-v228/);
+  assert.match(serviceWorkerSource, /trading-shell-v229/);
 });
 
 test('standard Binance account mode is rendered as known product truth', () => {

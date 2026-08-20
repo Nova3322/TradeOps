@@ -365,12 +365,24 @@ async function renderProposalDetail(id) {
 const definition = (label, value) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value ?? '—')}</dd></div>`;
 
 async function approveProposal(item, button) {
-  const confirmed = await confirmAction({title:'批准这份冻结提案？', message:'系统将记录你的一次独立批准。高风险提案仍可能需要另一名审核人；这不会运行风险检查、签发交易授权、创建订单或下单。', confirmLabel:'确认批准'});
-  if (!confirmed) return;
   const errorBox = document.querySelector('#review-error');
+  let grant;
+  try {
+    grant = await confirmStepUpAction({
+      title:'批准这份冻结提案？',
+      message:'系统将记录你的一次独立批准。高风险提案仍可能需要另一名审核人；这不会运行风险检查、签发交易授权、创建订单或下单。',
+      confirmLabel:'验证身份并批准',
+      action:'proposal.approve',
+      objectId:item.proposal_id,
+      objectVersion:item.version,
+    });
+  } catch (error) {
+    showApiError(error, errorBox);
+    return;
+  }
+  if (!grant) return;
   await withPending(button, '提交中…', async () => {
     try {
-      const grant = await api('/api/auth/mock/step-up', {method:'POST', body:JSON.stringify({action:'proposal.approve', object_id:item.proposal_id, object_version:item.version})});
       await api(`/api/proposals/${item.proposal_id}/reviews`, {method:'POST', body:JSON.stringify({decision:'APPROVE', reason:document.querySelector('#review-reason').value, expected_version:item.version, action_grant:grant.action_grant})});
       showToast('审核结果已记录'); await route();
     } catch (error) { showApiError(error, errorBox); }

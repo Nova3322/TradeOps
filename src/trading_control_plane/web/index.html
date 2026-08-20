@@ -23,7 +23,7 @@
     <link rel="preload" href="/assets/fonts/IBMPlexSansSC-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/assets/fonts/IBMPlexMono-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="/assets/styles-base.css?v=20">
+    <link rel="stylesheet" href="/assets/styles-base.css?v=21">
     <link rel="stylesheet" href="/assets/styles-components.css?v=22">
     <link rel="stylesheet" href="/assets/styles-api-access.css?v=3">
     <link rel="stylesheet" href="/assets/styles-shell.css?v=13">
@@ -183,6 +183,10 @@
           <button type="submit" value="cancel" class="icon-button" aria-label="取消并关闭">×</button>
         </div>
         <p id="confirm-message" class="confirm-message"></p>
+        <label id="confirm-password-field" class="confirm-password-field" hidden>当前账户密码
+          <input id="confirm-password" name="confirm_password" type="password" autocomplete="current-password" minlength="12" maxlength="128">
+          <span class="field-help">用于本次操作的身份二次验证；不会保存。</span>
+        </label>
         <div class="dialog-actions">
           <button type="submit" value="cancel" class="secondary">取消</button>
           <button id="confirm-submit" type="submit" value="confirm" class="danger">确认并继续</button>
@@ -191,16 +195,16 @@
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <script defer src="/assets/app-state.js?v=5"></script>
-    <script defer src="/assets/i18n.js?v=57"></script>
-    <script defer src="/assets/shared.js?v=15"></script>
+    <script defer src="/assets/i18n.js?v=58"></script>
+    <script defer src="/assets/shared.js?v=16"></script>
     <script defer src="/assets/session.js?v=3"></script>
     <script defer src="/assets/api-client.js?v=5"></script>
-    <script defer src="/assets/app-shell.js?v=5"></script>
+    <script defer src="/assets/app-shell.js?v=6"></script>
     <script defer src="/assets/workspace.js?v=185"></script>
     <script defer src="/assets/signals.js?v=193"></script>
-    <script defer src="/assets/proposals.js?v=182"></script>
-    <script defer src="/assets/risk.js?v=174"></script>
-    <script defer src="/assets/execution.js?v=193"></script>
+    <script defer src="/assets/proposals.js?v=183"></script>
+    <script defer src="/assets/risk.js?v=175"></script>
+    <script defer src="/assets/execution.js?v=194"></script>
     <script defer src="/assets/capital.js?v=198"></script>
     <script defer src="/assets/reporting.js?v=180"></script>
     <script defer src="/assets/accounts.js?v=182"></script>

@@ -517,13 +517,15 @@ async function renderCampaignFacts(mode) {
   }));
   document.querySelector('[data-unpause-new-risk]')?.addEventListener('click', async event => {
     const trigger = event.currentTarget;
-    const confirmed = await confirmAction({title:'解除风险暂停？', message:'系统会再次验证全部生产账户条件并创建新的 NORMAL 政策；旧交易授权不会恢复。', confirmLabel:'确认解除风险暂停'});
-    if (!confirmed) return;
+    let grant;
+    try {
+      const status = await api('/api/risk-controls');
+      const policy = status.policy;
+      grant = await confirmStepUpAction({title:'解除风险暂停？', message:'系统会再次验证全部生产账户条件并创建新的 NORMAL 政策；旧交易授权不会恢复。', confirmLabel:'验证身份并解除暂停', action:'risk.restore.direct', objectId:policy.policy_id, objectVersion:policy.revision});
+    } catch (error) { showApiError(error); return; }
+    if (!grant) return;
     await withPending(trigger, '验证中…', async () => {
       try {
-        const status = await api('/api/risk-controls');
-        const policy = status.policy;
-        const grant = await api('/api/auth/mock/step-up', {method:'POST', body:JSON.stringify({action:'risk.restore.direct', object_id:policy.policy_id, object_version:policy.revision})});
         await api('/api/risk-controls/restore-direct', {method:'POST', body:JSON.stringify({reason:'administrator resumed new risk from Web', idempotency_key:crypto.randomUUID(), action_grant:grant.action_grant})});
         showToast('风险暂停已解除；旧交易授权保持失效');
         await route();
