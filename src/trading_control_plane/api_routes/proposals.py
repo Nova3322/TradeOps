@@ -703,20 +703,8 @@ class _ProposalsRoutes:
                 if agent_call:
                     raise DomainRejected(
                         "HUMAN_WEB_CONFIRMATION_REQUIRED",
-                        "proposal approval requires the owner to complete step-up in the web UI",
+                        "proposal approval requires an authenticated human web session",
                     )
-                if payload.action_grant is None:
-                    raise DomainRejected(
-                        "ACTION_GRANT_REQUIRED", "proposal approval requires action-level step-up"
-                    )
-                self.token_service.verify_action_grant(
-                    payload.action_grant,
-                    user_id=identity.user_id,
-                    action="proposal.approve",
-                    object_id=proposal_id,
-                    object_version=payload.expected_version,
-                    now=now,
-                )
             workflow_service = self.service()
             result = workflow_service.review_proposal(
                 proposal_id,
