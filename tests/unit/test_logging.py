@@ -22,6 +22,10 @@ def test_formatter_emits_allowlisted_context_only() -> None:
     record.account_id = "acct-1"
     record.capability = "watchBalance"
     record.attempt = 3
+    record.intents_selected = 1
+    record.intents_completed = 0
+    record.blocked_count = 1
+    record.blocked_codes = "RECONCILIATION_REQUIRED"
     record.secret = "must-not-leak"  # noqa: S105 - verifies secret-shaped fields are omitted
 
     payload = json.loads(JsonFormatter().format(record))
@@ -33,6 +37,10 @@ def test_formatter_emits_allowlisted_context_only() -> None:
     assert payload["account_id"] == "acct-1"
     assert payload["capability"] == "watchBalance"
     assert payload["attempt"] == 3
+    assert payload["intents_selected"] == 1
+    assert payload["intents_completed"] == 0
+    assert payload["blocked_count"] == 1
+    assert payload["blocked_codes"] == "RECONCILIATION_REQUIRED"
     assert "secret" not in payload
 
 

@@ -20,6 +20,14 @@ class JsonFormatter(logging.Formatter):
         "account_id",
         "capability",
         "attempt",
+        "capital_facts_refreshed",
+        "risk_decisions_refreshed",
+        "proposals_advanced",
+        "intents_selected",
+        "intents_completed",
+        "reconciliations_completed",
+        "blocked_count",
+        "blocked_codes",
     )
 
     def format(self, record: logging.LogRecord) -> str:
