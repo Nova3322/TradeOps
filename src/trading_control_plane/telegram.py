@@ -39,6 +39,13 @@ class ProposalNotification:
     risk_tier: str | None = None
     quantity: str | None = None
     max_risk: str | None = None
+    account_id: str | None = None
+    venue: str | None = None
+    order_type: str | None = None
+    estimated_notional: str | None = None
+    quote_currency: str | None = None
+    collateral_currency: str | None = None
+    leverage: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +90,14 @@ class TelegramProposalReviewAction:
     risk_tier: str | None = None
     max_risk: str | None = None
     expires_at: str | None = None
+    account_id: str | None = None
+    venue: str | None = None
+    order_type: str | None = None
+    quantity: str | None = None
+    estimated_notional: str | None = None
+    quote_currency: str | None = None
+    collateral_currency: str | None = None
+    leverage: str | None = None
 
 
 @dataclass(frozen=True)
@@ -183,9 +198,16 @@ def render_proposal_notification(notification: ProposalNotification) -> str:
         f"<b>截止</b>　{_format_deadline(notification.expires_at)}",
         f"<b>币对 / 方向</b>　{_optional(notification.symbol)} / "
         f"{_labeled_code(notification.direction, _DIRECTION_LABELS)}",
+        f"<b>账户 / 场所</b>　{_optional(notification.account_id)} / "
+        f"{_optional(notification.venue)}",
+        f"<b>订单</b>　{_optional(notification.order_type)} · 数量 "
+        f"{_optional(notification.quantity)}",
+        f"<b>预计名义价值 / 杠杆</b>　{_optional(notification.estimated_notional)} "
+        f"{_optional(notification.quote_currency, fallback='')} · "
+        f"{_optional(notification.leverage)}x",
         f"<b>风险</b>　{_labeled_code(notification.risk_tier, _RISK_LABELS)}"
-        f" · 最大风险 {_optional(notification.max_risk)}",
-        f"<b>数量</b>　{_optional(notification.quantity)}",
+        f" · 最大风险 {_optional(notification.max_risk)} "
+        f"{_optional(notification.collateral_currency, fallback='')}",
     ]
     summary = _escaped(notification.summary, max_length=1_800)
     return _ensure_message_limit(
@@ -208,7 +230,8 @@ def render_help() -> str:
         "• 对当前冻结提案批准或拒绝\n"
         "• 每次操作都需要第二次明确确认并写入统一审计\n\n"
         "<b>明确不支持</b>\n"
-        "• 不看资金、不下单、不划转资金\n"
+        "• Bot 本身不看资金、不调用交易所、不划转资金\n"
+        "• 批准达到阈值后，TradeOps 后台按实时风控和 Gate 自动执行，不再要求后续按钮\n"
         "• 不切换风险 Gate、不改成员权限\n"
         "• 不绕过创建者不可自审、对象版本、到期和服务端权限校验"
     )
@@ -220,7 +243,8 @@ def render_status() -> str:
         "<b>会话</b>　仅限已绑定的内部成员私聊\n"
         "<b>动作</b>　冻结提案批准 / 拒绝，必须二次确认\n"
         "<b>复核</b>　服务端重新检查身份、独立审核、版本与到期\n"
-        "<b>禁止</b>　资金、订单、风险开关、权限变更\n"
+        "<b>边界</b>　Bot 只写审核结论；TradeOps 后台按风控和 Gate 自动执行交易\n"
+        "<b>禁止</b>　资金动作、风险开关、权限变更\n"
         "<b>权威状态</b>　以 Trading Web 与 PostgreSQL 为准\n\n"
         "此状态不会显示余额、密钥、Token、私钥或地址。"
     )
@@ -402,7 +426,10 @@ class TelegramBotGateway(MockTelegramGateway):
         "REJECT_PROPOSAL": "拒绝冻结提案",
     }
     _ACTION_IMPACTS: ClassVar[dict[str, str]] = {
-        "APPROVE_PROPOSAL": "记录一次独立批准。仍需风险检查、短期授权和交易 Gate；不会下单。",
+        "APPROVE_PROPOSAL": (
+            "记录一次独立批准。达到审核阈值且实时风控、短期授权和交易 Gate 全部通过后，"
+            "TradeOps 会自动预留风险、调用 Freqtrade、查询成交并对账；不再要求后续按钮。"
+        ),
         "REJECT_PROPOSAL": "拒绝并终止当前冻结提案；不会创建订单或资金动作。",
     }
     _COMMANDS: ClassVar[list[dict[str, str]]] = [
@@ -536,6 +563,14 @@ class TelegramBotGateway(MockTelegramGateway):
                     risk_tier=notification.risk_tier,
                     max_risk=notification.max_risk,
                     expires_at=notification.expires_at,
+                    account_id=notification.account_id,
+                    venue=notification.venue,
+                    order_type=notification.order_type,
+                    quantity=notification.quantity,
+                    estimated_notional=notification.estimated_notional,
+                    quote_currency=notification.quote_currency,
+                    collateral_currency=notification.collateral_currency,
+                    leverage=notification.leverage,
                 )
                 rows.append([{"text": label, "callback_data": callback_key}])
             rows.append([{"text": "查看完整冻结快照", "url": notification.review_url}])
@@ -1009,8 +1044,13 @@ class TelegramBotGateway(MockTelegramGateway):
             f"<b>结论</b>　{_escaped(self._ACTION_LABELS[action.action])}\n"
             f"<b>币对 / 方向</b>　{_optional(action.symbol)} / "
             f"{_labeled_code(action.direction, _DIRECTION_LABELS)}\n"
+            f"<b>账户 / 场所</b>　{_optional(action.account_id)} / {_optional(action.venue)}\n"
+            f"<b>订单</b>　{_optional(action.order_type)} · 数量 {_optional(action.quantity)}\n"
+            f"<b>预计名义价值 / 杠杆</b>　{_optional(action.estimated_notional)} "
+            f"{_optional(action.quote_currency, fallback='')} · {_optional(action.leverage)}x\n"
             f"<b>风险</b>　{_labeled_code(action.risk_tier, _RISK_LABELS)}"
-            f" · 最大风险 {_optional(action.max_risk)}\n"
+            f" · 最大风险 {_optional(action.max_risk)} "
+            f"{_optional(action.collateral_currency, fallback='')}\n"
             f"<b>截止</b>　{_format_deadline(action.expires_at)}\n"
             f"<b>对象</b>　提案 <code>{_short_id(action.proposal_id)}</code>\n"
             f"<b>环境 / 版本</b>　<code>{_escaped(action.environment)}</code> "
@@ -1045,7 +1085,12 @@ class TelegramBotGateway(MockTelegramGateway):
             f"<b>对象</b>　提案 <code>{_short_id(action.proposal_id)}</code>\n"
             f"<b>提交版本</b>　v{action.proposal_version}\n\n"
             f"{result_text}\n\n"
-            "按钮已失效。批准提案不代表风险检查通过、授权已签发或订单已创建。"
+            + (
+                "按钮已失效。批准达到阈值后，TradeOps 会自动运行风控、授权、风险预留、"
+                "Freqtrade 执行、成交查询和对账；事实、权限或 Gate 不满足时保持阻断。"
+                if action.action == "APPROVE_PROPOSAL"
+                else "按钮已失效。当前冻结提案已按权威服务端结果结束。"
+            )
         )
 
     def _edit_message(

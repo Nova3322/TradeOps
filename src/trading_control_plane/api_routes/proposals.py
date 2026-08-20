@@ -672,7 +672,19 @@ class _ProposalsRoutes:
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
             self.require_capability(identity, "proposal.view")
-            return self.queries().proposal_detail(identity.user_id, proposal_id, now=_now())
+            detail = self.queries().proposal_detail(identity.user_id, proposal_id, now=_now())
+            detail["execution_preview"] = {
+                "account_id": detail["account_id"],
+                "venue": detail["venue"],
+                "symbol": detail["symbol"],
+                "side": "BUY" if detail["direction"] == "LONG" else "SELL",
+                "order_type": "MARKET",
+                "quantity": detail["quantity"],
+                "estimated_notional": detail["estimated_notional"],
+                "quote_currency": detail["quote_currency"],
+                "leverage": str(self.resolved_settings.freqtrade_live_leverage),
+            }
+            return detail
 
         @self.app.post("/api/proposals/{proposal_id}/reviews")
         def review_proposal(
