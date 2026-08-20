@@ -44,7 +44,8 @@
       "enableRateLimit": true
     },
     "pair_whitelist": [
-      "SOL/USDT:USDT"
+      "SOL/USDT:USDT",
+      "AVA/USDT:USDT"
     ],
     "pair_blacklist": []
   },
