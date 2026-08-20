@@ -31,6 +31,7 @@ from trading_control_plane.domain import (
     Role,
 )
 from trading_control_plane.models import (
+    AccountEquity,
     AccountEquityObservation,
     Approval,
     AuditEvent,
@@ -864,6 +865,17 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
             refreshed = await client.get("/api/capital")
             assert refreshed.status_code == 200, refreshed.text
             assert refreshed.json()["data"]["net_worth"]["onchain_probe"]["status"] == ("SUCCESS")
+            with database.session_factory() as session:
+                safe_equity = session.scalar(
+                    select(AccountEquity).where(
+                        AccountEquity.location_type == "VAULT",
+                        AccountEquity.account_id
+                        == "0x7777777777777777777777777777777777777777",
+                        AccountEquity.currency == "USDC",
+                    )
+                )
+                assert safe_equity is not None
+                assert safe_equity.control_status == "CONTROLLED"
 
             await _login(client, "safe-provider-treasury")
             created = await client.post(
@@ -978,6 +990,52 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
         events = set(session.scalars(select(AuditEvent.event_type)).all())
     assert "CAPITAL_SAFE_SPENDING_PREVIEW_PREPARED" in events
     assert "CAPITAL_HUMAN_WALLET_SUBMISSION_RECORDED" in events
+
+
+def test_safe_snapshot_is_controlled_only_while_allowance_module_is_enabled(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    now = datetime.now(UTC).replace(microsecond=0)
+    admin = service.bootstrap_admin("safe-control-admin", now=now)
+    safe_address = "0x7777777777777777777777777777777777777777"
+
+    service.record_safe_spending_snapshot(
+        actor_id=admin,
+        safe_address=safe_address,
+        asset="USDC",
+        balance=Decimal("90"),
+        available_limit=Decimal("80"),
+        module_enabled=True,
+        observed_at=now,
+        now=now,
+    )
+    with database.session_factory() as session:
+        fact = session.scalar(
+            select(AccountEquity).where(AccountEquity.account_id == safe_address)
+        )
+        assert fact is not None
+        assert fact.control_status == "CONTROLLED"
+        assert fact.withdrawable_balance == Decimal("80")
+
+    later = now + timedelta(seconds=1)
+    service.record_safe_spending_snapshot(
+        actor_id=admin,
+        safe_address=safe_address,
+        asset="USDC",
+        balance=Decimal("90"),
+        available_limit=Decimal("80"),
+        module_enabled=False,
+        observed_at=later,
+        now=later,
+    )
+    with database.session_factory() as session:
+        fact = session.scalar(
+            select(AccountEquity).where(AccountEquity.account_id == safe_address)
+        )
+        assert fact is not None
+        assert fact.control_status == "READ_ONLY"
+        assert fact.withdrawable_balance == 0
 
 
 def test_vault_and_safe_configurations_persist_while_current_provider_switches(

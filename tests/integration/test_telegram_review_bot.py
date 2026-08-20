@@ -14,7 +14,7 @@ from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import Role
-from trading_control_plane.models import AuditEvent, OrderIntent, TradingAuthorization
+from trading_control_plane.models import AuditEvent, OrderIntent, RiskDecision, TradingAuthorization
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
@@ -40,8 +40,24 @@ def test_telegram_review_confirmation_writes_audit_without_authorization_or_orde
     add_exchange_account_fixture(service.database, admin, "acct-1", "BINANCE")
     proposer = service.create_user("telegram-proposer", admin, now=now)
     reviewer = service.create_user("telegram-reviewer", admin, now=now)
+    runtime_sync = service.create_service_principal("runtime-sync", admin, now=now)
     service.assign_role(proposer, Role.PROPOSER, admin, now=now)
     service.assign_role(reviewer, Role.REVIEWER, admin, now=now)
+    service.assign_role(runtime_sync, Role.OPERATOR, admin, now=now)
+    service.configure_risk_policy(
+        actor_id=admin,
+        version="telegram-auto-risk-v1",
+        max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("50"),
+        max_single_loss=Decimal("10"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
+        max_fact_age=timedelta(minutes=5),
+        expected_revision=0,
+        reason="exercise automatic risk after Telegram review",
+        idempotency_key="telegram-auto-risk-policy",
+        now=now,
+    )
     instrument_id = service.register_instrument(
         actor_id=admin,
         venue="BINANCE",
@@ -161,5 +177,9 @@ def test_telegram_review_confirmation_writes_audit_without_authorization_or_orde
     with database.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(TradingAuthorization)) == 0
         assert session.scalar(select(func.count()).select_from(OrderIntent)) == 0
+        risk = session.scalar(select(RiskDecision).where(RiskDecision.proposal_id == proposal_id))
+        assert risk is not None
+        assert risk.actor_id == str(runtime_sync)
         events = set(session.scalars(select(AuditEvent.event_type)).all())
     assert "PROPOSAL_REVIEWED" in events
+    assert "RISK_DECIDED" in events

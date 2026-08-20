@@ -140,7 +140,7 @@ class NoTiltCapitalService(ServiceComponent):
         observed_at: datetime,
         now: datetime,
     ) -> UUID:
-        """Persist one read-only Safe balance as the selected on-chain treasury fact."""
+        """Persist one Safe balance and its on-chain spending-limit control state."""
         if balance < 0 or available_limit < 0:
             rejections.reject(
                 "SAFE_FACT_INVALID", "Safe balance and spending limit cannot be negative"
@@ -166,6 +166,7 @@ class NoTiltCapitalService(ServiceComponent):
                 .with_for_update()
             )
             withdrawable = min(balance, available_limit) if module_enabled else Decimal(0)
+            control_status = "CONTROLLED" if module_enabled else "READ_ONLY"
             if fact is None:
                 fact = models.AccountEquity(
                     team_id=team.team_id,
@@ -177,7 +178,7 @@ class NoTiltCapitalService(ServiceComponent):
                     withdrawable_balance=withdrawable,
                     currency=normalized_asset,
                     location_type="VAULT",
-                    control_status="READ_ONLY",
+                    control_status=control_status,
                     deposit_status="READY",
                     network="ARBITRUM",
                     address_reference=safe_address,
@@ -196,7 +197,7 @@ class NoTiltCapitalService(ServiceComponent):
                 fact.available_balance = balance
                 fact.withdrawable_balance = withdrawable
                 fact.location_type = "VAULT"
-                fact.control_status = "READ_ONLY"
+                fact.control_status = control_status
                 fact.deposit_status = "READY"
                 fact.network = "ARBITRUM"
                 fact.address_reference = safe_address
@@ -223,8 +224,9 @@ class NoTiltCapitalService(ServiceComponent):
                     object_type="AccountEquity",
                     object_id=fact.account_equity_id,
                     reason=(
-                        "read-only Safe Spending Limits treasury snapshot; "
+                        "Safe Spending Limits treasury snapshot; "
                         f"module_enabled={str(module_enabled).lower()}; "
+                        f"control_status={control_status}; "
                         "signing=false; broadcast=false"
                     ),
                     correlation_id=uuid4(),

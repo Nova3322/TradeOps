@@ -21,3 +21,12 @@ test('production approval requests current-password step-up instead of the mock-
   assert.match(sharedSource, /STEP_UP_PASSWORD_INVALID:/);
   assert.match(sharedSource, /STEP_UP_RATE_LIMITED:/);
 });
+
+test('proposal approval delegates the initial risk check to the server', () => {
+  assert.match(proposalSource, /达到所需审批票数后会自动运行风控/);
+  assert.match(
+    proposalSource,
+    /const canRunRisk =[^;]+\(riskDenied \|\| needsFreshRisk\)/,
+  );
+  assert.doesNotMatch(proposalSource, /canRunRisk =[^;]+!riskDone/);
+});
