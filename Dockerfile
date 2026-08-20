@@ -11,6 +11,7 @@ FROM python:3.12.11-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
+    UV_HTTP_TIMEOUT=300 \
     UV_CACHE_DIR=/tmp/uv-cache \
     UV_LINK_MODE=copy
 
