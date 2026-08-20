@@ -287,8 +287,11 @@ class _AccountsRoutes:
             else:
                 assert binding is not None
                 worker = self.freqtrade_client_for_binding(binding)
+                probe_result = None
                 try:
-                    worker.probe(expected_mode=binding.worker_mode)  # type: ignore[arg-type]
+                    probe_result = worker.probe(
+                        expected_mode=binding.worker_mode,  # type: ignore[arg-type]
+                    )
                     error_code = None
                 except DomainRejected as exc:
                     error_code = exc.code
@@ -298,6 +301,7 @@ class _AccountsRoutes:
                     error_code=error_code,
                     idempotency_key=payload.idempotency_key,
                     now=_now(),
+                    probe_result=probe_result,
                 )
             return {
                 **result,

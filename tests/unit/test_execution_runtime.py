@@ -317,6 +317,92 @@ def test_worker_keeps_nonmatching_sender_takeover_query_only_on_cooldown(
     assert dispatches == []
 
 
+def test_worker_publishes_separate_process_and_freqtrade_health() -> None:
+    worker = object.__new__(AutomaticExecutionWorker)
+    now = datetime(2026, 8, 20, tzinfo=UTC)
+    principal_id = uuid4()
+    binding = SimpleNamespace(
+        service_principal_id=principal_id,
+        worker_mode="LIVE",
+        account_id="acct-1",
+        venue="BINANCE",
+    )
+    recorded: list[tuple[object, object, object]] = []
+
+    class Service:
+        @staticmethod
+        def runtime_freqtrade_worker_bindings(*, verified_only: bool) -> tuple[object, ...]:
+            assert verified_only is False
+            return (binding,)
+
+        @staticmethod
+        def record_freqtrade_runtime_probe(
+            current: object,
+            *,
+            probe_result: object,
+            error_code: object,
+            now: datetime,
+        ) -> None:
+            assert current is binding
+            assert probe_result == {"status": "READY"}
+            assert error_code is None
+            assert now == datetime(2026, 8, 20, tzinfo=UTC)
+
+        @staticmethod
+        def record_runtime_source_health(
+            actor_id: object,
+            sources: object,
+            *,
+            scopes: object,
+            now: datetime,
+        ) -> None:
+            assert now == datetime(2026, 8, 20, tzinfo=UTC)
+            recorded.append((actor_id, sources, scopes))
+
+    worker.settings = SimpleNamespace(runtime_sync_interval_seconds=60)
+    worker.service = Service()
+    worker.worker_factory = lambda _binding: SimpleNamespace(
+        probe=lambda **_kwargs: {"status": "READY"}
+    )
+
+    assert worker._refresh_worker_health(now=now) == {}
+    assert recorded == [
+        (
+            principal_id,
+            {
+                "EXECUTION_WORKER": {
+                    "status": "SUCCESS",
+                    "items_observed": 1,
+                    "error_code": None,
+                },
+                "FREQTRADE_WORKER": {
+                    "status": "SUCCESS",
+                    "items_observed": 1,
+                    "error_code": None,
+                },
+            },
+            {
+                "EXECUTION_WORKER": ("acct-1", "BINANCE"),
+                "FREQTRADE_WORKER": ("acct-1", "BINANCE"),
+            },
+        )
+    ]
+
+
+def test_worker_binding_error_is_cycle_blocker_not_process_exit() -> None:
+    worker = object.__new__(AutomaticExecutionWorker)
+    worker.settings = SimpleNamespace(runtime_sync_interval_seconds=60)
+    worker.service = SimpleNamespace(
+        runtime_freqtrade_worker_bindings=lambda **_kwargs: (_ for _ in ()).throw(
+            DomainRejected("FREQTRADE_RUNTIME_BINDING_INVALID", "invalid")
+        )
+    )
+
+    assert worker._refresh_worker_health(
+        now=datetime(2026, 8, 20, tzinfo=UTC)
+    ) == {"FREQTRADE_RUNTIME_BINDING_INVALID": 1}
+
+
 def test_execution_worker_requires_both_process_switches() -> None:
     worker = object.__new__(AutomaticExecutionWorker)
     worker.settings = SimpleNamespace(

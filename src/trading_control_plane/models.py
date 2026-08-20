@@ -323,6 +323,12 @@ class ExchangeAccount(Base):
     freqtrade_auth_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     freqtrade_hip3_dexes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     freqtrade_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    freqtrade_runtime_fingerprint: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    freqtrade_runtime_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
     freqtrade_last_check_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -2113,6 +2119,21 @@ class OrderIntent(Base):
     dispatch_fencing_token: Mapped[int | None] = mapped_column(Integer, nullable=True)
     dispatch_external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     dispatch_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    execution_blocker_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    execution_blocker_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_blocker_component: Mapped[str | None] = mapped_column(
+        String(120), nullable=True
+    )
+    execution_blocker_next_action: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_blocked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    execution_last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    execution_retry_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)

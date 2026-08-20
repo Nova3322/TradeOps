@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC
+
 from trading_control_plane.api_core import (
     UUID,
     AccountEquityFactRequest,
@@ -986,30 +988,109 @@ class _ExecutionRoutes:
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
             self.require_capability(identity, "system.view")
-            workers = unbound_worker_status(
-                self.resolved_freqtrade_workers,
-                workers_enabled=self.resolved_settings.freqtrade_workers_enabled,
+            now = _now()
+            runtime_snapshot = self.queries().runtime_snapshot(identity.user_id)
+            live_gate = runtime_snapshot["capability_gates"].get(
+                "LIVE_ORDER_SEND",
+                {"status": "UNKNOWN", "updated_at": None},
             )
             registry = self.queries().exchange_accounts(identity.user_id)
-            account_bindings = [
-                {
-                    "exchange_account_id": item["exchange_account_id"],
-                    "team_id": item["team_id"],
-                    "account_id": item["account_id"],
-                    "venue": item["venue"],
-                    **item["execution_worker"],
-                }
-                for item in registry["data"]
-                if item["execution_worker"]["supported"]
-            ]
+            account_bindings = []
+            heartbeat_current: list[bool] = []
+            for item in registry["data"]:
+                if not item["execution_worker"]["supported"]:
+                    continue
+                process_health = self.queries().runtime_source_health(
+                    identity.user_id,
+                    "EXECUTION_WORKER",
+                    account_id=item["account_id"],
+                    venue=item["venue"],
+                )
+                worker_health = self.queries().runtime_source_health(
+                    identity.user_id,
+                    "FREQTRADE_WORKER",
+                    account_id=item["account_id"],
+                    venue=item["venue"],
+                )
+                checked_at = (
+                    None if process_health is None else process_health.get("checked_at")
+                )
+                try:
+                    checked = (
+                        None
+                        if checked_at is None
+                        else datetime.fromisoformat(str(checked_at)).astimezone(UTC)
+                    )
+                except ValueError:
+                    checked = None
+                current = bool(
+                    process_health is not None
+                    and process_health.get("status") == "SUCCESS"
+                    and checked is not None
+                    and now - checked
+                    <= timedelta(
+                        seconds=max(
+                            90,
+                            self.resolved_settings.runtime_sync_interval_seconds * 3,
+                        )
+                    )
+                )
+                if item["execution_worker"]["configured"]:
+                    heartbeat_current.append(current)
+                account_bindings.append(
+                    {
+                        "exchange_account_id": item["exchange_account_id"],
+                        "team_id": item["team_id"],
+                        "account_id": item["account_id"],
+                        "venue": item["venue"],
+                        "runtime_health": {
+                            "status": (
+                                "HEALTHY"
+                                if worker_health is not None
+                                and worker_health.get("status") == "SUCCESS"
+                                and current
+                                else "DEGRADED"
+                            ),
+                            "checked_at": (
+                                None
+                                if worker_health is None
+                                else worker_health.get("checked_at")
+                            ),
+                            "error_code": (
+                                None
+                                if worker_health is None
+                                else worker_health.get("error_code")
+                            ),
+                        },
+                        **item["execution_worker"],
+                    }
+                )
+            process_status = (
+                "HEALTHY"
+                if heartbeat_current and all(heartbeat_current)
+                else "DEGRADED"
+                if heartbeat_current
+                else "UNKNOWN"
+            )
+            workers = unbound_worker_status(
+                self.resolved_freqtrade_workers,
+                workers_enabled=process_status == "HEALTHY",
+            )
             return {
                 "backend": "FREQTRADE",
-                "workers_enabled": self.resolved_settings.freqtrade_workers_enabled,
+                "workers_enabled": process_status == "HEALTHY",
+                "execution_worker": {
+                    "status": process_status,
+                    "configured_binding_count": len(heartbeat_current),
+                    "healthy_binding_count": sum(heartbeat_current),
+                },
                 "direct_venue_send": False,
-                "live_order_send": "DATABASE_GATE",
+                "live_order_send": live_gate["status"],
+                "live_order_send_updated_at": live_gate.get("updated_at"),
+                "gate_source": "DATABASE",
                 "workers": workers,
                 "account_bindings": account_bindings,
-                "as_of": _now().isoformat(),
+                "as_of": now.isoformat(),
             }
 
     def register_freqtrade(self) -> None:

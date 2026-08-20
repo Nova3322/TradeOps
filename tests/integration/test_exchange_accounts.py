@@ -49,6 +49,177 @@ from trading_control_plane.venue_read_only import (
 )
 
 
+def _runtime_probe(fingerprint: str, *, whitelist: list[str]) -> dict[str, object]:
+    return {
+        "status": "READY",
+        "runtime_fingerprint": fingerprint,
+        "whitelist": whitelist,
+        "exchange": "binance",
+        "trading_mode": "futures",
+        "dry_run": False,
+        "demo_trading": False,
+        "worker_state": "running",
+        "version": "2026.7",
+        "bot_name": "tradeops-binance-live",
+        "force_entry_enabled": True,
+        "position_adjustment_enabled": True,
+        "external_order_send": True,
+        "network": "LIVE",
+    }
+
+
+def test_freqtrade_runtime_fingerprint_change_invalidates_verified_binding(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("worker-fingerprint-admin", now=now)
+    account_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id="worker-fingerprint-account",
+        venue="BINANCE",
+        label="Worker Fingerprint",
+        credentials={"api_key": "account-key", "api_secret": "account-secret"},
+        idempotency_key="worker-fingerprint-account",
+        now=now,
+    )
+    configured = service.configure_exchange_account_freqtrade_worker(
+        account_id,
+        actor_id=admin,
+        mode="LIVE",
+        name="worker-fingerprint-live",
+        base_url="http://127.0.0.1:18091",
+        username="control-plane",
+        password="worker-password",  # noqa: S106
+        ws_token="worker-fingerprint-rpc-token",  # noqa: S106
+        hip3_dexes=(),
+        expected_version=1,
+        idempotency_key="worker-fingerprint-configure",
+        now=now,
+    )
+    unverified_binding, replay = service.prepare_exchange_account_freqtrade_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=int(configured["version"]),
+        idempotency_key="worker-fingerprint-runtime-unverified",
+    )
+    assert unverified_binding is not None and replay is None
+    assert (
+        service.record_freqtrade_runtime_probe(
+            unverified_binding,
+            probe_result=_runtime_probe("a" * 64, whitelist=["SOL/USDT:USDT"]),
+            error_code=None,
+            now=now,
+        )
+        == "FREQTRADE_WORKER_NOT_VERIFIED"
+    )
+    still_unverified = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert still_unverified["execution_worker"]["status"] == "NOT_VERIFIED"
+    assert still_unverified["execution_worker"]["runtime"]["fingerprint_verified"] is False
+    first_binding, replay = service.prepare_exchange_account_freqtrade_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=int(still_unverified["version"]),
+        idempotency_key="worker-fingerprint-verify-a",
+    )
+    assert first_binding is not None and replay is None
+    verified = service.record_exchange_account_freqtrade_verification(
+        first_binding,
+        actor_id=admin,
+        error_code=None,
+        idempotency_key="worker-fingerprint-verify-a",
+        now=now,
+        probe_result=_runtime_probe("a" * 64, whitelist=["SOL/USDT:USDT"]),
+    )
+    runtime_binding, replay = service.prepare_exchange_account_freqtrade_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=int(verified["version"]),
+        idempotency_key="worker-fingerprint-runtime-b",
+    )
+    assert runtime_binding is not None and replay is None
+    assert (
+        service.record_freqtrade_runtime_probe(
+            runtime_binding,
+            probe_result=None,
+            error_code="FREQTRADE_WORKER_UNAVAILABLE",
+            now=now + timedelta(milliseconds=250),
+        )
+        == "FREQTRADE_WORKER_UNAVAILABLE"
+    )
+    unavailable = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert unavailable["execution_worker"]["status"] == "VERIFIED"
+    assert (
+        unavailable["execution_worker"]["error_code"]
+        == "FREQTRADE_WORKER_UNAVAILABLE"
+    )
+    recovery_binding, replay = service.prepare_exchange_account_freqtrade_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=int(unavailable["version"]),
+        idempotency_key="worker-fingerprint-runtime-recovery",
+    )
+    assert recovery_binding is not None and replay is None
+    assert (
+        service.record_freqtrade_runtime_probe(
+            recovery_binding,
+            probe_result=_runtime_probe("a" * 64, whitelist=["SOL/USDT:USDT"]),
+            error_code=None,
+            now=now + timedelta(milliseconds=500),
+        )
+        is None
+    )
+    recovered = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert recovered["execution_worker"]["status"] == "VERIFIED"
+    assert recovered["execution_worker"]["error_code"] is None
+    changed_binding, replay = service.prepare_exchange_account_freqtrade_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=int(recovered["version"]),
+        idempotency_key="worker-fingerprint-runtime-changed",
+    )
+    assert changed_binding is not None and replay is None
+    error = service.record_freqtrade_runtime_probe(
+        changed_binding,
+        probe_result=_runtime_probe(
+            "b" * 64,
+            whitelist=["SOL/USDT:USDT", "AVA/USDT:USDT"],
+        ),
+        error_code=None,
+        now=now + timedelta(seconds=1),
+    )
+    assert error == "FREQTRADE_RUNTIME_FINGERPRINT_CHANGED"
+    stale = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert stale["execution_worker"]["status"] == "STALE"
+    assert (
+        stale["execution_worker"]["error_code"]
+        == "FREQTRADE_RUNTIME_FINGERPRINT_CHANGED"
+    )
+    assert stale["execution_worker"]["runtime"]["fingerprint_verified"] is False
+
+    replacement, replay = service.prepare_exchange_account_freqtrade_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=int(stale["version"]),
+        idempotency_key="worker-fingerprint-verify-b",
+    )
+    assert replacement is not None and replay is None
+    service.record_exchange_account_freqtrade_verification(
+        replacement,
+        actor_id=admin,
+        error_code=None,
+        idempotency_key="worker-fingerprint-verify-b",
+        now=now + timedelta(seconds=2),
+        probe_result=_runtime_probe(
+            "b" * 64,
+            whitelist=["SOL/USDT:USDT", "AVA/USDT:USDT"],
+        ),
+    )
+    current = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert current["execution_worker"]["status"] == "VERIFIED"
+    assert current["execution_worker"]["runtime"]["fingerprint_verified"] is True
+
+
 def test_fact_adapter_ingestion_refreshes_exact_account_runtime_health(
     database: Database,
 ) -> None:

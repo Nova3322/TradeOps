@@ -422,6 +422,7 @@ def test_worker_probe_verifies_bound_exchange_without_exposing_credentials() -> 
     )
 
     result = client.probe()
+    runtime_fingerprint = result.pop("runtime_fingerprint")
 
     assert result == {
         "name": "hyperliquid-default",
@@ -431,16 +432,22 @@ def test_worker_probe_verifies_bound_exchange_without_exposing_credentials() -> 
         "exchange": "hyperliquid",
         "trading_mode": "futures",
         "dry_run": True,
+        "demo_trading": None,
         "worker_state": "running",
         "version": "2026.3",
+        "bot_name": None,
+        "whitelist": ["BTC/USDC:USDC", "XYZ-TSLA/USDC:USDC"],
         "hip3_dexes": ["xyz"],
         "active_pair_count": 2,
         "hip3_pair_count": 1,
         "worker_command_available": True,
+        "force_entry_enabled": True,
         "position_adjustment_enabled": True,
         "external_order_send": False,
         "network": "DRY_RUN",
     }
+    assert isinstance(runtime_fingerprint, str)
+    assert len(runtime_fingerprint) == 64
     serialized = repr((result, client.spec))
     assert "fixture-password" not in serialized
     assert "short-lived-token" not in serialized

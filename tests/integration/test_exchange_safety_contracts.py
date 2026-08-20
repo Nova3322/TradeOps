@@ -25,6 +25,7 @@ from trading_control_plane.domain import (
     ReservationStatus,
     Role,
 )
+from trading_control_plane.execution_runtime import AutomaticExecutionWorker
 from trading_control_plane.freqtrade import (
     FreqtradeEntryCommand,
     FreqtradeOrder,
@@ -33,6 +34,7 @@ from trading_control_plane.freqtrade import (
 )
 from trading_control_plane.models import (
     AuditEvent,
+    Campaign,
     ExchangeAccount,
     OrderIntent,
     RiskReservation,
@@ -246,7 +248,22 @@ class _OutcomeUnknownWorker:
     def probe(self, **_kwargs: Any) -> dict[str, Any]:
         if self.probe_error is not None:
             raise DomainRejected(self.probe_error, "worker probe failed")
-        return {"status": "READY"}
+        return {
+            "status": "READY",
+            "runtime_fingerprint": "a" * 64,
+            "whitelist": ["XRP/USDT:USDT"],
+            "exchange": "binance",
+            "trading_mode": "futures",
+            "dry_run": False,
+            "demo_trading": False,
+            "worker_state": "running",
+            "version": "fixture",
+            "bot_name": "fixture-worker",
+            "force_entry_enabled": True,
+            "position_adjustment_enabled": True,
+            "external_order_send": True,
+            "network": "LIVE",
+        }
 
     def find_open_trade(self, **_kwargs: Any) -> None:
         return None
@@ -411,6 +428,112 @@ def test_confirmed_zero_fill_releases_frozen_risk_and_authorization(database: Da
         assert reservation is not None
         assert reservation.status == ReservationStatus.RELEASED.value
         assert authorization.used_quantity == used_quantity - intent.quantity
+
+
+@pytest.mark.parametrize(
+    ("code", "reason_fragment"),
+    (
+        ("FREQTRADE_LIVE_MODE_REQUIRED", "模拟模式"),
+        ("FREQTRADE_INSTRUMENT_NOT_ALLOWED", "白名单"),
+        ("FREQTRADE_FORCE_ENTRY_DISABLED", "Force Entry"),
+    ),
+)
+def test_pre_send_worker_blocker_is_persisted_for_campaign_and_audit(
+    database: Database,
+    code: str,
+    reason_fragment: str,
+) -> None:
+    contract = _execution_contract(database)
+    checked_at = contract.now + timedelta(seconds=1)
+
+    assert contract.service.record_execution_blocker(
+        contract.intent_id,
+        actor_id=contract.fixture.ids["operator"],
+        error_code=code,
+        now=checked_at,
+        retry_after_seconds=60,
+    )
+    with database.session_factory() as session:
+        intent = session.get(OrderIntent, contract.intent_id)
+        assert intent is not None
+        campaign_id = intent.campaign_id
+        assert intent.status == OrderIntentStatus.READY.value
+        assert intent.dispatch_backend is None
+        assert intent.execution_blocker_code == code
+        assert reason_fragment in str(intent.execution_blocker_reason)
+        assert intent.execution_last_checked_at == checked_at
+        assert intent.execution_retry_at == checked_at + timedelta(seconds=60)
+        audits = session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.object_id == str(intent.intent_id),
+                AuditEvent.event_type == "AUTOMATIC_EXECUTION_PRE_SEND_BLOCKED",
+            )
+        ).all()
+        assert len(audits) == 1
+        assert f"code={code}" in audits[0].reason
+        assert "external_send=none" in audits[0].reason
+    detail = TradingQueries(database).campaign_detail(
+        contract.fixture.ids["admin"],
+        campaign_id,
+    )
+    blocker = detail["intents"][0]["execution_blocker"]
+    assert blocker["code"] == code
+    assert reason_fragment in blocker["reason"]
+    assert blocker["component"] == "execution-worker"
+    assert blocker["occurred_at"] == checked_at.isoformat()
+    assert blocker["last_checked_at"] == checked_at.isoformat()
+
+
+def test_automatic_worker_cancels_expired_unsent_intent_and_releases_risk(
+    database: Database,
+) -> None:
+    contract = _execution_contract(database)
+    worker_client = _OutcomeUnknownWorker(contract.binding)
+    run_at = contract.now + timedelta(seconds=2)
+    with database.session_factory.begin() as session:
+        intent = session.get(OrderIntent, contract.intent_id, with_for_update=True)
+        assert intent is not None
+        authorization = session.get(
+            TradingAuthorization,
+            intent.authorization_id,
+            with_for_update=True,
+        )
+        assert authorization is not None
+        authorization.expires_at = run_at - timedelta(seconds=1)
+        lease = session.get(SenderLease, (contract.binding.team_id, contract.scope))
+        assert lease is not None
+        lease.expires_at = run_at - timedelta(seconds=1)
+
+    settings = _settings(database).model_copy(
+        update={
+            "execution_worker_enabled": True,
+            "execution_worker_batch_size": 20,
+            "runtime_sync_interval_seconds": 60,
+        }
+    )
+    worker = AutomaticExecutionWorker(
+        settings=settings,
+        database=database,
+        worker_factory=lambda _binding: worker_client,  # type: ignore[arg-type]
+        clock=lambda: run_at,
+    )
+
+    report = worker.run_once()
+
+    assert report.blocked["AUTHORIZATION_EXPIRED"] == 1
+    assert worker_client.writes == 0
+    with database.session_factory() as session:
+        intent = session.get(OrderIntent, contract.intent_id)
+        assert intent is not None
+        reservation = session.get(RiskReservation, intent.reservation_id)
+        authorization = session.get(TradingAuthorization, intent.authorization_id)
+        campaign = session.get(Campaign, intent.campaign_id)
+        assert intent.status == OrderIntentStatus.CANCELLED.value
+        assert intent.dispatch_backend is None
+        assert reservation is not None
+        assert reservation.status == ReservationStatus.RELEASED.value
+        assert authorization is not None and authorization.active is False
+        assert campaign is not None and campaign.status == "CLOSED"
 
 
 @pytest.mark.parametrize(
