@@ -12,6 +12,7 @@ from trading_control_plane import domain, metrics, models, notilt, rejections
 from trading_control_plane import execution_scope as scope_rules
 from trading_control_plane.service_component import ServiceComponent
 from trading_control_plane.service_domains.notifications import enqueue_notification_event
+from trading_control_plane.service_transactions import TransactionService
 
 
 def occupied_risk(
@@ -399,6 +400,159 @@ def server_risk_context(
     )
 
 
+def decide_risk_in_session(
+    transactions: TransactionService,
+    session: Session,
+    *,
+    proposal: models.Proposal,
+    actor_id: UUID,
+    kind: domain.IntentKind,
+    idempotency_key: str,
+    now: datetime,
+    requested_quantity: Decimal | None = None,
+) -> UUID:
+    """Record one risk decision inside the caller's transaction."""
+
+    operation = "risk.decide"
+    transactions.require_role(
+        session,
+        actor_id,
+        operation,
+        proposal.account_id,
+        proposal.venue,
+        team_id=proposal.team_id,
+    )
+    quantity = proposal.quantity if requested_quantity is None else requested_quantity
+    request_payload = {
+        "proposal_id": str(proposal.proposal_id),
+        "team_id": str(proposal.team_id),
+        "kind": kind.value,
+        "requested_quantity": str(quantity),
+    }
+    digest, response = transactions.idempotency(
+        session,
+        caller_id=f"{actor_id}:{proposal.team_id}",
+        operation=operation,
+        idempotency_key=idempotency_key,
+        payload=request_payload,
+    )
+    if response is not None:
+        return UUID(str(response["decision_id"]))
+    if (
+        proposal.status != domain.ProposalStatus.APPROVED.value
+        or proposal.expires_at <= now
+    ):
+        rejections.reject(
+            "PROPOSAL_NOT_APPROVED", "risk decision requires a live approved proposal"
+        )
+    if quantity <= 0 or quantity > proposal.quantity:
+        rejections.reject(
+            "PROPOSAL_QUANTITY_EXCEEDED", "requested quantity exceeds proposal cap"
+        )
+
+    transactions.lock_risk_capacity(session, proposal.team_id)
+    policy = active_risk_policy(session, proposal.team_id)
+    current_risk = occupied_risk(session, proposal.team_id)
+    requested_risk = proposal.max_risk * quantity / proposal.quantity
+    if requested_risk > proposal.max_risk:
+        rejections.reject("PROPOSAL_RISK_EXCEEDED", "requested risk exceeds proposal cap")
+    inputs, facts, data_as_of, effective_max_total_risk = server_risk_context(
+        session,
+        proposal=proposal,
+        policy=policy,
+        kind=kind,
+        requested_quantity=quantity,
+        requested_risk=requested_risk,
+        current_risk=current_risk,
+        now=now,
+    )
+    outcome = domain.evaluate_risk(
+        risk_policy_input(
+            policy,
+            effective_max_total_risk=(
+                effective_max_total_risk
+                if effective_max_total_risk > 0
+                else policy.max_total_risk
+            ),
+        ),
+        inputs,
+    )
+    decision = models.RiskDecision(
+        team_id=proposal.team_id,
+        proposal_id=proposal.proposal_id,
+        policy_id=policy.policy_id,
+        input_data=facts,
+        result=outcome.result.value,
+        approved_quantity=outcome.allowed_quantity,
+        risk_amount=outcome.allowed_risk,
+        reasons=list(outcome.reasons),
+        data_as_of=data_as_of,
+        actor_id=str(actor_id),
+        correlation_id=proposal.correlation_id,
+        created_at=now,
+    )
+    session.add(decision)
+    session.flush()
+    result = {"decision_id": str(decision.decision_id)}
+    transactions.save_receipt(
+        session,
+        caller_id=f"{actor_id}:{proposal.team_id}",
+        operation=operation,
+        idempotency_key=idempotency_key,
+        semantic_hash=digest,
+        response=result,
+        now=now,
+    )
+    transactions.audit(
+        session,
+        actor_id=str(actor_id),
+        event_type="RISK_DECIDED",
+        object_type="RiskDecision",
+        object_id=decision.decision_id,
+        reason=outcome.result.value,
+        correlation_id=proposal.correlation_id,
+        object_version=1,
+        idempotency_key=idempotency_key,
+        now=now,
+    )
+    team = session.get(models.Team, proposal.team_id)
+    assert team is not None
+    enqueue_notification_event(
+        transactions,
+        session,
+        actor_id=str(actor_id),
+        team=team,
+        event_type="RISK_DECISION_RECORDED",
+        payload={
+            "summary": "服务端风险决策已冻结记录。",
+            "result": decision.result,
+            "reasons": list(decision.reasons),
+            "policy_version": policy.version,
+            "environment": proposal.environment,
+            "account_id": proposal.account_id,
+            "venue": proposal.venue,
+            "intent_kind": kind.value,
+            "risk_amount": str(decision.risk_amount),
+            "approved_quantity": (
+                None
+                if decision.approved_quantity is None
+                else str(decision.approved_quantity)
+            ),
+        },
+        object_type="RiskDecision",
+        object_id=decision.decision_id,
+        object_version=1,
+        idempotency_key=idempotency_key,
+        correlation_id=proposal.correlation_id,
+        environment=proposal.environment,
+        account_id=proposal.account_id,
+        venue=proposal.venue,
+        now=now,
+    )
+    metrics.RISK_RESULTS.labels(outcome.result.value).inc()
+    return decision.decision_id
+
+
 def consecutive_loss_snapshot(
     session: Session,
     *,
@@ -688,145 +842,17 @@ class PolicyRiskService(ServiceComponent):
         now: datetime,
         requested_quantity: Decimal | None = None,
     ) -> UUID:
-        operation = "risk.decide"
         with self.database.session_factory.begin() as session:
             proposal = session.get(models.Proposal, proposal_id, with_for_update=True)
             if proposal is None:
                 rejections.reject("PROPOSAL_NOT_FOUND", "proposal does not exist")
-            self.transactions.require_role(
-                session,
-                actor_id,
-                operation,
-                proposal.account_id,
-                proposal.venue,
-                team_id=proposal.team_id,
-            )
-            quantity = proposal.quantity if requested_quantity is None else requested_quantity
-            request_payload = {
-                "proposal_id": str(proposal_id),
-                "team_id": str(proposal.team_id),
-                "kind": kind.value,
-                "requested_quantity": str(quantity),
-            }
-            digest, response = self.transactions.idempotency(
-                session,
-                caller_id=f"{actor_id}:{proposal.team_id}",
-                operation=operation,
-                idempotency_key=idempotency_key,
-                payload=request_payload,
-            )
-            if response is not None:
-                return UUID(str(response["decision_id"]))
-            if (
-                proposal.status != domain.ProposalStatus.APPROVED.value
-                or proposal.expires_at <= now
-            ):
-                rejections.reject(
-                    "PROPOSAL_NOT_APPROVED", "risk decision requires a live approved proposal"
-                )
-            if quantity <= 0 or quantity > proposal.quantity:
-                rejections.reject(
-                    "PROPOSAL_QUANTITY_EXCEEDED", "requested quantity exceeds proposal cap"
-                )
-
-            self.transactions.lock_risk_capacity(session, proposal.team_id)
-            policy = active_risk_policy(session, proposal.team_id)
-            current_risk = occupied_risk(session, proposal.team_id)
-            requested_risk = proposal.max_risk * quantity / proposal.quantity
-            if requested_risk > proposal.max_risk:
-                rejections.reject("PROPOSAL_RISK_EXCEEDED", "requested risk exceeds proposal cap")
-            inputs, facts, data_as_of, effective_max_total_risk = server_risk_context(
-                session,
-                proposal=proposal,
-                policy=policy,
-                kind=kind,
-                requested_quantity=quantity,
-                requested_risk=requested_risk,
-                current_risk=current_risk,
-                now=now,
-            )
-            outcome = domain.evaluate_risk(
-                risk_policy_input(
-                    policy,
-                    effective_max_total_risk=(
-                        effective_max_total_risk
-                        if effective_max_total_risk > 0
-                        else policy.max_total_risk
-                    ),
-                ),
-                inputs,
-            )
-            decision = models.RiskDecision(
-                team_id=proposal.team_id,
-                proposal_id=proposal_id,
-                policy_id=policy.policy_id,
-                input_data=facts,
-                result=outcome.result.value,
-                approved_quantity=outcome.allowed_quantity,
-                risk_amount=outcome.allowed_risk,
-                reasons=list(outcome.reasons),
-                data_as_of=data_as_of,
-                actor_id=str(actor_id),
-                correlation_id=proposal.correlation_id,
-                created_at=now,
-            )
-            session.add(decision)
-            session.flush()
-            result = {"decision_id": str(decision.decision_id)}
-            self.transactions.save_receipt(
-                session,
-                caller_id=f"{actor_id}:{proposal.team_id}",
-                operation=operation,
-                idempotency_key=idempotency_key,
-                semantic_hash=digest,
-                response=result,
-                now=now,
-            )
-            self.transactions.audit(
-                session,
-                actor_id=str(actor_id),
-                event_type="RISK_DECIDED",
-                object_type="RiskDecision",
-                object_id=decision.decision_id,
-                reason=outcome.result.value,
-                correlation_id=proposal.correlation_id,
-                object_version=1,
-                idempotency_key=idempotency_key,
-                now=now,
-            )
-            team = session.get(models.Team, proposal.team_id)
-            assert team is not None
-            enqueue_notification_event(
+            return decide_risk_in_session(
                 self.transactions,
                 session,
-                actor_id=str(actor_id),
-                team=team,
-                event_type="RISK_DECISION_RECORDED",
-                payload={
-                    "summary": "服务端风险决策已冻结记录。",
-                    "result": decision.result,
-                    "reasons": list(decision.reasons),
-                    "policy_version": policy.version,
-                    "environment": proposal.environment,
-                    "account_id": proposal.account_id,
-                    "venue": proposal.venue,
-                    "intent_kind": kind.value,
-                    "risk_amount": str(decision.risk_amount),
-                    "approved_quantity": (
-                        None
-                        if decision.approved_quantity is None
-                        else str(decision.approved_quantity)
-                    ),
-                },
-                object_type="RiskDecision",
-                object_id=decision.decision_id,
-                object_version=1,
+                proposal=proposal,
+                actor_id=actor_id,
+                kind=kind,
                 idempotency_key=idempotency_key,
-                correlation_id=proposal.correlation_id,
-                environment=proposal.environment,
-                account_id=proposal.account_id,
-                venue=proposal.venue,
                 now=now,
+                requested_quantity=requested_quantity,
             )
-            metrics.RISK_RESULTS.labels(outcome.result.value).inc()
-            return decision.decision_id

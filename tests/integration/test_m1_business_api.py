@@ -947,6 +947,11 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
             )
             assert second_review.status_code == 200, second_review.text
             assert second_review.json()["status"] == "APPROVED"
+            assert second_review.json()["detail"]["risk_decision"] is not None
+            assert second_review.json()["detail"]["risk_decision"]["result"] == "DENY"
+            assert second_review.json()["detail"]["risk_decision"]["reasons"] == [
+                "READ_ONLY_SOURCE_UNAVAILABLE"
+            ]
             assert len(telegram.notifications()) == 3
 
     asyncio.run(scenario())
@@ -1033,6 +1038,7 @@ def test_password_step_up_issues_production_compatible_review_grant(
             )
             assert reviewed.status_code == 200, reviewed.text
             assert reviewed.json()["status"] == "APPROVED"
+            assert reviewed.json()["detail"]["risk_decision"]["result"] == "ALLOW"
 
     asyncio.run(scenario())
 

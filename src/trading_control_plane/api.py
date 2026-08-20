@@ -758,6 +758,11 @@ def create_app(
                 decision,
                 "Telegram private-chat review after explicit two-step confirmation",
                 expected_version=action.proposal_version,
+                automatic_risk_service_username=(
+                    resolved_settings.runtime_sync_service_username
+                    if decision is ReviewDecision.APPROVE
+                    else None
+                ),
                 now=_now(),
             )
         except DomainRejected as exc:
@@ -769,7 +774,12 @@ def create_app(
                 int(detail["version"]),
                 str(detail["environment"]),
             )
-        return f"审核已记录: {result.value}。未创建授权、订单或资金动作。"
+        detail = queries().proposal_detail(action.recipient_id, action.proposal_id)
+        risk = detail.get("risk_decision")
+        risk_copy = ""
+        if result is ProposalStatus.APPROVED and isinstance(risk, dict):
+            risk_copy = f" 系统风控已自动运行: {risk['result']}。"
+        return f"审核已记录: {result.value}。{risk_copy} 未创建授权、订单或资金动作。"
 
     authenticated_dependencies = AuthenticatedRouteDependencies(
         identity=identity_dependency,

@@ -709,6 +709,11 @@ class _ProposalsRoutes:
                 payload.reason,
                 expected_version=payload.expected_version,
                 idempotency_key=payload.idempotency_key,
+                automatic_risk_service_username=(
+                    self.resolved_settings.runtime_sync_service_username
+                    if payload.decision == "APPROVE"
+                    else None
+                ),
                 now=now,
             )
             detail = self.queries().proposal_detail(identity.user_id, proposal_id, now=now)

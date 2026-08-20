@@ -16,6 +16,7 @@ from trading_control_plane.service_domains.accounts import (
     lock_perptape_runtime_binding,
 )
 from trading_control_plane.service_domains.notifications import enqueue_proposal_review_notification
+from trading_control_plane.service_domains.risk_policy import decide_risk_in_session
 
 
 def manual_execution_key(
@@ -1088,6 +1089,7 @@ class ProposalService(ServiceComponent):
         expected_version: int | None = None,
         *,
         idempotency_key: str | None = None,
+        automatic_risk_service_username: str | None = None,
         now: datetime,
     ) -> domain.ProposalStatus:
         expired = False
@@ -1194,6 +1196,49 @@ class ProposalService(ServiceComponent):
                     now=now,
                 )
                 result = domain.ProposalStatus(proposal.status)
+                if (
+                    result is domain.ProposalStatus.APPROVED
+                    and automatic_risk_service_username is not None
+                ):
+                    account = session.scalar(
+                        select(models.ExchangeAccount).where(
+                            models.ExchangeAccount.team_id == proposal.team_id,
+                            models.ExchangeAccount.environment == proposal.environment,
+                            models.ExchangeAccount.account_id == proposal.account_id,
+                            models.ExchangeAccount.venue == proposal.venue,
+                            models.ExchangeAccount.active,
+                            models.ExchangeAccount.deleted_at.is_(None),
+                        )
+                    )
+                    risk_actor = (
+                        None
+                        if account is None or account.runtime_service_principal_id is None
+                        else session.get(models.User, account.runtime_service_principal_id)
+                    )
+                    if risk_actor is None or not risk_actor.active:
+                        risk_actor = session.scalar(
+                            select(models.User).where(
+                                models.User.username == automatic_risk_service_username,
+                                models.User.principal_type == domain.PrincipalType.SERVICE.value,
+                                models.User.active,
+                            )
+                        )
+                    if risk_actor is None:
+                        rejections.reject(
+                            "AUTOMATIC_RISK_ACTOR_UNAVAILABLE",
+                            "the configured automatic risk service principal is unavailable",
+                        )
+                    decide_risk_in_session(
+                        self.transactions,
+                        session,
+                        proposal=proposal,
+                        actor_id=risk_actor.user_id,
+                        kind=domain.IntentKind.INITIAL,
+                        idempotency_key=(
+                            f"automatic-risk:{proposal.proposal_id}:v{proposal.version}"
+                        ),
+                        now=now,
+                    )
                 if idempotency_key is not None:
                     assert digest is not None
                     self.transactions.save_receipt(

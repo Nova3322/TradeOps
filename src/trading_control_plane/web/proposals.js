@@ -284,7 +284,7 @@ async function renderProposalDetail(id) {
   const sourceFacts = item.source === 'SYSTEM'
     ? `<div class="source-facts"><div><small>创建时来源快照</small><b class="${item.source_readiness === 'READY' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.source_readiness === 'READY' ? '创建时可用' : fmtReadiness(item.source_readiness))}</b></div><div><small>共振周期</small><b>${escapeHtml(resonanceTimeframes.join(' / ') || '—')}</b></div><div><small>成交量</small><b>${fmtCompact(candidate.quote_volume)}</b></div><div><small>持仓量</small><b>${fmtCompact(candidate.open_interest)}</b></div><div><small>快照时间</small><b>${fmtDate(item.source_observed_at)}</b></div></div>`
     : '<div class="source-facts manual-source"><div><small>来源</small><b>人工输入</b></div><div><small>审核依据</small><b>保存参数与提案理由</b></div></div>';
-  const highRiskReviewCopy = item.risk_tier === 'HIGH' ? `高风险提案需要两名不同审核人；当前已记录 ${item.approvals.length} 票。` : '批准后仍需运行系统风险检查。';
+  const highRiskReviewCopy = item.risk_tier === 'HIGH' ? `高风险提案需要两名不同审核人；当前已记录 ${item.approvals.length} 票。达到所需票数后系统会自动运行风控。` : '批准后系统会自动运行风控。';
   const nextAction = launchWindowExpired
     ? {title:'审核已批准，但启动窗口已过期', copy:'审核结论已保留，但不能再运行风险检查、签发授权或创建交易任务。需要按当前市场条件创建新提案。', tone:'danger'}
     : terminal
@@ -300,7 +300,7 @@ async function renderProposalDetail(id) {
         : item.status === 'APPROVED' && (!riskDone || riskDenied)
           ? riskDenied
             ? {title:riskHelp.label, copy:riskHelp.action, tone:'danger'}
-            : {title:'下一步：运行风险检查', copy:'审核已完成，风险管理人员需要基于最新账户数据运行风险检查。', tone:'attention'}
+            : {title:'系统正在运行风险检查', copy:'审核已完成，系统会基于最新账户与受管资金事实自动冻结风控结果。', tone:'attention'}
         : needsFreshRisk
           ? {title:'短期授权已经失效', copy:'重新读取当前账户事实并运行风险检查；通过后才能签发新的短期授权。', tone:'danger'}
         : needsAuthorization
@@ -308,7 +308,7 @@ async function renderProposalDetail(id) {
           : authorizationUsable
             ? {title:'已准备创建初仓意图', copy:'授权仍在有效期内；创建后只记录风险占用和订单意图，后续执行仍受服务端控制开关和发送租约限制。', tone:'success'}
             : {title:'当前没有待办动作', copy:'请核对授权有效期和当前状态。', tone:'neutral'};
-  const canRunRisk = item.status === 'APPROVED' && !launchWindowExpired && canOperate && (!riskDone || riskDenied || needsFreshRisk);
+  const canRunRisk = item.status === 'APPROVED' && !launchWindowExpired && canOperate && (riskDenied || needsFreshRisk);
   const executionAction = initialEntry
     ? `<a class="primary wide-action" href="/campaigns/${initialEntry.campaign_id}" data-link>进入交易任务</a><p class="microcopy">初仓意图 ${shortId(initialEntry.intent_id)} · ${escapeHtml(fmtStatus(initialEntry.intent_status))}</p>`
     : canRunRisk
@@ -337,7 +337,9 @@ async function renderProposalDetail(id) {
       : '<p class="success-note">仓位、权益、受管资金、系统状态和总风险容量均通过。</p>';
   const riskDecisionPanel = riskDone
     ? `<p class="risk-outcome-copy">${escapeHtml(riskOutcomeCopy)}</p><dl class="definition-grid risk-decision-grid">${definition('请求数量', fmtNumber(riskContext.requested_quantity))}${definition('系统批准数量', fmtNumber(item.risk_decision.approved_quantity))}${definition('本次风险占用', fmtAmount(item.risk_decision.risk_amount, item.collateral_currency))}${definition('组合风险容量', riskCapacityCopy)}${definition('事实年龄', `${fmtSeconds(riskContext.fact_age_seconds)} / 上限 ${fmtSeconds(riskContext.max_fact_age_seconds)}`)}${definition('数据截止', fmtDate(item.risk_decision.data_as_of))}</dl><div class="risk-fact-strip"><span>仓位 <b>${escapeHtml(factStatusLabel(riskContext.position_status))}</b></span><span>权益 <b>${escapeHtml(factStatusLabel(riskContext.equity_status))}</b></span><span>受管资金 <b>${riskContext.managed_capital_known ? '已确认' : '缺失'}</b></span><span>保护 <b>${escapeHtml(factStatusLabel(riskContext.protection_status))}</b></span></div>${riskReasons}`
-    : '<div class="empty-inline"><b>等待审核通过</b><span>风险检查会读取服务端最新仓位、权益、受管资金、保护和总风险容量。</span></div>';
+    : item.status === 'APPROVED'
+      ? '<div class="empty-inline"><b>系统风控处理中</b><span>达到审批阈值后由系统自动读取最新仓位、权益、受管资金、保护和总风险容量。</span></div>'
+      : '<div class="empty-inline"><b>等待审核通过</b><span>达到审批阈值后系统会自动运行风险检查。</span></div>';
   const authorizationState = !authorizationDone ? '未签发' : authorizationUsable ? '有效' : item.authorization.active ? '已过期' : '已撤销';
   const authorizationPanel = launchWindowExpired
     ? '<div class="empty-inline"><b>当前提案不可再签发</b><span>启动窗口已经过期；审核结论继续保留，重新交易必须创建新提案。</span></div>'
@@ -370,7 +372,7 @@ async function approveProposal(item, button) {
   try {
     grant = await confirmStepUpAction({
       title:'批准这份冻结提案？',
-      message:'系统将记录你的一次独立批准。高风险提案仍可能需要另一名审核人；这不会运行风险检查、签发交易授权、创建订单或下单。',
+      message:'系统将记录你的一次独立批准。达到所需审批票数后会自动运行风控；不会签发交易授权、创建订单或下单。',
       confirmLabel:'验证身份并批准',
       action:'proposal.approve',
       objectId:item.proposal_id,
