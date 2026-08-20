@@ -1420,6 +1420,17 @@ class FactAdapterConnectionProbe:
                 )
             return ConnectionProbeResult(success=True, error_code=None)
         except DomainRejected as exc:
+            current: BaseException | None = exc
+            visited: set[int] = set()
+            while current is not None and id(current) not in visited:
+                visited.add(id(current))
+                if isinstance(current, BinanceApiRejected):
+                    return ConnectionProbeResult(
+                        success=False,
+                        error_code=current.code,
+                        diagnostics=dict(current.metadata or {}),
+                    )
+                current = current.__cause__ or current.__context__
             return ConnectionProbeResult(
                 success=False,
                 error_code=exc.code,

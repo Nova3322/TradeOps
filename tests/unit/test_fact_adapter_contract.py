@@ -505,6 +505,27 @@ def test_fact_adapter_rejects_trading_signing_material() -> None:
 def test_binance_418_enters_shared_cooldown_and_suppresses_all_followup_reads() -> None:
     async def scenario() -> None:
         started = datetime.now(UTC)
+        probe_state = BinanceRequestState()
+        probe_exchange = FakeCcxtBinanceBannedExchange()
+        probe = FactAdapterConnectionProbe(
+            bootstrap_symbols={"BINANCE": "BTCUSDT"},
+            exchange_factory=lambda *_args: probe_exchange,
+            binance_request_state=probe_state,
+        )
+        probe_result = await probe._verify(
+            workspace_id="workspace-a",
+            team_id="team-a",
+            account_id="account-probe",
+            venue="BINANCE",
+            environment="LIVE",
+            account_mode="STANDARD",
+            credentials=_credentials("BINANCE"),
+        )
+        assert probe_result.success is False
+        assert probe_result.error_code == "BINANCE_RATE_LIMITED"
+        assert probe_result.diagnostics is not None
+        assert probe_result.diagnostics["http_status"] == 418
+
         request_state = BinanceRequestState()
         banned_exchange = FakeCcxtBinanceBannedExchange()
         adapter = CcxtProFactAdapter(
