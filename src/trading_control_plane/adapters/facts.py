@@ -1577,7 +1577,10 @@ class FactAdapterRegistry:
             scope=snapshot.scope,
             snapshot_version=snapshot.snapshot_version + 1,
             observed_at=_utc(),
-            data_status="CURRENT",
+            # A partial WebSocket increment cannot clear an explicit UNKNOWN
+            # raised by a failed account-wide reconciliation.  Only a later
+            # complete snapshot may restore CURRENT and clear unknown_fields.
+            data_status=("UNKNOWN" if snapshot.data_status == "UNKNOWN" else "CURRENT"),
             reason="WEBSOCKET_INCREMENT",
             positions=positions,
             orders=orders,
@@ -1921,6 +1924,32 @@ class FactStreamSupervisor:
                     self._snapshot_task = None
                     self._snapshot_reason = None
 
+    async def _run_periodic_reconciliation(self) -> None:
+        try:
+            await self.refresh("PERIODIC_RECONCILIATION")
+        except Exception as exc:
+            metrics = getattr(self.adapter, "_metrics", None)
+            if isinstance(metrics, _MutableMetrics):
+                metrics.next_retry_at = (
+                    _utc() + timedelta(seconds=self.reconciliation_delay_seconds)
+                ).isoformat()
+            await self.registry.mark_unknown(
+                self.adapter.scope.key,
+                field="FACT_ADAPTER_PERIODIC_RECONCILIATION_UNAVAILABLE",
+            )
+            if self.snapshot_callback is not None:
+                await self._flush_callback()
+            logger.warning(
+                "Periodic fact reconciliation failed; WebSocket streams retained",
+                extra={
+                    "event": "fact_adapter_periodic_reconciliation_failed",
+                    "component": "fact-adapter",
+                    "venue": self.adapter.scope.venue,
+                    "account_id": self.adapter.scope.account_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+
     async def _watch_channel(
         self,
         kind: EventKind,
@@ -2017,7 +2046,7 @@ class FactStreamSupervisor:
                     queue_task.cancel()
                     await asyncio.gather(queue_task, return_exceptions=True)
                     queue_task = None
-                    await self.refresh("PERIODIC_RECONCILIATION")
+                    await self._run_periodic_reconciliation()
                     next_reconciliation = loop.time() + self.reconciliation_delay_seconds
                     continue
                 kind, payload = queue_task.result()
