@@ -361,11 +361,16 @@ const definition = (label, value) => `<div><dt>${escapeHtml(label)}</dt><dd>${es
 
 async function approveProposal(item, button) {
   const errorBox = document.querySelector('#review-error');
+  const preview = item.execution_preview;
+  if (!preview || !preview.account_id || !preview.venue || !preview.symbol || !preview.side || !preview.order_type || !preview.quantity || !preview.estimated_notional || !preview.quote_currency || !preview.leverage) {
+    showApiError({code:'EXECUTION_PREVIEW_UNAVAILABLE', message:'生产订单确认字段不完整；审核保持未提交。'}, errorBox);
+    return;
+  }
   let grant;
   try {
     grant = await confirmStepUpAction({
       title:'批准这份冻结提案？',
-      message:`系统将记录你的一次独立批准。达到所需审批票数并通过实时风控后，会按已冻结的 ${item.venue} / ${fmtDirection(item.direction)} / 数量 ${fmtNumber(item.quantity)} / 最大风险 ${fmtAmount(item.max_risk, item.collateral_currency)} 自动签发授权、预留风险并由 Freqtrade 发送${item.environment === 'TESTNET' ? '测试环境订单' : '生产真实订单'}；后续不再要求人工点击。`,
+      message:`系统将记录你的一次独立批准。达到所需审批票数并通过实时风控后，会按已冻结的账户 ${preview.account_id} / 场所 ${preview.venue} / 标的 ${preview.symbol} / 方向 ${fmtDirection(item.direction)}（${preview.side}）/ 类型 ${preview.order_type} / 数量 ${fmtNumber(preview.quantity)} / 预计名义价值 ${fmtAmount(preview.estimated_notional, preview.quote_currency)} / 杠杆 ${fmtNumber(preview.leverage)}x / 最大风险 ${fmtAmount(item.max_risk, item.collateral_currency)} 自动签发授权、预留风险并由 Freqtrade 发送${item.environment === 'TESTNET' ? '测试环境订单' : '生产真实订单'}、查询成交和对账；后续不再要求人工点击。超时或状态不明时只查询，不重复下单。`,
       confirmLabel:'验证身份并批准',
       action:'proposal.approve',
       objectId:item.proposal_id,

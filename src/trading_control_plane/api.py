@@ -186,6 +186,23 @@ def create_app(
                     risk_tier=str(item["risk_tier"]),
                     quantity=str(item["quantity"]),
                     max_risk=str(item["max_risk"]),
+                    account_id=str(item["account_id"]),
+                    venue=str(item["venue"]),
+                    order_type="MARKET",
+                    estimated_notional=(
+                        None
+                        if item["estimated_notional"] is None
+                        else str(item["estimated_notional"])
+                    ),
+                    quote_currency=(
+                        None if item["quote_currency"] is None else str(item["quote_currency"])
+                    ),
+                    collateral_currency=(
+                        None
+                        if item["collateral_currency"] is None
+                        else str(item["collateral_currency"])
+                    ),
+                    leverage=str(resolved_settings.freqtrade_live_leverage),
                 )
             )
         return todos
@@ -503,6 +520,25 @@ def create_app(
                     risk_tier=str(detail["risk_tier"]),
                     quantity=str(detail["quantity"]),
                     max_risk=str(detail["max_risk"]),
+                    account_id=str(detail["account_id"]),
+                    venue=str(detail["venue"]),
+                    order_type="MARKET",
+                    estimated_notional=(
+                        None
+                        if detail["estimated_notional"] is None
+                        else str(detail["estimated_notional"])
+                    ),
+                    quote_currency=(
+                        None
+                        if detail["quote_currency"] is None
+                        else str(detail["quote_currency"])
+                    ),
+                    collateral_currency=(
+                        None
+                        if detail["collateral_currency"] is None
+                        else str(detail["collateral_currency"])
+                    ),
+                    leverage=str(resolved_settings.freqtrade_live_leverage),
                 )
             )
 

@@ -864,6 +864,19 @@ def test_perptape_candidate_can_start_as_explicit_live_proposal(
             assert created.status_code == 200, created.text
             assert created.json()["environment"] == "LIVE"
             assert created.json()["status"] == "PENDING_REVIEW"
+            detail = await client.get(f"/api/proposals/{created.json()['proposal_id']}")
+            assert detail.status_code == 200, detail.text
+            assert detail.json()["execution_preview"] == {
+                "account_id": live_account_id,
+                "venue": "BINANCE",
+                "symbol": "BTCUSDT",
+                "side": "BUY",
+                "order_type": "MARKET",
+                "quantity": "0.001000000000000000",
+                "estimated_notional": "120.000000000000000000",
+                "quote_currency": "USDT",
+                "leverage": "1",
+            }
 
     asyncio.run(scenario())
 

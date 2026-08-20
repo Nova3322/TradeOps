@@ -55,6 +55,13 @@ def proposal(recipient_id: UUID, *, status: str = "PENDING_REVIEW") -> ProposalN
         risk_tier="MEDIUM",
         quantity="0.001",
         max_risk="1",
+        account_id="acct-1",
+        venue="BINANCE",
+        order_type="MARKET",
+        estimated_notional="100",
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        leverage="1",
     )
 
 
@@ -178,6 +185,10 @@ def test_bot_requires_two_clicks_and_exposes_only_proposal_review() -> None:
     assert "做多" in confirmation["text"]
     assert "中 · <code>MEDIUM</code>" in confirmation["text"]
     assert "最大风险 1" in confirmation["text"]
+    assert "acct-1 / BINANCE" in confirmation["text"]
+    assert "MARKET · 数量 0.001" in confirmation["text"]
+    assert "100 USDT · 1x" in confirmation["text"]
+    assert "不再要求后续按钮" in confirmation["text"]
     assert "2026年8月4日 20:00 UTC" in confirmation["text"]
     confirm_key = confirmation["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
     bot.handle_update({"update_id": 11, "callback_query": callback("confirm", confirm_key)})
@@ -473,7 +484,8 @@ def test_default_poster_rejects_unsuccessful_response(monkeypatch: Any) -> None:
 
 def test_help_status_and_unknown_commands_explain_narrow_boundary() -> None:
     assert "唯一可执行动作" in render_help()
-    assert "不看资金、不下单" in render_help()
+    assert "Bot 本身不看资金、不调用交易所、不划转资金" in render_help()
+    assert "不再要求后续按钮" in render_help()
     assert "冻结提案批准 / 拒绝" in render_status()
     assert "风险开关" in render_status()
 
