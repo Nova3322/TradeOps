@@ -439,6 +439,7 @@ def test_worker_probe_verifies_bound_exchange_without_exposing_credentials() -> 
         "worker_command_available": True,
         "position_adjustment_enabled": True,
         "external_order_send": False,
+        "network": "DRY_RUN",
     }
     serialized = repr((result, client.spec))
     assert "fixture-password" not in serialized
@@ -522,6 +523,69 @@ def test_worker_probe_accepts_exact_okx_bybit_exchange_scope(venue: str, exchang
     assert result["exchange"] == exchange
     assert result["worker_command_available"] is True
     assert result["external_order_send"] is True
+
+
+def test_worker_probe_requires_pinned_external_testnet_identity() -> None:
+    state = {
+        "dry_run": False,
+        "demo_trading": False,
+        "bot_name": "tradeops-bybit-testnet",
+    }
+
+    def fetcher(
+        url: str,
+        method: str,
+        payload: dict[str, Any] | None,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> dict[str, Any]:
+        del method, payload, headers, timeout
+        if url.endswith("/ping"):
+            return {"status": "pong"}
+        if url.endswith("/token/login"):
+            return {"access_token": "token"}
+        if url.endswith("/show_config"):
+            return {
+                "exchange": "bybit",
+                "trading_mode": "futures",
+                "force_entry_enable": True,
+                "position_adjustment_enable": True,
+                "state": "running",
+                **state,
+            }
+        if url.endswith("/version"):
+            return {"version": "2026.7"}
+        if url.endswith("/whitelist"):
+            return {"whitelist": ["SOL/USDT:USDT"]}
+        raise AssertionError(url)
+
+    client = FreqtradeWorkerClient(
+        FreqtradeWorkerSpec(
+            name="bybit-testnet-worker",
+            venue="BYBIT",
+            base_url="http://127.0.0.1:8085",
+            username="control-plane",
+            password="fixture-password",  # noqa: S106
+        ),
+        fetcher=fetcher,
+    )
+
+    result = client.probe(expected_mode="TESTNET", required_pair="SOL/USDT:USDT")
+    assert result["network"] == "TESTNET"
+    assert result["external_order_send"] is True
+    assert result["dry_run"] is False
+
+    state["demo_trading"] = True
+    with pytest.raises(DomainRejected, match="FREQTRADE_TESTNET_IDENTITY_MISMATCH"):
+        client.probe(expected_mode="TESTNET")
+    state["demo_trading"] = False
+    state["bot_name"] = "tradeops-bybit-live"
+    with pytest.raises(DomainRejected, match="FREQTRADE_TESTNET_IDENTITY_MISMATCH"):
+        client.probe(expected_mode="TESTNET")
+    state["bot_name"] = "tradeops-bybit-testnet"
+    state["dry_run"] = True
+    with pytest.raises(DomainRejected, match="FREQTRADE_EXTERNAL_TESTNET_REQUIRED"):
+        client.probe(expected_mode="TESTNET")
 
 
 def test_worker_probe_rejects_live_mode_and_missing_hip3_scope() -> None:

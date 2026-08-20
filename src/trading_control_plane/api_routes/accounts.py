@@ -288,9 +288,7 @@ class _AccountsRoutes:
                 assert binding is not None
                 worker = self.freqtrade_client_for_binding(binding)
                 try:
-                    worker.probe(
-                        expected_mode=("LIVE" if binding.worker_mode == "LIVE" else "DRY_RUN")
-                    )
+                    worker.probe(expected_mode=binding.worker_mode)  # type: ignore[arg-type]
                     error_code = None
                 except DomainRejected as exc:
                     error_code = exc.code

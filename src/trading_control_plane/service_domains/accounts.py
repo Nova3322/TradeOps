@@ -319,6 +319,7 @@ class AccountService(ServiceComponent):
         if normalized_environment == "TESTNET" and normalized_venue not in {
             "BINANCE",
             "HYPERLIQUID",
+            "BYBIT",
         }:
             _reject(
                 "TESTNET_EXECUTION_UNSUPPORTED",
@@ -1007,7 +1008,7 @@ class AccountService(ServiceComponent):
     ) -> dict[str, Any]:
         """Configure one encrypted Worker binding for one exact exchange account."""
         normalized_mode = mode.upper()
-        if normalized_mode not in {"UNCONFIGURED", "DRY_RUN", "LIVE"}:
+        if normalized_mode not in {"UNCONFIGURED", "DRY_RUN", "TESTNET", "LIVE"}:
             _reject("FREQTRADE_WORKER_MODE_INVALID", "Freqtrade worker mode is invalid")
         normalized_name: str | None = None
         normalized_url: str | None = None
@@ -1090,7 +1091,7 @@ class AccountService(ServiceComponent):
                     "FREQTRADE_HIP3_SCOPE_INVALID",
                     "HIP-3 DEX scope is only valid for Hyperliquid workers",
                 )
-            expected_mode = "LIVE" if account.environment == "LIVE" else "DRY_RUN"
+            expected_mode = "LIVE" if account.environment == "LIVE" else "TESTNET"
             if normalized_mode not in {"UNCONFIGURED", expected_mode}:
                 _reject(
                     "FREQTRADE_WORKER_MODE_MISMATCH",
@@ -1457,7 +1458,7 @@ class AccountService(ServiceComponent):
     ) -> PreparedFreqtradeWorkerBinding:
         environment, account_id, venue = _scope_parts(execution_scope)
         expected_worker_mode = (
-            "LIVE" if environment is domain.ExecutionEnvironment.LIVE else "DRY_RUN"
+            "LIVE" if environment is domain.ExecutionEnvironment.LIVE else "TESTNET"
         )
         with self.database.session_factory() as session:
             team = self.transactions.require_role(
@@ -1617,7 +1618,7 @@ class AccountService(ServiceComponent):
             }
         environment, account_id, venue = _scope_parts(execution_scope)
         expected_worker_mode = (
-            "LIVE" if environment is domain.ExecutionEnvironment.LIVE else "DRY_RUN"
+            "LIVE" if environment is domain.ExecutionEnvironment.LIVE else "TESTNET"
         )
         operation = f"freqtrade.dispatch:{intent_id}"
         with self.database.session_factory.begin() as session:
@@ -1957,7 +1958,9 @@ class AccountService(ServiceComponent):
                     models.ExchangeAccount.deleted_at.is_(None),
                     models.ExchangeAccount.connection_status == "VERIFIED",
                     models.ExchangeAccount.freqtrade_worker_status == "VERIFIED",
-                    models.ExchangeAccount.freqtrade_worker_mode.in_(("DRY_RUN", "LIVE")),
+                    models.ExchangeAccount.freqtrade_worker_mode.in_(
+                        ("DRY_RUN", "TESTNET", "LIVE")
+                    ),
                 )
                 .order_by(
                     models.ExchangeAccount.team_id,

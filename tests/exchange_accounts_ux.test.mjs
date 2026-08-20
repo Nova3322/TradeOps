@@ -34,10 +34,10 @@ test('production account cards expose the exact-account detail workflow', () => 
   );
   assert.match(routerSource, /venueAccountMatch = path\.match\(\/\^\\\/venues\\\/\(\[\^\/\]\+\)\$\/\)/);
   assert.match(routerSource, /renderVenueAccountDetail\(venueAccountMatch\[1\]\)/);
-  assert.match(indexSource, /execution\.js\?v=194/);
+  assert.match(indexSource, /execution\.js\?v=195/);
   assert.match(indexSource, /shared\.js\?v=16/);
-  assert.match(indexSource, /accounts\.js\?v=182/);
-  assert.match(serviceWorkerSource, /trading-shell-v229/);
+  assert.match(indexSource, /accounts\.js\?v=183/);
+  assert.match(serviceWorkerSource, /trading-shell-v230/);
 });
 
 test('standard Binance account mode is rendered as known product truth', () => {
@@ -52,9 +52,10 @@ test('account detail trusts fresh exact-account facts instead of API-local worke
   assert.doesNotMatch(accountsSource, /processRuntimeEnabled/);
 });
 
-test('all supported testnet venues remain available for fact-only onboarding', () => {
+test('Bybit testnet onboarding supports a pinned worker while OKX stays fact-only', () => {
   assert.match(executionSource, /<option value="\$\{venue\}">/);
-  assert.match(executionSource, /' · 仅事实同步'/);
+  assert.match(executionSource, /venue === 'OKX' \? ' · 仅事实同步'/);
+  assert.match(executionSource, /item\.venue === 'OKX'/);
   assert.match(executionSource, /该交易所测试环境仅支持事实同步；执行保持不可用/);
   assert.doesNotMatch(executionSource, /value="\$\{venue\}" \$\{selectedEnvironment.*\? 'disabled'/);
 });

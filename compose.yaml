@@ -374,9 +374,40 @@ services:
       - ./freqtrade/strategies:/freqtrade/strategies:ro
       - freqtrade-hyperliquid-live-smoke-data:/freqtrade/user_data
 
+  freqtrade-bybit-testnet:
+    image: freqtradeorg/freqtrade:2026.7
+    profiles: ["testnet-workers"]
+    command:
+      - trade
+      - --config
+      - /freqtrade/config.json
+      - --strategy
+      - ControlPlaneOnlyStrategy
+      - --strategy-path
+      - /freqtrade/strategies
+    environment:
+      FREQTRADE__API_SERVER__USERNAME: ${FREQTRADE_BYBIT_TESTNET_API_USERNAME:-trading-control}
+      FREQTRADE__API_SERVER__PASSWORD: ${FREQTRADE_BYBIT_TESTNET_API_PASSWORD:-local-testnet-only}
+      FREQTRADE__API_SERVER__JWT_SECRET_KEY: ${FREQTRADE_BYBIT_TESTNET_JWT_SECRET:-local-testnet-jwt-override-required}
+      FREQTRADE__API_SERVER__WS_TOKEN: ${FREQTRADE_BYBIT_TESTNET_WS_TOKEN:-local-testnet-rpc-token}
+      FREQTRADE__TELEGRAM__ENABLED: "false"
+      FREQTRADE__TELEGRAM__AUTHORIZED_USERS: "[]"
+      FREQTRADE__DRY_RUN: "false"
+      FREQTRADE__FORCE_ENTRY_ENABLE: ${FREQTRADE_BYBIT_TESTNET_FORCE_ENTRY_ENABLE:-false}
+      FREQTRADE__INITIAL_STATE: ${FREQTRADE_BYBIT_TESTNET_INITIAL_STATE:-stopped}
+      FREQTRADE__EXCHANGE__KEY: ${FREQTRADE_BYBIT_TESTNET_EXCHANGE_KEY:-}
+      FREQTRADE__EXCHANGE__SECRET: ${FREQTRADE_BYBIT_TESTNET_EXCHANGE_SECRET:-}
+    ports:
+      - "127.0.0.1:8085:8080"
+    volumes:
+      - ./freqtrade/config-bybit-testnet.json:/freqtrade/config.json:ro
+      - ./freqtrade/strategies:/freqtrade/strategies:ro
+      - freqtrade-bybit-testnet-data:/freqtrade/user_data
+
 volumes:
   trading-postgres-local:
   freqtrade-binance-data:
   freqtrade-hyperliquid-data:
   freqtrade-binance-live-smoke-data:
   freqtrade-hyperliquid-live-smoke-data:
+  freqtrade-bybit-testnet-data:

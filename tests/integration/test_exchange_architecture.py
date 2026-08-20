@@ -106,6 +106,7 @@ class _WorkerFixture:
         exchange: str,
         pair: str,
         dry_run: bool,
+        testnet: bool,
         quantity: Decimal,
         mark: Decimal,
         entry_fill: Decimal | None = None,
@@ -113,6 +114,7 @@ class _WorkerFixture:
         self.exchange = exchange
         self.pair = pair
         self.dry_run = dry_run
+        self.testnet = testnet
         self.expected_initial_quantity = quantity
         self.entry_fill = entry_fill
         self.mark = mark
@@ -182,6 +184,12 @@ class _WorkerFixture:
                 "exchange": self.exchange,
                 "trading_mode": "futures",
                 "dry_run": self.dry_run,
+                "demo_trading": False,
+                "bot_name": (
+                    f"tradeops-{self.exchange}-testnet"
+                    if self.testnet
+                    else f"tradeops-{self.exchange}-fixture"
+                ),
                 "force_entry_enable": True,
                 "position_adjustment_enable": True,
                 "state": "running",
@@ -290,7 +298,7 @@ class _WorkerFixture:
         ),
         ("OKX", "XRP-USDT-SWAP", "XRP/USDT:USDT", "okx", "LIVE", "LONG", (), False),
         ("BYBIT", "XRPUSDT", "XRP/USDT:USDT", "bybit", "LIVE", "SHORT", (), False),
-        ("BINANCE", "XRPUSDT", "XRP/USDT:USDT", "binance", "TESTNET", "LONG", (), True),
+        ("BYBIT", "XRPUSDT", "XRP/USDT:USDT", "bybit", "TESTNET", "LONG", (), True),
     ],
 )
 def test_exact_account_freqtrade_is_the_only_execution_chain(
@@ -378,7 +386,7 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
     configured = service.configure_exchange_account_freqtrade_worker(
         exchange_account_id,
         actor_id=fixture.ids["admin"],
-        mode="LIVE" if environment == "LIVE" else "DRY_RUN",
+        mode="LIVE" if environment == "LIVE" else "TESTNET",
         name=f"{slug}-worker",
         base_url="http://127.0.0.1:18091",
         username="control-plane",
@@ -460,7 +468,8 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
     worker_fixture = _WorkerFixture(
         exchange=exchange,
         pair=pair,
-        dry_run=environment == "TESTNET",
+        dry_run=False,
+        testnet=environment == "TESTNET",
         quantity=quantity,
         mark=mark,
         entry_fill=Decimal("1") if partial_fill else None,
