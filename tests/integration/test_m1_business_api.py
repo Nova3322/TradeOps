@@ -5,7 +5,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from conftest import add_exchange_account_fixture, set_test_team_environment
 from fastapi import FastAPI
@@ -1094,6 +1094,39 @@ def test_approved_proposal_rechecks_denied_risk_only_after_new_facts(
     now = datetime.now(UTC)
     stale_at = now - timedelta(minutes=10)
     with database.session_factory.begin() as session:
+        team_id = session.scalar(
+            select(Position.team_id).where(
+                Position.account_id == "acct-1",
+                Position.venue == "BINANCE",
+                Position.environment == "TESTNET",
+            )
+        )
+        assert team_id is not None
+        session.add(
+            AccountEquity(
+                account_equity_id=uuid4(),
+                team_id=team_id,
+                account_id="vault-1",
+                venue="VAULT",
+                environment="TESTNET",
+                equity=Decimal("100"),
+                available_balance=Decimal("100"),
+                withdrawable_balance=Decimal("100"),
+                currency="USDT",
+                location_type="VAULT",
+                control_status="CONTROLLED",
+                deposit_status="READY",
+                network="test",
+                address_reference=None,
+                valuation_currency="USD",
+                valuation_price=Decimal(1),
+                valuation_equity=Decimal("100"),
+                valuation_observed_at=stale_at,
+                fact_status="KNOWN",
+                observed_at=stale_at,
+                updated_at=stale_at,
+            )
+        )
         for position in session.scalars(
             select(Position).where(
                 Position.account_id == "acct-1",
@@ -1186,17 +1219,48 @@ def test_approved_proposal_rechecks_denied_risk_only_after_new_facts(
             equity.observed_at = refreshed_at
             equity.updated_at = refreshed_at
 
+    for offset in range(3, 8):
+        assert not refresh_approved_proposal_risk(
+            service,
+            proposal_id=proposal_id,
+            fallback_service_username="runtime-sync",
+            now=now + timedelta(seconds=offset),
+        )
+    with database.session_factory() as session:
+        assert (
+            session.scalar(
+                select(func.count()).select_from(RiskDecision).where(
+                    RiskDecision.proposal_id == proposal_id
+                )
+            )
+            == 1
+        )
+
+    vault_refreshed_at = now + timedelta(seconds=8)
+    with database.session_factory.begin() as session:
+        vault = session.scalar(
+            select(AccountEquity).where(
+                AccountEquity.account_id == "vault-1",
+                AccountEquity.venue == "VAULT",
+                AccountEquity.environment == "TESTNET",
+            )
+        )
+        assert vault is not None
+        vault.observed_at = vault_refreshed_at
+        vault.valuation_observed_at = vault_refreshed_at
+        vault.updated_at = vault_refreshed_at
+
     assert refresh_approved_proposal_risk(
         service,
         proposal_id=proposal_id,
         fallback_service_username="runtime-sync",
-        now=now + timedelta(seconds=3),
+        now=now + timedelta(seconds=9),
     )
     assert not refresh_approved_proposal_risk(
         service,
         proposal_id=proposal_id,
         fallback_service_username="runtime-sync",
-        now=now + timedelta(seconds=4),
+        now=now + timedelta(seconds=10),
     )
     service.set_risk_policy(
         actor_id=ids["admin"],
@@ -1208,19 +1272,19 @@ def test_approved_proposal_rechecks_denied_risk_only_after_new_facts(
         max_consecutive_losses=3,
         loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(minutes=5),
-        now=now + timedelta(seconds=5),
+        now=now + timedelta(seconds=11),
     )
     assert refresh_approved_proposal_risk(
         service,
         proposal_id=proposal_id,
         fallback_service_username="runtime-sync",
-        now=now + timedelta(seconds=6),
+        now=now + timedelta(seconds=12),
     )
     assert not refresh_approved_proposal_risk(
         service,
         proposal_id=proposal_id,
         fallback_service_username="runtime-sync",
-        now=now + timedelta(seconds=7),
+        now=now + timedelta(seconds=13),
     )
     with database.session_factory() as session:
         decisions = session.scalars(

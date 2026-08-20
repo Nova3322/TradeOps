@@ -73,6 +73,13 @@ def test_worker_advances_approved_proposal_and_dispatches_ready_intent(
     worker.service = service
     worker.clock = clock
     worker.worker_factory = lambda _binding: object()
+    safe_refreshes: list[object] = []
+
+    def refresh_safe(**kwargs: object) -> object:
+        safe_refreshes.append(kwargs)
+        return uuid4()
+
+    worker._refresh_safe_capital_fact = refresh_safe  # type: ignore[method-assign]
     worker._approved_proposal_ids = lambda *, now: (proposal_id,)  # type: ignore[method-assign]
     worker._automatic_intents = lambda: (intent,)  # type: ignore[method-assign]
     worker._reconciliation_intents = lambda: (intent,)  # type: ignore[method-assign]
@@ -114,12 +121,14 @@ def test_worker_advances_approved_proposal_and_dispatches_ready_intent(
     report = worker.run_once()
 
     assert report.proposals_advanced == 1
+    assert report.capital_facts_refreshed == 1
     assert report.risk_decisions_refreshed == 1
     assert report.intents_selected == 1
     assert report.intents_completed == 1
     assert report.reconciliations_completed == 1
     assert report.blocked == {}
     assert len(advances) == 1
+    assert len(safe_refreshes) == 1
     assert service.acquired == [
         ("LIVE:acct-1:BINANCE", AUTOMATIC_EXECUTION_OWNER)
     ]
@@ -151,6 +160,7 @@ def test_worker_records_block_and_continues_without_blind_retry(
     worker.service = service
     worker.clock = lambda: datetime(2026, 8, 20, tzinfo=UTC)
     worker.worker_factory = lambda _binding: object()
+    worker._refresh_safe_capital_fact = lambda **_kwargs: None  # type: ignore[method-assign]
     worker._approved_proposal_ids = lambda *, now: (proposal_id,)  # type: ignore[method-assign]
     worker._automatic_intents = lambda: (unknown_intent,)  # type: ignore[method-assign]
     worker._reconciliation_intents = lambda: ()  # type: ignore[method-assign]
@@ -177,6 +187,7 @@ def test_worker_records_block_and_continues_without_blind_retry(
     report = worker.run_once()
 
     assert report.proposals_advanced == 0
+    assert report.capital_facts_refreshed == 0
     assert report.risk_decisions_refreshed == 0
     assert report.intents_completed == 0
     assert report.reconciliations_completed == 0
