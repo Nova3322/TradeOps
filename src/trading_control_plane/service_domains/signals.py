@@ -5,6 +5,7 @@ import hmac
 import re
 import secrets
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -1736,8 +1737,7 @@ class SignalService(ServiceComponent):
                     .with_for_update()
                 )
                 if (
-                    current is not None
-                    and status == "SKIPPED"
+                    status == "SKIPPED"
                     and error_code is not None
                     and error_code.endswith("_RATE_LIMITED_COOLDOWN")
                 ):
@@ -1748,6 +1748,12 @@ class SignalService(ServiceComponent):
                     else 0
                 )
                 retry_at = None
+                raw_retry_at = result.get("retry_at")
+                if status == "FAILED" and raw_retry_at is not None:
+                    try:
+                        retry_at = datetime.fromisoformat(str(raw_retry_at)).astimezone(UTC)
+                    except ValueError:
+                        retry_at = None
                 exchange_rate_limited = bool(
                     source_name in credentials.SUPPORTED_EXCHANGE_VENUES
                     and error_code is not None
@@ -1759,15 +1765,6 @@ class SignalService(ServiceComponent):
                     and "RATE_LIMITED" in error_code
                     and not exchange_rate_limited
                 ):
-                    raw_retry_at = result.get("retry_at")
-                    try:
-                        retry_at = (
-                            None
-                            if raw_retry_at is None
-                            else datetime.fromisoformat(str(raw_retry_at)).astimezone(UTC)
-                        )
-                    except ValueError:
-                        retry_at = None
                     if retry_at is None or retry_at <= now:
                         retry_seconds = min(300, 60 * (2 ** min(consecutive_failures - 1, 3)))
                         retry_at = now + timedelta(seconds=retry_seconds)
@@ -1814,8 +1811,49 @@ class SignalService(ServiceComponent):
         now: datetime,
         base_snapshot: perptape.PerptapeFeedSnapshot | None,
         runtime_binding: runtime_contracts.PreparedPerptapeRuntimeBinding | None = None,
+        feed_key: str | None = None,
     ) -> int:
         now_utc = perptape.normalize_perptape_datetime(now)
+        if feed_key is None:
+            feed_key = (
+                perptape.PERPTAPE_LEGACY_FEED_KEY
+                if feed.source_exchange is None
+                else perptape.PERPTAPE_FEED_KEYS[feed.source_exchange]
+            )
+        allowed_feed_keys = {
+            perptape.PERPTAPE_LEGACY_FEED_KEY,
+            *perptape.PERPTAPE_FEED_KEYS.values(),
+        }
+        if feed_key not in allowed_feed_keys:
+            rejections.reject("PERPTAPE_FEED_KEY_INVALID", "Perptape feed key is unsupported")
+        source_exchange = next(
+            (
+                source
+                for source, exact_key in perptape.PERPTAPE_FEED_KEYS.items()
+                if exact_key == feed_key
+            ),
+            None,
+        )
+        if source_exchange is not None:
+            feed = replace(
+                feed,
+                candidates=tuple(
+                    candidate
+                    for candidate in feed.candidates
+                    if candidate.source_exchange == source_exchange
+                ),
+                source_exchange=source_exchange,
+            )
+            if base_snapshot is not None:
+                base_snapshot = replace(
+                    base_snapshot,
+                    candidates=tuple(
+                        candidate
+                        for candidate in base_snapshot.candidates
+                        if candidate.source_exchange == source_exchange
+                    ),
+                    source_exchange=source_exchange,
+                )
         feed = perptape.bound_perptape_feed_snapshot(feed)
         if base_snapshot is not None:
             base_snapshot = perptape.bound_perptape_feed_snapshot(base_snapshot)
@@ -1847,7 +1885,7 @@ class SignalService(ServiceComponent):
             )
             current = session.get(
                 models.PerptapeFeed,
-                (team.team_id, "BREAKOUTS"),
+                (team.team_id, feed_key),
                 with_for_update=True,
             )
             current_feed = (
@@ -1861,6 +1899,7 @@ class SignalService(ServiceComponent):
                     candidates=tuple(
                         perptape.PerptapeCandidate.from_dict(value) for value in current.candidates
                     ),
+                    source_exchange=source_exchange,
                 )
             )
             if current is None and base_snapshot is not None:
@@ -1895,7 +1934,7 @@ class SignalService(ServiceComponent):
             if current is None:
                 current = models.PerptapeFeed(
                     team_id=team.team_id,
-                    feed_key="BREAKOUTS",
+                    feed_key=feed_key,
                     contract_version=feed.contract_version,
                     candidates=candidates,
                     generated_at=feed.generated_at,
@@ -1920,6 +1959,56 @@ class SignalService(ServiceComponent):
                 object_type="PerptapeFeed",
                 object_id=current.feed_key,
                 reason=f"{len(candidates)} candidates",
+                correlation_id=uuid4(),
+                object_version=current.version,
+                workspace_id=workspace.workspace_id,
+                team_id=team.team_id,
+                now=now,
+            )
+            return current.version
+
+    def defer_perptape_feed(
+        self,
+        actor_id: UUID,
+        *,
+        feed_key: str,
+        retry_at: datetime,
+        now: datetime,
+        runtime_binding: runtime_contracts.PreparedPerptapeRuntimeBinding | None = None,
+    ) -> int | None:
+        if feed_key not in set(perptape.PERPTAPE_FEED_KEYS.values()):
+            rejections.reject("PERPTAPE_FEED_KEY_INVALID", "Perptape feed key is unsupported")
+        retry_at = perptape.normalize_perptape_datetime(retry_at)
+        now = perptape.normalize_perptape_datetime(now)
+        with self.database.session_factory.begin() as session:
+            if runtime_binding is not None:
+                lock_perptape_runtime_binding(session, runtime_binding)
+            _actor, workspace, team = self.transactions.active_scope(session, actor_id)
+            assert team is not None
+            self.transactions.require_role(
+                session,
+                actor_id,
+                "proposal.create",
+                team_id=team.team_id,
+                allow_setup=True,
+            )
+            current = session.get(
+                models.PerptapeFeed,
+                (team.team_id, feed_key),
+                with_for_update=True,
+            )
+            if current is None or retry_at <= current.next_allowed_at:
+                return None if current is None else current.version
+            current.next_allowed_at = max(retry_at, current.generated_at)
+            current.version += 1
+            current.updated_at = now
+            self.transactions.audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="PERPTAPE_FEED_DEFERRED",
+                object_type="PerptapeFeed",
+                object_id=current.feed_key,
+                reason="upstream retry window preserved",
                 correlation_id=uuid4(),
                 object_version=current.version,
                 workspace_id=workspace.workspace_id,

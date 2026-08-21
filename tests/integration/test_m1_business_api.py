@@ -40,6 +40,7 @@ from trading_control_plane.models import (
 )
 from trading_control_plane.perptape import (
     PerptapeClient,
+    PerptapeFeedSnapshot,
     perptape_legacy_candidate_id,
 )
 from trading_control_plane.queries import TradingQueries
@@ -197,13 +198,15 @@ def perptape_hip3_client() -> PerptapeClient:
             ],
         }
 
-    return PerptapeClient(
+    client = PerptapeClient(
         base_url="https://perptape.com",
         api_key="test-key",
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
         fetcher=fetch,
     )
+    client.refresh(now=datetime.now(UTC), source_exchange="HL")
+    return client
 
 
 def app(
@@ -362,9 +365,97 @@ def test_api_process_prefers_fresh_persisted_perptape_feed(
             assert len(payload["data"]) == 1
             assert payload["snapshot_generated_at"] == feed.generated_at.isoformat()
             assert payload["retry_at"] == feed.next_allowed_at.isoformat()
+            assert payload["venues"]["BINANCE"]["data_status"] == "CURRENT"
+            assert payload["venues"]["HYPERLIQUID"]["data_status"] == "UNKNOWN"
 
     asyncio.run(scenario())
     assert direct_fetches == 0
+
+
+def test_opportunities_merge_venue_feeds_and_stale_only_blocks_its_venue(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    stale_at = now - timedelta(minutes=10)
+    client = perptape_client()
+    binance = client.refresh(now=now, force=True, source_exchange="BN")
+    hyperliquid_candidate = client.parse_stream_alert(
+        {
+            "id": "hl-stale-opportunity",
+            "ex": "HL",
+            "s": "xyz:TSLA",
+            "cs": "TSLA",
+            "dir": "HH",
+            "p": 325.19,
+            "th": 320,
+            "tf": "4h",
+            "t": int(stale_at.timestamp() * 1_000),
+            "u": int(stale_at.timestamp() * 1_000),
+            "kr": {"status": "ready"},
+            "vq24": 20_000,
+            "oi": 10_000,
+        },
+        event_time=stale_at,
+    )
+    hyperliquid = PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=stale_at,
+        fetched_at=stale_at,
+        next_allowed_at=stale_at,
+        candidates=(hyperliquid_candidate,),
+        source_exchange="HL",
+    )
+    service.record_perptape_feed(
+        ids["admin"],
+        binance,
+        now=now,
+        base_snapshot=None,
+        feed_key="BREAKOUTS:BN",
+    )
+    service.record_perptape_feed(
+        ids["admin"],
+        hyperliquid,
+        now=now,
+        base_snapshot=None,
+        feed_key="BREAKOUTS:HL",
+    )
+    service.register_instrument(
+        actor_id=ids["admin"],
+        venue="HYPERLIQUID",
+        symbol="xyz:TSLA",
+        tick_size=Decimal("0.001"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("10"),
+        contract_multiplier=Decimal(1),
+        quote_currency="USDC",
+        collateral_currency="USDC",
+        protection_supported=True,
+        now=now,
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, MockTelegramGateway())),
+            base_url="http://test",
+        ) as http:
+            await login(http, "proposer")
+            response = await http.get("/api/opportunities")
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            by_venue = {item["venue"]: item for item in payload["data"]}
+            assert set(by_venue) == {"BINANCE", "HYPERLIQUID"}
+            assert by_venue["BINANCE"]["proposal_eligible"] is True
+            assert by_venue["BINANCE"]["proposal_blocker"] is None
+            assert by_venue["HYPERLIQUID"]["proposal_eligible"] is False
+            assert (
+                by_venue["HYPERLIQUID"]["proposal_blocker"]
+                == "PERPTAPE_CANDIDATE_NOT_CURRENT"
+            )
+            assert payload["venues"]["BINANCE"]["data_status"] == "CURRENT"
+            assert payload["venues"]["HYPERLIQUID"]["data_status"] == "STALE"
+
+    asyncio.run(scenario())
 
 
 def test_freqtrade_backend_status_is_explicit_and_order_send_remains_closed(
