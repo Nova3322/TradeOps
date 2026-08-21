@@ -797,6 +797,95 @@ class IntentExecutionService(ServiceComponent):
             )
             return token
 
+    def acquire_freqtrade_recovery_sender(
+        self,
+        intent_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        actor_id: UUID,
+        now: datetime,
+        lease_duration: timedelta = scope_rules.DEFAULT_SENDER_LEASE_DURATION,
+    ) -> int:
+        """Fence one query-only recovery without permitting a new external send."""
+
+        with self.database.session_factory.begin() as session:
+            _environment, account_id, venue = scope_rules.scope_parts(execution_scope)
+            if not owner_id or lease_duration <= timedelta(0):
+                rejections.reject(
+                    "SENDER_LEASE_INVALID", "owner and positive lease duration are required"
+                )
+            intent = session.get(models.OrderIntent, intent_id, with_for_update=True)
+            campaign = None if intent is None else session.get(models.Campaign, intent.campaign_id)
+            if intent is None or campaign is None:
+                rejections.reject("ORDER_INTENT_NOT_FOUND", "recovery intent is unavailable")
+            team = self.transactions.require_role(
+                session,
+                actor_id,
+                "sender.manage",
+                campaign.account_id,
+                campaign.venue,
+                team_id=campaign.team_id,
+            )
+            if (
+                execution_scope
+                != scope_rules.scope_key(
+                    campaign.environment,
+                    campaign.account_id,
+                    campaign.venue,
+                )
+                or campaign.account_id != account_id
+                or campaign.venue != venue
+                or intent.dispatch_backend != "FREQTRADE"
+                or intent.dispatch_started_at is None
+                or intent.dispatch_owner_id != owner_id
+                or intent.status
+                not in {
+                    domain.OrderIntentStatus.DISPATCHING.value,
+                    domain.OrderIntentStatus.SENT.value,
+                    domain.OrderIntentStatus.PARTIALLY_FILLED.value,
+                    domain.OrderIntentStatus.UNKNOWN.value,
+                }
+            ):
+                rejections.reject(
+                    "FREQTRADE_RECOVERY_SCOPE_INVALID",
+                    "query-only recovery requires the exact existing Freqtrade dispatch",
+                )
+            lease = session.get(
+                models.SenderLease,
+                (team.team_id, execution_scope),
+                with_for_update=True,
+            )
+            if lease is None:
+                rejections.reject(
+                    "SENDER_LEASE_INVALID",
+                    "query-only recovery requires the original durable sender lease",
+                )
+            if lease.owner_id != owner_id and lease.expires_at > now:
+                rejections.reject("SENDER_LEASE_HELD", "another sender still owns the live lease")
+            if lease.owner_id == owner_id and lease.expires_at > now:
+                token = lease.fencing_token
+            else:
+                token = lease.fencing_token + 1
+                lease.owner_id = owner_id
+                lease.fencing_token = token
+            lease.expires_at = now + lease_duration
+            lease.updated_at = now
+            self.transactions.audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="SENDER_QUERY_RECOVERY_LEASE_ACQUIRED",
+                object_type="SenderLease",
+                object_id=execution_scope,
+                reason=f"intent={intent.intent_id};backend=FREQTRADE;external_send=none",
+                correlation_id=intent.correlation_id,
+                object_version=token,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=account_id,
+                now=now,
+            )
+            return token
+
     def _validate_sender(
         self,
         session: Session,
