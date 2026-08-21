@@ -45,12 +45,25 @@ from trading_control_plane.models import (
     Position,
     ProtectionOrder,
     RiskReservation,
+    TradingAuthorization,
     VenueOrder,
+)
+from trading_control_plane.models import (
+    VenueFill as VenueFillFact,
 )
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.runtime_contracts import ConnectionProbeResult
 from trading_control_plane.service import TradingService
+from trading_control_plane.venue_read_only import (
+    VenueEquity,
+    VenueInstrument,
+    VenuePosition,
+    VenueReadOnlySnapshot,
+)
+from trading_control_plane.venue_read_only import (
+    VenueFill as ReadOnlyVenueFill,
+)
 
 NOW = datetime.now(UTC).replace(microsecond=0)
 
@@ -102,6 +115,240 @@ def test_openapi_contains_only_account_facts_and_backend_neutral_execution(
         )
     )
 
+
+def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
+    database: Database,
+) -> None:
+    service = TradingService(database, credential_encryption_key=_credential_key())
+    fixture = WorkflowFixture.create(
+        service,
+        now=NOW,
+        admin_username="protection-fill-admin",
+        account_id="acct-protection-fill",
+        venue="HYPERLIQUID",
+        environment=ExecutionEnvironment.LIVE,
+        actors=(
+            ActorSpec("proposer", "protection-fill-proposer", Role.PROPOSER),
+            ActorSpec("reviewer_one", "protection-fill-reviewer-1", Role.REVIEWER),
+            ActorSpec("reviewer_two", "protection-fill-reviewer-2", Role.REVIEWER),
+            ActorSpec("operator", "protection-fill-operator", Role.OPERATOR),
+            ActorSpec(
+                "runtime",
+                "protection-fill-runtime",
+                Role.OPERATOR,
+                service_principal=True,
+            ),
+        ),
+        symbol="BTC",
+        tick_size=Decimal("1"),
+        lot_size=Decimal("0.00001"),
+        minimum_notional=Decimal("5"),
+        quote_currency="USDC",
+        risk_version="protection-fill-risk-v1",
+        max_fact_age=timedelta(minutes=10),
+        mark_price=Decimal("77510"),
+    )
+    service.record_runtime_source_health(
+        fixture.ids["runtime"],
+        {"HYPERLIQUID": {"status": "SUCCESS", "items_observed": 1}},
+        scopes={"HYPERLIQUID": (fixture.account_id, "HYPERLIQUID")},
+        now=NOW,
+    )
+    proposal = fixture.approved_proposal(
+        key="protection-fill",
+        quantity=Decimal("0.00013"),
+        max_risk=Decimal("1"),
+        details={"invalidation_price": "77123", "allow_auto_add": False},
+    )
+    opening = fixture.opening_order(
+        proposal=proposal,
+        key="protection-fill",
+        quantity=Decimal("0.00013"),
+    )
+    entry_at = NOW + timedelta(seconds=1)
+    closed_at = NOW + timedelta(seconds=20)
+    with database.session_factory.begin() as session:
+        intent = session.get(OrderIntent, opening.intent_id, with_for_update=True)
+        campaign = session.get(Campaign, opening.campaign_id, with_for_update=True)
+        position = session.get(Position, fixture.ids["position"], with_for_update=True)
+        assert intent is not None and campaign is not None and position is not None
+        reservation = session.get(RiskReservation, intent.reservation_id, with_for_update=True)
+        assert reservation is not None
+        intent.status = "FILLED"
+        intent.updated_at = entry_at
+        intent.version += 1
+        campaign.status = "OPEN"
+        campaign.updated_at = entry_at
+        reservation.status = "OPEN"
+        reservation.updated_at = entry_at
+        reservation.version += 1
+        position.quantity = Decimal(0)
+        position.average_entry_price = Decimal(0)
+        position.mark_price = Decimal("77066")
+        position.observed_at = closed_at
+        position.updated_at = closed_at
+        session.add(
+            VenueOrder(
+                team_id=campaign.team_id,
+                order_intent_id=intent.intent_id,
+                account_id=campaign.account_id,
+                venue=campaign.venue,
+                environment=campaign.environment,
+                instrument_id=campaign.instrument_id,
+                venue_order_id="hl-entry-order",
+                client_order_id=f"tcp-{intent.intent_id.hex[:28]}",
+                side="BUY",
+                order_type="MARKET",
+                reduce_only=False,
+                status="FILLED",
+                ordered_quantity=Decimal("0.00013"),
+                filled_quantity=Decimal("0.00013"),
+                observed_at=entry_at,
+                updated_at=entry_at,
+            )
+        )
+        session.add(
+            VenueFillFact(
+                team_id=campaign.team_id,
+                venue="HYPERLIQUID",
+                venue_fill_id="hl-entry-fill",
+                order_intent_id=intent.intent_id,
+                campaign_id=campaign.campaign_id,
+                account_id=campaign.account_id,
+                environment=campaign.environment,
+                instrument_id=campaign.instrument_id,
+                side="BUY",
+                quantity=Decimal("0.00013"),
+                price=Decimal("77510"),
+                fee=Decimal("0.004352"),
+                fee_currency="USDC",
+                slippage_cost=Decimal(0),
+                executed_at=entry_at,
+            )
+        )
+        session.add(
+            VenueOrder(
+                team_id=campaign.team_id,
+                order_intent_id=None,
+                account_id=campaign.account_id,
+                venue=campaign.venue,
+                environment=campaign.environment,
+                instrument_id=campaign.instrument_id,
+                venue_order_id="hl-protection-order",
+                client_order_id=f"ftp-{position.position_id.hex[:28]}",
+                side="SELL",
+                order_type="STOPLOSS",
+                reduce_only=True,
+                status="FILLED",
+                ordered_quantity=Decimal("0.00013"),
+                filled_quantity=Decimal("0.00013"),
+                observed_at=closed_at,
+                updated_at=closed_at,
+            )
+        )
+
+    snapshot = VenueReadOnlySnapshot(
+        symbol="BTC",
+        observed_at=closed_at,
+        instrument=VenueInstrument(
+            symbol="BTC",
+            tick_size=Decimal("1"),
+            lot_size=Decimal("0.00001"),
+            minimum_notional=Decimal("5"),
+            contract_multiplier=Decimal(1),
+            quote_currency="USDC",
+            collateral_currency="USDC",
+            active=True,
+        ),
+        orders=(),
+        fills=(
+            ReadOnlyVenueFill(
+                fill_id="hl-protection-fill",
+                order_id="hl-protection-order",
+                side="SELL",
+                quantity=Decimal("0.00013"),
+                price=Decimal("77066"),
+                fee=Decimal("0.004328"),
+                fee_currency="USDC",
+                executed_at=closed_at,
+            ),
+        ),
+        position=VenuePosition(
+            quantity=Decimal(0),
+            average_entry_price=Decimal(0),
+            mark_price=Decimal("77066"),
+            observed_at=closed_at,
+        ),
+        equity=VenueEquity(
+            equity=Decimal("100"),
+            available_balance=Decimal("100"),
+            currency="USDC",
+            observed_at=closed_at,
+        ),
+        funding=(),
+        protection=None,
+    )
+    service._ingest_read_only_snapshot(
+        fixture.account_id,
+        fixture.ids["runtime"],
+        snapshot,
+        venue="HYPERLIQUID",
+        environment=ExecutionEnvironment.LIVE,
+        now=closed_at,
+    )
+    service._ingest_read_only_snapshot(
+        fixture.account_id,
+        fixture.ids["runtime"],
+        snapshot,
+        venue="HYPERLIQUID",
+        environment=ExecutionEnvironment.LIVE,
+        now=closed_at + timedelta(seconds=1),
+    )
+
+    with database.session_factory() as session:
+        exits = session.scalars(
+            select(OrderIntent).where(
+                OrderIntent.campaign_id == opening.campaign_id,
+                OrderIntent.kind == "EXIT",
+            )
+        ).all()
+        assert len(exits) == 1
+        exit_intent = exits[0]
+        assert exit_intent.status == "FILLED"
+        assert exit_intent.reduce_only is True
+        assert exit_intent.trigger_source == "FREQTRADE_PROTECTION_FILLED"
+        protection_order = session.scalar(
+            select(VenueOrder).where(VenueOrder.venue_order_id == "hl-protection-order")
+        )
+        cleanup_fill = session.scalar(
+            select(VenueFillFact).where(VenueFillFact.venue_fill_id == "hl-protection-fill")
+        )
+        assert protection_order is not None and cleanup_fill is not None
+        assert protection_order.order_intent_id == exit_intent.intent_id
+        assert cleanup_fill.order_intent_id == exit_intent.intent_id
+        assert cleanup_fill.campaign_id == opening.campaign_id
+
+    reconciled_at = closed_at + timedelta(seconds=2)
+    reconciliation_id = service.reconcile_scope(
+        f"LIVE:{fixture.account_id}:HYPERLIQUID",
+        fixture.ids["operator"],
+        now=reconciled_at,
+    )
+    assert service.reconciliation_status(reconciliation_id).value == "MATCH"
+    service.close_campaign(
+        opening.campaign_id,
+        fixture.ids["operator"],
+        now=reconciled_at,
+    )
+    with database.session_factory() as session:
+        campaign = session.get(Campaign, opening.campaign_id)
+        intent = session.get(OrderIntent, opening.intent_id)
+        assert campaign is not None and intent is not None
+        reservation = session.get(RiskReservation, intent.reservation_id)
+        authorization = session.get(TradingAuthorization, campaign.authorization_id)
+        assert campaign.status == "CLOSED"
+        assert reservation is not None and reservation.status == "RELEASED"
+        assert authorization is not None and authorization.active is False
 
 class _WorkerFixture:
     def __init__(

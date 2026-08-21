@@ -91,6 +91,14 @@ def _status(value: object) -> str:
     return result
 
 
+def _order_type(value: Mapping[str, Any]) -> str:
+    trigger_price = _decimal(value.get("trigger_price") or 0, "order.trigger_price")
+    assert trigger_price is not None
+    if bool(value.get("reduce_only")) and trigger_price > 0:
+        return "STOPLOSS"
+    return str(value.get("type") or "").upper()
+
+
 def _by_symbol(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[Mapping[str, Any]]]:
     grouped: dict[str, list[Mapping[str, Any]]] = {}
     for row in rows:
@@ -199,7 +207,7 @@ def normalize_fact_adapter_snapshot(
                 client_order_id=str(row.get("client_order_id") or ""),
                 status=_status(row.get("status")),
                 side=str(row.get("side") or "").upper(),
-                order_type=str(row.get("type") or "").upper(),
+                order_type=_order_type(row),
                 ordered_quantity=Decimal(str(row["quantity"])),
                 filled_quantity=Decimal(str(row["filled_quantity"])),
                 stop_price=Decimal(str(row.get("trigger_price") or 0)),
