@@ -43,6 +43,7 @@ trading-notification-worker = "trading_control_plane.notification_runtime:main"
 trading-sync-worker = "trading_control_plane.runtime:main"
 trading-fact-adapter = "trading_control_plane.fact_adapter_runtime:main"
 trading-execution-worker = "trading_control_plane.execution_runtime:main"
+trading-capital-worker = "trading_control_plane.capital_runtime:main"
 
 [dependency-groups]
 dev = [

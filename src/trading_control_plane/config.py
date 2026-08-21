@@ -123,6 +123,9 @@ class Settings(BaseSettings):
     execution_worker_enabled: bool = False
     execution_worker_interval_seconds: int = Field(default=5, ge=1, le=60)
     execution_worker_batch_size: int = Field(default=20, ge=1, le=200)
+    capital_continuation_worker_enabled: bool = False
+    capital_continuation_worker_scan_seconds: int = Field(default=30, ge=5, le=60)
+    capital_continuation_worker_batch_size: int = Field(default=20, ge=1, le=100)
     binance_recv_window_ms: int = Field(default=10_000, ge=1_000, le=60_000)
     binance_capital_base_url: str = "https://api.binance.com"
     binance_capital_api_key: str | None = Field(default=None, repr=False)
@@ -322,6 +325,10 @@ class Settings(BaseSettings):
             raise ValueError("automatic Perptape proposals require an internal account ID")
         if self.notification_worker_enabled and not self.credential_encryption_key:
             raise ValueError("enabled notification worker requires the credential encryption key")
+        if self.capital_continuation_worker_enabled and not self.credential_encryption_key:
+            raise ValueError(
+                "enabled capital continuation worker requires the credential encryption key"
+            )
         if (
             self.perptape_websocket_reconnect_initial_seconds
             > self.perptape_websocket_reconnect_max_seconds

@@ -379,6 +379,9 @@ function directCapitalCurrentPhase(operation) {
   const submitted = stages.some(stage => String(stage.code || '').endsWith('_SUBMITTED_BY_HUMAN_WALLET')
     || stage.code === 'BINANCE_RESTRICTED_WITHDRAWAL_SUBMITTED');
   if (operation?.status === 'SETTLED') return '资金路径已完成，公开回执已确认';
+  if (operation?.path === 'VAULT_TO_BINANCE' && operation?.receipt_next_due_at) {
+    return `后台自动续接中（第 ${Number(operation.receipt_attempt_count || 0)} / 10 次检查）`;
+  }
   if (confirmed.has('HYPERLIQUID_WITHDRAWAL_ARBITRUM_CONFIRMED')) return 'Safe 已到账，正在完成最终状态同步';
   if (confirmed.has('HYPERLIQUID_WITHDRAWAL_LEDGER_CONFIRMED')) return 'Hyperliquid 提现已确认，正在等待 Arbitrum / Safe 到账';
   if (submitted && operation?.path === 'HYPERLIQUID_TO_VAULT') return '钱包提交成功，正在核对 Hyperliquid 账本';
@@ -985,17 +988,17 @@ async function verifyBinanceReceipt({operationId, version, stage, transactionHas
 
 function reconcilePendingBinanceReceipts(operations) {
   (operations || []).filter(operation => (
-    ['VAULT_TO_BINANCE', 'BINANCE_TO_VAULT'].includes(operation.path)
+    operation.path === 'BINANCE_TO_VAULT'
     && operation.status === 'AWAITING_RECEIPT'
   )).slice(0, 1).forEach(operation => {
     const stages = operation.stages || [];
-    const receiptStage = operation.path === 'VAULT_TO_BINANCE' ? 'BINANCE_DEPOSIT' : 'BINANCE_WITHDRAWAL';
+    const receiptStage = 'BINANCE_WITHDRAWAL';
     const reconciliationKey = `${operation.operation_id}:${receiptStage}`;
     if (directCapitalReceiptReconciliations.has(reconciliationKey)) return;
     const confirmed = stages.some(stage => stage.code === `${receiptStage}_RECEIPT_CONFIRMED`);
-    const sourceSubmission = operation.path === 'VAULT_TO_BINANCE'
-      ? [...stages].reverse().find(stage => ['NOTILT_DESTINATION_TRANSFER_SUBMITTED_BY_HUMAN_WALLET', 'TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET'].includes(stage.code))
-      : [...stages].reverse().find(stage => stage.code === 'BINANCE_RESTRICTED_WITHDRAWAL_SUBMITTED');
+    const sourceSubmission = [...stages].reverse().find(
+      stage => stage.code === 'BINANCE_RESTRICTED_WITHDRAWAL_SUBMITTED',
+    );
     if (confirmed || !sourceSubmission) return;
     const transactionHash = sourceSubmission.transaction_hash || sourceSubmission.submission?.transactionHash || '';
     const job = verifyBinanceReceipt({
@@ -1544,9 +1547,9 @@ async function renderCapitalCenter() {
     const notiltExecutionWalletButton = notiltExecutionActionKey ? `<button class="primary" type="button" data-direct-wallet-action="${escapeHtml(notiltExecutionActionKey)}">执行释放并打开钱包</button>` : '';
     const notiltDestinationWalletButton = notiltDestinationActionKey ? `<button class="primary" type="button" data-direct-wallet-action="${escapeHtml(notiltDestinationActionKey)}">转入币安并打开钱包</button>` : '';
     const hyperliquidWalletButton = hyperliquidActionKey ? `<button class="primary" type="button" data-direct-wallet-action="${escapeHtml(hyperliquidActionKey)}">打开钱包确认</button>` : '';
-    const binanceSubmitButton = !operationExpired && operation.path === 'BINANCE_TO_VAULT' && binancePreview && !binanceSubmission ? `<button class="primary" type="button" data-binance-submit-direct="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}" ${directConfiguration.binance_capital_submission_enabled && item.real_transfer_gate === 'ENABLED' ? '' : 'disabled title="币安提现开关或 CAPITAL_TRANSFER 当前关闭"'}>直接提交币安提现</button>` : '';
+    const binanceSubmitButton = !operationExpired && operation.status === 'UNSIGNED_PLAN_READY' && operation.path === 'BINANCE_TO_VAULT' && binancePreview && !binanceSubmission ? `<button class="primary" type="button" data-binance-submit-direct="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}" ${directConfiguration.binance_capital_submission_enabled && item.real_transfer_gate === 'ENABLED' ? '' : 'disabled title="币安提现开关或 CAPITAL_TRANSFER 当前关闭"'}>直接提交币安提现</button>` : '';
     const binanceDepositSubmission = operation.treasury_provider === 'NOTILT_VAULT' ? notiltDestinationSubmission : treasuryWithdrawalSubmission;
-    const binanceReceiptButton = binancePreview && !binanceReceiptConfirmed && ((operation.path === 'VAULT_TO_BINANCE' && binanceDepositSubmission?.transaction_hash) || (operation.path === 'BINANCE_TO_VAULT' && binanceSubmission)) ? `<button class="secondary" type="button" data-binance-receipt-direct="${escapeHtml(operation.operation_id)}" data-binance-stage="${operation.path === 'VAULT_TO_BINANCE' ? 'BINANCE_DEPOSIT' : 'BINANCE_WITHDRAWAL'}" data-operation-version="${Number(operation.version || 1)}" data-transaction-hash="${escapeHtml(binanceDepositSubmission?.transaction_hash || '')}">自动核对到账</button>` : '';
+    const binanceReceiptButton = binancePreview && !binanceReceiptConfirmed && operation.path === 'BINANCE_TO_VAULT' && binanceSubmission ? `<button class="secondary" type="button" data-binance-receipt-direct="${escapeHtml(operation.operation_id)}" data-binance-stage="BINANCE_WITHDRAWAL" data-operation-version="${Number(operation.version || 1)}" data-transaction-hash="">自动核对到账</button>` : '';
     const notiltReceiptSubmission = notiltExecutionSubmission && !notiltExecutionReceipt ? notiltExecutionSubmission : treasuryWithdrawalSubmission;
     const notiltReceiptButton = operation.treasury_provider === 'NOTILT_VAULT' && notiltReceiptSubmission && !(notiltExecutionSubmission ? notiltExecutionReceipt : notiltRequestReceipt) ? `<button class="secondary" type="button" data-notilt-receipt-direct="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}" data-transaction-hash="${escapeHtml(notiltReceiptSubmission.transaction_hash || '')}">${notiltExecutionSubmission ? '验证释放执行回执' : '验证释放请求回执'}</button>` : '';
     const safeWithdrawalReceiptButton = operation.path === 'VAULT_TO_HYPERLIQUID' && operation.treasury_provider === 'SAFE_SPENDING_LIMIT' && treasuryWithdrawalSubmission && !safeWithdrawalReceipt ? `<button class="secondary" type="button" data-treasury-withdrawal-receipt-direct="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}" data-transaction-hash="${escapeHtml(treasuryWithdrawalSubmission.transaction_hash || '')}">验证 Safe 转出到账</button>` : '';
@@ -1980,7 +1983,7 @@ function bindCapitalActions() {
         });
         showToast('币安提现已直接提交，正在等待币安与 Arbitrum 回执');
         await refreshCapitalPage();
-      } catch (error) { showApiError(error); }
+      } catch (error) { showApiError(error); await refreshCapitalPage(); }
     });
   }));
   document.querySelectorAll('[data-notilt-receipt-direct]').forEach(button => button.addEventListener('click', async event => {

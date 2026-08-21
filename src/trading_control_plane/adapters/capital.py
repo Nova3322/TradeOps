@@ -22,6 +22,7 @@ class CapitalOperation(StrEnum):
     BINANCE_SUBMIT_WITHDRAWAL = "BINANCE_SUBMIT_WITHDRAWAL"
     BINANCE_VERIFY_DEPOSIT = "BINANCE_VERIFY_DEPOSIT"
     BINANCE_COMPLETE_DEPOSIT = "BINANCE_COMPLETE_DEPOSIT"
+    BINANCE_VERIFY_DEPOSIT_INTERNAL_TRANSFER = "BINANCE_VERIFY_DEPOSIT_INTERNAL_TRANSFER"
     BINANCE_VERIFY_WITHDRAWAL = "BINANCE_VERIFY_WITHDRAWAL"
     HYPERLIQUID_RESOLVE_MAIN = "HYPERLIQUID_RESOLVE_MAIN"
     HYPERLIQUID_ARBITRUM_BALANCE = "HYPERLIQUID_ARBITRUM_BALANCE"
@@ -393,6 +394,10 @@ class ProductionCapitalAdapterFactory:
         CapitalOperation.BINANCE_SUBMIT_WITHDRAWAL: ("BINANCE", "submit_withdrawal"),
         CapitalOperation.BINANCE_VERIFY_DEPOSIT: ("BINANCE", "verify_deposit"),
         CapitalOperation.BINANCE_COMPLETE_DEPOSIT: ("BINANCE", "complete_deposit_to_usdm"),
+        CapitalOperation.BINANCE_VERIFY_DEPOSIT_INTERNAL_TRANSFER: (
+            "BINANCE",
+            "verify_deposit_to_usdm_transfer",
+        ),
         CapitalOperation.BINANCE_VERIFY_WITHDRAWAL: ("BINANCE", "verify_withdrawal"),
         CapitalOperation.HYPERLIQUID_RESOLVE_MAIN: ("HYPERLIQUID", "resolve_main_account"),
         CapitalOperation.HYPERLIQUID_ARBITRUM_BALANCE: (

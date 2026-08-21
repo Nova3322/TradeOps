@@ -217,6 +217,34 @@ def test_withdrawal_submission_is_idempotent_and_uses_fixed_order_id() -> None:
     assert result["internalTransfer"]["status"] == "CONFIRMED"
 
 
+def test_withdrawal_continues_when_transfer_history_lags_but_spot_balance_reflects_it() -> None:
+    calls: list[tuple[str, str, dict[str, str]]] = []
+    values = responses()
+    values["/sapi/v1/capital/withdraw/history"] = []
+    values["/sapi/v1/capital/withdraw/apply"] = {"id": "withdrawal-after-lag"}
+    values["/sapi/v1/asset/transfer"] = lambda method, _params: (
+        {"tranId": 23456} if method == "POST" else {"rows": []}
+    )
+    values["/sapi/v3/asset/getUserAsset"] = [{"asset": "USDC", "free": "275"}]
+    client = gateway(values, calls)
+    artifact = client.prepare_withdrawal(
+        destination=DESTINATION,
+        amount=Decimal("25"),
+        max_fee=Decimal("2"),
+        operation_id="operation-history-lag",
+        now=NOW,
+    )
+
+    result = client.submit_withdrawal(artifact, now=NOW)
+
+    assert result["withdrawalId"] == "withdrawal-after-lag"
+    assert result["internalTransfer"]["status"] == "SUBMITTED"
+    assert len([call for call in calls if call[:2] == ("POST", "/sapi/v1/asset/transfer")]) == 1
+    assert len(
+        [call for call in calls if call[:2] == ("POST", "/sapi/v1/capital/withdraw/apply")]
+    ) == 1
+
+
 def test_credited_deposit_is_moved_from_spot_to_usdm_once() -> None:
     calls: list[tuple[str, str, dict[str, str]]] = []
     values = responses()
@@ -278,6 +306,39 @@ def test_pending_internal_transfer_is_reconciled_without_duplicate_post() -> Non
 
     assert len([call for call in calls if call[:2] == ("POST", "/sapi/v1/asset/transfer")]) == 0
     assert len([call for call in calls if call[:2] == ("GET", "/sapi/v1/asset/transfer")]) == 2
+
+
+def test_internal_transfer_reconciliation_is_strictly_read_only() -> None:
+    calls: list[tuple[str, str, dict[str, str]]] = []
+    values = responses()
+    values["/sapi/v1/asset/transfer"] = {
+        "rows": [
+            {
+                "asset": "USDC",
+                "type": "MAIN_UMFUTURE",
+                "amount": "10.25",
+                "status": "CONFIRMED",
+                "tranId": 78901,
+                "timestamp": int(NOW.timestamp() * 1000),
+            },
+            {
+                "asset": "USDC",
+                "type": "UMFUTURE_MAIN",
+                "amount": "10.25",
+                "status": "CONFIRMED",
+                "tranId": 78902,
+                "timestamp": int(NOW.timestamp() * 1000),
+            },
+        ]
+    }
+
+    result = gateway(values, calls).verify_deposit_to_usdm_transfer(
+        amount=Decimal("10.25"), prepared_at=NOW, now=NOW
+    )
+
+    assert result["tranId"] == 78901
+    assert result["type"] == "MAIN_UMFUTURE"
+    assert not any(call[:2] == ("POST", "/sapi/v1/asset/transfer") for call in calls)
 
 
 def test_false_api_restriction_flag_does_not_override_actual_transfer_endpoint() -> None:
@@ -404,6 +465,29 @@ def test_exact_binance_deposit_and_withdrawal_receipts_are_verified() -> None:
     assert withdrawal["transactionHash"] == TX_HASH
     assert withdrawal["amount"] == "24"
     assert withdrawal["fee"] == "1"
+
+
+def test_deposit_receipt_returns_exact_credited_amount_above_frozen_minimum() -> None:
+    values = responses()
+    values["/sapi/v1/capital/deposit/hisrec"] = [
+        {
+            "id": "deposit-exact-credited",
+            "coin": "USDC",
+            "network": "ARBITRUM",
+            "address": DESTINATION,
+            "txId": TX_HASH,
+            "amount": "10.25",
+            "status": 1,
+        }
+    ]
+
+    receipt = gateway(values).verify_deposit(
+        transaction_hash=TX_HASH,
+        destination=DESTINATION,
+        amount=Decimal("10"),
+    )
+
+    assert receipt["amount"] == "10.25"
 
 
 def test_travel_rule_scope_fails_closed_instead_of_using_wrong_endpoint() -> None:

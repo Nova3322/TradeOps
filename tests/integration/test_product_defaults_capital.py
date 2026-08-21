@@ -1046,6 +1046,8 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
                 "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
             )
             assert submitted_operation["stages"][-1]["transaction_hash"] == (transaction_hash)
+            assert submitted_operation["receipt_next_due_at"] is not None
+            assert submitted_operation["receipt_attempt_count"] == 0
             receipt = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/treasury-withdrawal-receipt",
                 json={
@@ -1055,13 +1057,14 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
                 },
             )
             assert receipt.status_code == 200, receipt.text
-            settled_operation = next(
+            pending_operation = next(
                 item
                 for item in receipt.json()["data"]["direct_operations"]
                 if item["operation_id"] == operation_id
             )
-            assert settled_operation["status"] == "SETTLED"
-            assert settled_operation["receipt_status"] == "CONFIRMED"
+            assert pending_operation["status"] == "AWAITING_RECEIPT"
+            assert pending_operation["receipt_status"] == "PENDING"
+            assert pending_operation["receipt_next_due_at"] is not None
 
             inbound = await client.post(
                 "/api/capital/direct-operations",
@@ -1097,6 +1100,9 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
         assert operation is not None
         assert operation.treasury_provider == "SAFE_SPENDING_LIMIT"
         assert operation.version == 5
+        assert operation.status == "AWAITING_RECEIPT"
+        assert operation.receipt_status == "PENDING"
+        assert operation.receipt_next_due_at is not None
         assert session.query(OrderIntent).count() == 0
         events = set(session.scalars(select(AuditEvent.event_type)).all())
     assert "CAPITAL_SAFE_SPENDING_PREVIEW_PREPARED" in events
@@ -1498,6 +1504,7 @@ def test_binance_restricted_withdrawal_reconciles_after_frozen_plan_expires(
                 },
             )
             assert submitted_response.status_code == 200, submitted_response.text
+            submitted_version = submitted_response.json()["version"]
             with database.session_factory.begin() as session:
                 expired = session.get(DirectCapitalOperation, UUID(operation_id))
                 assert expired is not None
@@ -1505,7 +1512,7 @@ def test_binance_restricted_withdrawal_reconciles_after_frozen_plan_expires(
             service.acquire_direct_capital_binance_receipt_poll(
                 UUID(operation_id),
                 admin_id,
-                expected_version=3,
+                expected_version=submitted_version,
                 stage="BINANCE_WITHDRAWAL",
                 token="first-browser-tab",  # noqa: S106 - inert lease token
                 now=now,
@@ -1514,7 +1521,7 @@ def test_binance_restricted_withdrawal_reconciles_after_frozen_plan_expires(
             parallel_receipt = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/binance-receipt",
                 json={
-                    "expected_version": 3,
+                    "expected_version": submitted_version,
                     "stage": "BINANCE_WITHDRAWAL",
                     "idempotency_key": "binance-receipt-parallel-tab",
                 },
@@ -1531,7 +1538,7 @@ def test_binance_restricted_withdrawal_reconciles_after_frozen_plan_expires(
             receipt = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/binance-receipt",
                 json={
-                    "expected_version": 3,
+                    "expected_version": submitted_version,
                     "stage": "BINANCE_WITHDRAWAL",
                     "idempotency_key": "binance-receipt-1",
                 },
@@ -2654,3 +2661,7 @@ def test_direct_notilt_release_wallet_flow_reaches_exact_binance_destination(
             "NOTILT_DESTINATION_TRANSFER_SUBMITTED_BY_HUMAN_WALLET"
         )
         assert operation.version == 9
+        assert operation.status == "AWAITING_RECEIPT"
+        assert operation.receipt_status == "PENDING"
+        assert operation.receipt_attempt_count == 0
+        assert operation.receipt_next_due_at is not None
