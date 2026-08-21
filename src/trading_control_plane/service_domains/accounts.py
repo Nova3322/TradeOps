@@ -13,6 +13,7 @@ from trading_control_plane import credentials, domain, execution_scope, metrics,
 from trading_control_plane import freqtrade_contracts as freqtrade
 from trading_control_plane.runtime_contracts import (
     ConnectionProbeResult,
+    PreparedCapitalAccountBinding,
     PreparedExchangeConnectionVerification,
     PreparedFreqtradeDispatch,
     PreparedFreqtradeWorkerBinding,
@@ -347,6 +348,89 @@ class AccountService(ServiceComponent):
     delete_exchange_account = delete_exchange_account
     update_exchange_account = update_exchange_account
     set_exchange_account_state = set_exchange_account_state
+
+    def verified_capital_account_binding(
+        self,
+        *,
+        workspace_id: UUID,
+        team_id: UUID,
+        account_id: str,
+        venue: str,
+        environment: str = "LIVE",
+    ) -> PreparedCapitalAccountBinding:
+        """Decrypt one VERIFIED database account for its exact capital scope."""
+
+        normalized_venue = venue.strip().upper()
+        normalized_environment = environment.strip().upper()
+        if normalized_venue not in {"BINANCE", "HYPERLIQUID"}:
+            _reject(
+                "CAPITAL_ACCOUNT_SCOPE_MISMATCH",
+                "the selected exchange does not support direct capital operations",
+            )
+        with self.database.session_factory() as session:
+            team = session.get(models.Team, team_id)
+            account = session.scalar(
+                select(models.ExchangeAccount).where(
+                    models.ExchangeAccount.team_id == team_id,
+                    models.ExchangeAccount.account_id == account_id,
+                    models.ExchangeAccount.venue == normalized_venue,
+                    models.ExchangeAccount.environment == normalized_environment,
+                    models.ExchangeAccount.active.is_(True),
+                    models.ExchangeAccount.deleted_at.is_(None),
+                )
+            )
+            if (
+                team is None
+                or not team.active
+                or team.workspace_id != workspace_id
+                or account is None
+            ):
+                _reject(
+                    "CAPITAL_ACCOUNT_SCOPE_MISMATCH",
+                    "the selected capital account is outside the exact active team scope",
+                )
+            if (
+                account.connection_status != "VERIFIED"
+                or account.last_verified_at is None
+                or account.credentials_ciphertext is None
+                or account.credential_version < 1
+            ):
+                _reject(
+                    "CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY",
+                    "the selected capital account has no verified encrypted credentials",
+                )
+            if (account.credential_metadata or {}).get("environment") != account.environment:
+                _reject(
+                    "CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY",
+                    "the selected capital credentials do not match the account environment",
+                )
+            credential_values = self.credential_cipher.decrypt(
+                account.credentials_ciphertext,
+                team_id=account.team_id,
+                exchange_account_id=account.exchange_account_id,
+                venue=account.venue,
+                credential_version=account.credential_version,
+            )
+            if account.venue == "HYPERLIQUID":
+                credential_values = {
+                    key: value
+                    for key, value in credential_values.items()
+                    if key in {"account_address", "api_wallet_address"}
+                }
+            return PreparedCapitalAccountBinding(
+                exchange_account_id=account.exchange_account_id,
+                workspace_id=workspace_id,
+                team_id=account.team_id,
+                account_id=account.account_id,
+                venue=account.venue,
+                environment=account.environment,
+                account_version=account.version,
+                credential_version=account.credential_version,
+                credentials=credential_values,
+                account_mode=str(
+                    (account.credential_metadata or {}).get("account_mode", "STANDARD")
+                ),
+            )
 
     def create_exchange_account(
         self,

@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from trading_control_plane.adapters.binance_capital import BinanceCapitalGateway
 from trading_control_plane.adapters.capital import (
     CallableCapitalBackend,
     CapitalAdapter,
@@ -12,6 +13,7 @@ from trading_control_plane.adapters.capital import (
     CapitalOperation,
     CapitalScope,
     CcxtUnifiedCapitalBackend,
+    ProductionCapitalAdapterFactory,
     build_ccxt_capital_backend,
 )
 from trading_control_plane.domain import DomainRejected
@@ -272,6 +274,44 @@ def test_ccxt_capital_client_is_built_from_the_dedicated_exact_account_credentia
     assert backend.probe(_scope(), CapitalOperation.TRANSFER).supported is True
     assert observed == {"scope": _scope(), "credential": credential}
     assert "capital-only-secret" not in repr(credential)
+
+
+def test_production_capital_factory_prefers_verified_database_credentials() -> None:
+    observed: dict[str, object] = {}
+
+    def exchange_factory(
+        scope: CapitalScope,
+        supplied: CapitalCredential,
+    ) -> FakeCcxtCapitalExchange:
+        observed.update(scope=scope, credential=supplied)
+        return FakeCcxtCapitalExchange(transfer=True)
+
+    factory = ProductionCapitalAdapterFactory(
+        binance_account_id="stale-environment-account",
+        binance_api_key="stale-environment-key",
+        binance_api_secret="stale-environment-secret",  # noqa: S106
+        binance_gateway=BinanceCapitalGateway(
+            api_key="stale-environment-key",
+            api_secret="stale-environment-secret",  # noqa: S106
+            transport=lambda *_args: {},
+        ),
+        hyperliquid_gateway=object(),
+        exchange_factory=exchange_factory,
+        credential_resolver=lambda _scope: {
+            "api_key": "verified-database-key",
+            "api_secret": "verified-database-secret",
+        },
+    )
+
+    factory(_scope())
+
+    credential = observed["credential"]
+    assert isinstance(credential, CapitalCredential)
+    assert credential.values == {
+        "api_key": "verified-database-key",
+        "api_secret": "verified-database-secret",
+    }
+    assert "verified-database-secret" not in repr(credential)
 
 
 def test_capital_write_requires_a_durable_control_plane_operation_identity() -> None:

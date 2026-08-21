@@ -179,6 +179,23 @@ class CapitalApplicationRuntime:
             account_mode=account["account_mode"],
         )
 
+    def verified_account_credentials(
+        self,
+        *,
+        actor_id: UUID,
+        account_id: str | None,
+        venue: CapitalVenue,
+    ) -> dict[str, str]:
+        scope = self.scope(actor_id=actor_id, account_id=account_id, venue=venue)
+        binding = self.service().verified_capital_account_binding(
+            workspace_id=UUID(scope.workspace_id),
+            team_id=UUID(scope.team_id),
+            account_id=scope.account_id,
+            venue=scope.venue,
+            environment=scope.environment,
+        )
+        return dict(binding.credentials)
+
     def _execute(
         self,
         *,
@@ -278,12 +295,31 @@ class CapitalApplicationRuntime:
                 "HYPERLIQUID_CAPITAL_ACCOUNT_MISMATCH",
                 "the selected account does not match the dedicated capital configuration",
             )
-        self.scope(
-            actor_id=actor_id,
-            account_id=account_id,
-            venue="HYPERLIQUID",
+        try:
+            credentials = self.verified_account_credentials(
+                actor_id=actor_id,
+                account_id=account_id,
+                venue="HYPERLIQUID",
+            )
+        except DomainRejected as exc:
+            if exc.code not in {
+                "CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY",
+                "CAPITAL_ACCOUNT_SCOPE_MISMATCH",
+            }:
+                raise
+            self.scope(
+                actor_id=actor_id,
+                account_id=account_id,
+                venue="HYPERLIQUID",
+            )
+            return direct_settings
+        return direct_settings.model_copy(
+            update={
+                "hyperliquid_account_address": credentials.get("account_address"),
+                "hyperliquid_api_wallet_address": credentials.get("api_wallet_address"),
+                "hyperliquid_subaccount_address": None,
+            }
         )
-        return direct_settings
 
     def direct_settings(
         self,
@@ -331,12 +367,36 @@ class CapitalApplicationRuntime:
     def snapshot(self, user_id: UUID) -> dict[str, object]:
         direct_settings, saved_config = self.direct_settings(user_id)
         binance_account_id = direct_settings.capital_direct_binance_account_id
-        binance_capital_credentials_configured = bool(
-            self.settings.binance_capital_api_key
-            and self.settings.binance_capital_api_secret
-            and binance_account_id is not None
-            and binance_account_id == self.settings.binance_capital_account_id
-        )
+        binance_capital_credentials_source: str | None = None
+        binance_capital_credentials_configured = False
+        if binance_account_id is not None:
+            try:
+                credentials = self.verified_account_credentials(
+                    actor_id=user_id,
+                    account_id=binance_account_id,
+                    venue="BINANCE",
+                )
+            except DomainRejected as exc:
+                if exc.code not in {
+                    "CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY",
+                    "CAPITAL_ACCOUNT_SCOPE_MISMATCH",
+                }:
+                    raise
+            else:
+                binance_capital_credentials_configured = bool(
+                    credentials.get("api_key") and credentials.get("api_secret")
+                )
+                if binance_capital_credentials_configured:
+                    binance_capital_credentials_source = "VERIFIED_ACCOUNT_DATABASE"
+        if not binance_capital_credentials_configured:
+            binance_capital_credentials_configured = bool(
+                self.settings.binance_capital_api_key
+                and self.settings.binance_capital_api_secret
+                and binance_account_id is not None
+                and binance_account_id == self.settings.binance_capital_account_id
+            )
+            if binance_capital_credentials_configured:
+                binance_capital_credentials_source = "DEDICATED_ENVIRONMENT"
         configured_chain_id: int | None
         try:
             configured_chain_id = self.notilt_chain_id_for_network(
@@ -513,9 +573,7 @@ class CapitalApplicationRuntime:
                 direct_settings.capital_direct_binance_withdrawal_address is not None
             ),
             "binance_capital_credentials_configured": (binance_capital_credentials_configured),
-            "binance_capital_credentials_source": (
-                "DEDICATED_ENVIRONMENT" if binance_capital_credentials_configured else None
-            ),
+            "binance_capital_credentials_source": binance_capital_credentials_source,
             "binance_capital_submission_enabled": (
                 direct_settings.binance_capital_withdraw_enabled
             ),

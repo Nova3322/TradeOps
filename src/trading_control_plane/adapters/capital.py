@@ -74,6 +74,7 @@ class CapitalCredential:
 
 CapitalExchangeFactory = Callable[[CapitalScope, CapitalCredential], Any]
 CapitalAdapterFactory = Callable[[CapitalScope], "CapitalAdapter"]
+CapitalCredentialResolver = Callable[[CapitalScope], Mapping[str, str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,6 +455,7 @@ class ProductionCapitalAdapterFactory:
         binance_gateway: Any,
         hyperliquid_gateway: Any,
         exchange_factory: CapitalExchangeFactory | None = None,
+        credential_resolver: CapitalCredentialResolver | None = None,
     ) -> None:
         self.binance_account_id = binance_account_id
         self.binance_api_key = binance_api_key
@@ -461,52 +463,82 @@ class ProductionCapitalAdapterFactory:
         self.binance_gateway = binance_gateway
         self.hyperliquid_gateway = hyperliquid_gateway
         self.exchange_factory = exchange_factory
+        self.credential_resolver = credential_resolver
 
     def __call__(self, scope: CapitalScope) -> CapitalAdapter:
         if scope.venue == "BINANCE":
-            configured = any(
-                value is not None
-                for value in (
-                    self.binance_account_id,
-                    self.binance_api_key,
-                    self.binance_api_secret,
+            credential_values: Mapping[str, str] | None = None
+            resolver_error: DomainRejected | None = None
+            if self.credential_resolver is not None:
+                try:
+                    resolved_values = dict(self.credential_resolver(scope))
+                except DomainRejected as exc:
+                    resolver_error = exc
+                else:
+                    if resolved_values.get("api_key") and resolved_values.get("api_secret"):
+                        credential_values = resolved_values
+                    else:
+                        resolver_error = DomainRejected(
+                            "CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY",
+                            "the verified Binance account credential is incomplete",
+                        )
+            if credential_values is None:
+                configured = any(
+                    value is not None
+                    for value in (
+                        self.binance_account_id,
+                        self.binance_api_key,
+                        self.binance_api_secret,
+                    )
                 )
-            )
-            credentials_ready = all(
-                bool(value)
-                for value in (
-                    self.binance_account_id,
-                    self.binance_api_key,
-                    self.binance_api_secret,
+                credentials_ready = all(
+                    bool(value)
+                    for value in (
+                        self.binance_account_id,
+                        self.binance_api_key,
+                        self.binance_api_secret,
+                    )
                 )
-            )
-            if configured and (
-                not credentials_ready or scope.account_id != self.binance_account_id
-            ):
-                raise DomainRejected(
-                    "BINANCE_CAPITAL_CREDENTIALS_NOT_READY",
-                    "dedicated Binance capital credentials do not match the exact account",
-                )
+                if configured and (
+                    not credentials_ready or scope.account_id != self.binance_account_id
+                ):
+                    if resolver_error is not None:
+                        raise resolver_error
+                    raise DomainRejected(
+                        "BINANCE_CAPITAL_CREDENTIALS_NOT_READY",
+                        "dedicated Binance capital credentials do not match the exact account",
+                    )
+                if credentials_ready:
+                    credential_values = {
+                        "api_key": str(self.binance_api_key),
+                        "api_secret": str(self.binance_api_secret),
+                    }
+            credentials_ready = credential_values is not None
             credential = CapitalCredential(
                 account_id=scope.account_id,
                 venue="BINANCE",
                 purpose="CAPITAL",
-                values=(
-                    {
-                        "api_key": str(self.binance_api_key),
-                        "api_secret": str(self.binance_api_secret),
-                    }
-                    if credentials_ready
-                    else {}
-                ),
+                values=credential_values or {},
                 permissions=(
                     frozenset({"READ", "TRANSFER", "WITHDRAW"})
                     if credentials_ready
                     else frozenset({"READ"})
                 ),
             )
+            binance_gateway = self.binance_gateway
+            if credentials_ready:
+                with_credentials = getattr(binance_gateway, "with_credentials", None)
+                if not callable(with_credentials):
+                    raise DomainRejected(
+                        "CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY",
+                        "the Binance capital gateway cannot bind exact-account credentials",
+                    )
+                binance_gateway = with_credentials(
+                    api_key=str(credential.values["api_key"]),
+                    api_secret=str(credential.values["api_secret"]),
+                )
             gateways: dict[CapitalVenue, Any] = {
-                "BINANCE": self.binance_gateway,
+                "BINANCE": binance_gateway,
                 "HYPERLIQUID": self.hyperliquid_gateway,
             }
         elif scope.venue == "HYPERLIQUID":
@@ -580,6 +612,7 @@ def build_production_capital_adapter_factory(
     binance_recv_window_ms: int,
     binance_timeout_seconds: float,
     binance_request_state: Any,
+    credential_resolver: CapitalCredentialResolver | None = None,
 ) -> ProductionCapitalAdapterFactory:
     """Construct native fallbacks only inside the isolated capital package."""
 
@@ -601,6 +634,7 @@ def build_production_capital_adapter_factory(
         binance_api_secret=binance_api_secret,
         binance_gateway=binance,
         hyperliquid_gateway=HyperliquidCapitalGateway(timeout_seconds=5),
+        credential_resolver=credential_resolver,
     )
 
 
@@ -611,6 +645,7 @@ __all__ = [
     "CapitalAdapterFactory",
     "CapitalBackend",
     "CapitalCredential",
+    "CapitalCredentialResolver",
     "CapitalOperation",
     "CapitalResult",
     "CapitalScope",

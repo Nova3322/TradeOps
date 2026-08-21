@@ -27,6 +27,20 @@ class ConnectionProbeResult:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedCapitalAccountBinding:
+    exchange_account_id: UUID
+    workspace_id: UUID
+    team_id: UUID
+    account_id: str
+    venue: str
+    environment: str
+    account_version: int
+    credential_version: int
+    credentials: dict[str, str] = field(repr=False)
+    account_mode: str = "STANDARD"
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedRuntimeAccountBinding:
     exchange_account_id: UUID
     workspace_id: UUID
