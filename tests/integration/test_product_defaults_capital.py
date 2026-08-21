@@ -42,6 +42,7 @@ from trading_control_plane.models import (
 )
 from trading_control_plane.notilt import NoTiltGateway
 from trading_control_plane.perptape import PerptapeClient, PerptapeFeedSnapshot
+from trading_control_plane.query_domains.capital import direct_capital_operation_summary
 from trading_control_plane.safe_spending import SafeSpendingGateway
 from trading_control_plane.service import TradingService
 
@@ -275,6 +276,22 @@ def test_direct_hyperliquid_uses_verified_database_main_address_over_environment
             outbound.destination_reference,
             inbound.source_reference,
         }
+        assert (
+            direct_capital_operation_summary(
+                outbound,
+                now,
+                active_owned_arbitrum_address=database_main,
+            )["active_configuration_match"]
+            is True
+        )
+        assert (
+            direct_capital_operation_summary(
+                outbound,
+                now,
+                active_owned_arbitrum_address="0x2222222222222222222222222222222222222222",
+            )["active_configuration_match"]
+            is False
+        )
 
 
 def test_capital_configuration_requires_canonical_runtime_account_ids_not_display_names(
@@ -719,6 +736,12 @@ def test_safe_to_hyperliquid_requires_source_receipt_then_settles_both_legs(
                 },
             )
             assert source_receipt.status_code == 200, source_receipt.text
+            source_operation = next(
+                item
+                for item in source_receipt.json()["data"]["direct_operations"]
+                if item["operation_id"] == operation_id
+            )
+            assert source_operation["active_configuration_match"] is True
             empty_wallet = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/hyperliquid-preview",
                 json={

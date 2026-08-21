@@ -17,6 +17,7 @@ DIRECT_CAPITAL_EXPIRED_BLOCKER = "CAPITAL_DIRECT_OPERATION_EXPIRED"
 def direct_capital_operation_summary(
     item: models.DirectCapitalOperation,
     now: datetime,
+    active_owned_arbitrum_address: str | None = None,
 ) -> dict[str, Any]:
     blockers = list(item.blockers)
     status = item.status
@@ -24,6 +25,13 @@ def direct_capital_operation_summary(
         status = "BLOCKED"
         if DIRECT_CAPITAL_EXPIRED_BLOCKER not in blockers:
             blockers.append(DIRECT_CAPITAL_EXPIRED_BLOCKER)
+    active_configuration_match: bool | None = None
+    if item.path == "VAULT_TO_HYPERLIQUID":
+        active_configuration_match = bool(
+            active_owned_arbitrum_address
+            and item.destination_reference
+            and active_owned_arbitrum_address.lower() == item.destination_reference.lower()
+        )
     return {
         "operation_id": str(item.operation_id),
         "path": item.path,
@@ -40,6 +48,7 @@ def direct_capital_operation_summary(
         "min_received": None if item.min_received is None else str(item.min_received),
         "source_reference_configured": item.source_reference is not None,
         "destination_reference_configured": item.destination_reference is not None,
+        "active_configuration_match": active_configuration_match,
         "stages": item.stages,
         "blockers": blockers,
         "execute_after": iso_datetime(item.execute_after),
@@ -520,6 +529,7 @@ class CapitalQueries(QueryComponent):
         user_id: UUID,
         *,
         authoritative_live_treasury_account_id: str | None = None,
+        active_owned_arbitrum_address: str | None = None,
         require_authoritative_live_treasury: bool = False,
     ) -> dict[str, Any]:
         workspace_id, team_id = self.active_scope_ids(user_id)
@@ -938,7 +948,11 @@ class CapitalQueries(QueryComponent):
                 ],
                 "transfers": [self._capital_transfer_summary(item) for item in visible_transfers],
                 "direct_operations": [
-                    direct_capital_operation_summary(item, now)
+                    direct_capital_operation_summary(
+                        item,
+                        now,
+                        active_owned_arbitrum_address=active_owned_arbitrum_address,
+                    )
                     for item in direct_operations
                     if self.can_user(user_id, "capital.view", item.account_id, item.venue)
                 ],

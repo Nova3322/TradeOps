@@ -70,12 +70,16 @@ test("Safe outbound flow verifies source receipt and completes the Hyperliquid s
     "verifyHyperliquidDepositReceipts",
     "TREASURY_WITHDRAWAL_RECEIPT_CONFIRMED",
     "第一笔钱包交易已提交，正在等待授权地址到账",
-    "授权地址已到账，正在自动准备 Hyperliquid 入金钱包确认",
-    "已提交，正在自动续接入金",
+    "授权地址已到账，正在准备 Hyperliquid 入金钱包确认",
+    "继续入金并打开钱包",
+    "directCapitalWalletActions.set(hyperliquidActionKey",
+    "operation.active_configuration_match !== true",
     "{attempts:200, delayMs:3000}",
   ]) {
     assert.equal(source.includes(marker), true, marker);
   }
+  assert.equal(source.includes("已提交，正在自动续接入金"), false);
+  assert.equal(source.includes("disabled aria-busy=\"true\""), false);
   assert.equal(source.includes("继续已提取资金并充值"), false);
   assert.ok(source.indexOf("verifyTreasuryWithdrawalReceipt") < source.indexOf("prepareHyperliquidWalletAction", source.indexOf("async function continueSafeOutboundExecution")));
 });
@@ -177,10 +181,11 @@ test("same-route and background refreshes preserve the viewport without a loadin
 
 test("Safe to Hyperliquid confirms the first transaction without reporting a receipt delay as failure", () => {
   for (const marker of [
-    "continuationScheduled:true",
+    "continuationPending:true",
     "directCapitalExecutionSuccessMessage",
-    "第一笔链上交易已提交；到账后会自动打开 Hyperliquid 入金钱包确认",
+    "第一笔链上交易已提交；到账后请点击“继续入金并打开钱包”完成第二次钱包确认",
     "reconcilePendingSafeHyperliquidDeposits",
+    "sourceReceiptConfirmed || targetPreviewReady",
   ]) {
     assert.equal(source.includes(marker), true, marker);
   }

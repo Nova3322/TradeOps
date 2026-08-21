@@ -70,7 +70,11 @@ class CapitalApplicationRuntime:
     def direct_action_snapshot(self, actor_id: UUID) -> JsonObject:
         """Return DB state without repeating slow external capital probes."""
 
-        return self.queries().capital_center(actor_id)
+        direct_settings, _saved_config = self.direct_settings(actor_id)
+        return self.queries().capital_center(
+            actor_id,
+            active_owned_arbitrum_address=(direct_settings.capital_direct_owned_arbitrum_address),
+        )
 
     def direct_plan_gate(self, actor_id: UUID) -> tuple[str | None, bool]:
         snapshot = self.snapshot(actor_id)
@@ -487,6 +491,7 @@ class CapitalApplicationRuntime:
         snapshot = self.queries().capital_center(
             user_id,
             authoritative_live_treasury_account_id=selected_treasury_account_id,
+            active_owned_arbitrum_address=(direct_settings.capital_direct_owned_arbitrum_address),
             require_authoritative_live_treasury=True,
         )
         expected_interval = self.settings.runtime_sync_interval_seconds
