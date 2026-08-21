@@ -189,7 +189,37 @@ class RecoveryRiskService(ServiceComponent):
             ).all()
             if not positions:
                 blockers.add(f"POSITION_FACTS_MISSING:{prefix}")
+            exchange_account = session.scalar(
+                select(models.ExchangeAccount).where(
+                    models.ExchangeAccount.team_id == policy.team_id,
+                    models.ExchangeAccount.environment == environment.value,
+                    models.ExchangeAccount.account_id == account_id,
+                    models.ExchangeAccount.venue == venue,
+                )
+            )
+            hyperliquid_dexes = {
+                str(item).lower()
+                for item in (
+                    []
+                    if exchange_account is None
+                    else exchange_account.freqtrade_hip3_dexes or []
+                )
+            }
             for position in positions:
+                instrument = session.get(models.Instrument, position.instrument_id)
+                hip3_dex = (
+                    None
+                    if instrument is None or ":" not in instrument.symbol
+                    else instrument.symbol.split(":", 1)[0].lower()
+                )
+                if (
+                    venue == "HYPERLIQUID"
+                    and hip3_dex is not None
+                    and hip3_dex not in hyperliquid_dexes
+                    and position.fact_status == domain.FactStatus.KNOWN.value
+                    and position.quantity == 0
+                ):
+                    continue
                 if position.fact_status != domain.FactStatus.KNOWN.value:
                     blockers.add(f"POSITION_UNKNOWN:{prefix}")
                     continue
