@@ -482,6 +482,22 @@ def test_ccxt_pro_fact_contract_normalizes_all_supported_venues(venue: str) -> N
     assert normalized[0].fills[0].fill_id == "external-fill"
     assert normalized[0].equity.equity == Decimal(100)
 
+    triggered_protection = normalize_fact_adapter_snapshot(
+        replace(
+            snapshot,
+            orders=(
+                {
+                    **snapshot.orders[0],
+                    "type": "limit",
+                    "reduce_only": True,
+                    "trigger_price": "59000",
+                },
+            ),
+        )
+    )
+    assert triggered_protection[0].orders[0].order_type == "STOPLOSS"
+    assert triggered_protection[0].orders[0].stop_price == Decimal("59000")
+
     incomplete_history = normalize_fact_adapter_snapshot(
         replace(snapshot, unknown_fields=("fetchMyTrades",))
     )

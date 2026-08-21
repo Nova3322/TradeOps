@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -835,6 +836,227 @@ class FactIngestionExecutionService(ServiceComponent):
                 order.updated_at = now
             return closed, covered
 
+    def _recover_filled_freqtrade_protection_exit(
+        self,
+        session: Session,
+        *,
+        actor_id: UUID,
+        team_id: UUID,
+        account_id: str,
+        venue: str,
+        environment: domain.ExecutionEnvironment,
+        instrument_id: UUID,
+        position: models.Position,
+        external_fills: tuple[venue_read_only.VenueFill, ...],
+        now: datetime,
+    ) -> UUID | None:
+        """Bind an exact Freqtrade-managed stop fill without issuing another order."""
+
+        if position.quantity != 0:
+            return None
+        campaigns = session.scalars(
+            select(models.Campaign)
+            .where(
+                models.Campaign.team_id == team_id,
+                models.Campaign.environment == environment.value,
+                models.Campaign.account_id == account_id,
+                models.Campaign.venue == venue,
+                models.Campaign.instrument_id == instrument_id,
+                models.Campaign.status != domain.CampaignStatus.CLOSED.value,
+            )
+            .with_for_update()
+        ).all()
+        if not campaigns:
+            return None
+        if len(campaigns) != 1:
+            _reject(
+                f"{venue}_PROTECTION_EXIT_CAMPAIGN_AMBIGUOUS",
+                "filled Freqtrade protection order does not map to one open campaign",
+            )
+        campaign = campaigns[0]
+        authorization = session.get(
+            models.TradingAuthorization,
+            campaign.authorization_id,
+            with_for_update=True,
+        )
+        if authorization is None or authorization.leverage is None:
+            _reject(
+                f"{venue}_PROTECTION_EXIT_AUTHORIZATION_INVALID",
+                "filled Freqtrade protection order lacks frozen authorization leverage",
+            )
+        existing_reductions = session.scalars(
+            select(models.OrderIntent).where(
+                models.OrderIntent.campaign_id == campaign.campaign_id,
+                models.OrderIntent.kind.in_(
+                    {domain.IntentKind.REDUCE.value, domain.IntentKind.EXIT.value}
+                ),
+            )
+        ).all()
+        if existing_reductions:
+            if len(existing_reductions) == 1:
+                existing_exit = existing_reductions[0]
+                bound_order = session.scalar(
+                    select(models.VenueOrder).where(
+                        models.VenueOrder.order_intent_id == existing_exit.intent_id,
+                        models.VenueOrder.client_order_id
+                        == f"ftp-{position.position_id.hex[:28]}",
+                        models.VenueOrder.venue_order_id.in_(
+                            {fill.order_id for fill in external_fills if fill.order_id}
+                        ),
+                    )
+                )
+                if (
+                    existing_exit.kind == domain.IntentKind.EXIT.value
+                    and existing_exit.trigger_source == "FREQTRADE_PROTECTION_FILLED"
+                    and existing_exit.status == domain.OrderIntentStatus.FILLED.value
+                    and bound_order is not None
+                ):
+                    return existing_exit.intent_id
+            _reject(
+                f"{venue}_PROTECTION_EXIT_INTENT_CONFLICT",
+                "filled Freqtrade protection order conflicts with an existing reduction intent",
+            )
+        campaign_fills = session.scalars(
+            select(models.VenueFill).where(
+                models.VenueFill.campaign_id == campaign.campaign_id,
+            )
+        ).all()
+        signed_campaign_quantity = sum(
+            (fill.quantity if fill.side == "BUY" else -fill.quantity for fill in campaign_fills),
+            Decimal(0),
+        )
+        if signed_campaign_quantity == 0:
+            return None
+        expected_side = "SELL" if signed_campaign_quantity > 0 else "BUY"
+        expected_quantity = abs(signed_campaign_quantity)
+        external_order_ids = {
+            fill.order_id
+            for fill in external_fills
+            if fill.order_id and fill.side == expected_side
+        }
+        if not external_order_ids:
+            return None
+        orders = session.scalars(
+            select(models.VenueOrder)
+            .where(
+                models.VenueOrder.team_id == team_id,
+                models.VenueOrder.environment == environment.value,
+                models.VenueOrder.account_id == account_id,
+                models.VenueOrder.venue == venue,
+                models.VenueOrder.instrument_id == instrument_id,
+                models.VenueOrder.venue_order_id.in_(external_order_ids),
+                models.VenueOrder.order_intent_id.is_(None),
+                models.VenueOrder.client_order_id == f"ftp-{position.position_id.hex[:28]}",
+                models.VenueOrder.order_type == "STOPLOSS",
+                models.VenueOrder.reduce_only,
+                models.VenueOrder.status == domain.VenueOrderStatus.FILLED.value,
+                models.VenueOrder.ordered_quantity > 0,
+                models.VenueOrder.filled_quantity == models.VenueOrder.ordered_quantity,
+                models.VenueOrder.filled_quantity == expected_quantity,
+            )
+            .with_for_update()
+        ).all()
+        if not orders:
+            return None
+        if len(orders) != 1:
+            _reject(
+                f"{venue}_PROTECTION_EXIT_CONFLICT",
+                "authoritative fills match multiple Freqtrade protection orders",
+            )
+        order = orders[0]
+        matching_external_fills = tuple(
+            fill for fill in external_fills if fill.order_id == order.venue_order_id
+        )
+        if (
+            not matching_external_fills
+            or any(fill.side != expected_side for fill in matching_external_fills)
+            or sum((fill.quantity for fill in matching_external_fills), Decimal(0))
+            != expected_quantity
+        ):
+            _reject(
+                f"{venue}_PROTECTION_EXIT_FILL_CONFLICT",
+                "filled Freqtrade protection order lacks exact authoritative fills",
+            )
+        cleanup_fills: list[models.VenueFill] = []
+        for external_fill in matching_external_fills:
+            cleanup_fill = session.scalar(
+                select(models.VenueFill)
+                .where(
+                    models.VenueFill.team_id == team_id,
+                    models.VenueFill.environment == environment.value,
+                    models.VenueFill.account_id == account_id,
+                    models.VenueFill.venue == venue,
+                    models.VenueFill.venue_fill_id == external_fill.fill_id,
+                )
+                .with_for_update()
+            )
+            if (
+                cleanup_fill is None
+                or cleanup_fill.order_intent_id is not None
+                or cleanup_fill.campaign_id is not None
+            ):
+                _reject(
+                    f"{venue}_PROTECTION_EXIT_FILL_CONFLICT",
+                    "authoritative Freqtrade protection fill has an incompatible binding",
+                )
+            cleanup_fills.append(cleanup_fill)
+
+        campaign.target_version += 1
+        campaign.current_target_quantity = Decimal(0)
+        campaign.target_reason = "FREQTRADE_PROTECTION_FILLED"
+        campaign.target_urgency = domain.TargetUrgency.IMMEDIATE.value
+        campaign.target_calculated_at = now
+        campaign.status = domain.CampaignStatus.CLOSING.value
+        campaign.updated_at = now
+        semantic_hash = hashlib.sha256(
+            (
+                f"{campaign.campaign_id}:{order.venue_order_id}:"
+                f"{order.filled_quantity}:{order.observed_at.isoformat()}"
+            ).encode()
+        ).hexdigest()
+        exit_intent = models.OrderIntent(
+            campaign_id=campaign.campaign_id,
+            authorization_id=campaign.authorization_id,
+            reservation_id=None,
+            kind=domain.IntentKind.EXIT.value,
+            side=expected_side,
+            quantity=order.filled_quantity,
+            leverage=authorization.leverage,
+            limit_price=None,
+            reduce_only=True,
+            trigger_source="FREQTRADE_PROTECTION_FILLED",
+            trigger_observed_at=max(fill.executed_at for fill in matching_external_fills),
+            add_unit_consumed=False,
+            target_version=campaign.target_version,
+            position_id=position.position_id,
+            position_observed_at=position.observed_at,
+            status=domain.OrderIntentStatus.FILLED.value,
+            semantic_hash=semantic_hash,
+            actor_id=str(actor_id),
+            correlation_id=uuid4(),
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(exit_intent)
+        session.flush()
+        order.order_intent_id = exit_intent.intent_id
+        for cleanup_fill in cleanup_fills:
+            cleanup_fill.order_intent_id = exit_intent.intent_id
+            cleanup_fill.campaign_id = campaign.campaign_id
+        self.transactions.audit(
+            session,
+            actor_id=str(actor_id),
+            event_type="FREQTRADE_PROTECTION_EXIT_RECOVERED",
+            object_type="OrderIntent",
+            object_id=exit_intent.intent_id,
+            reason=f"order={order.venue_order_id};fills={len(cleanup_fills)}",
+            correlation_id=exit_intent.correlation_id,
+            object_version=1,
+            now=now,
+        )
+        return exit_intent.intent_id
+
     def _ingest_read_only_snapshot(
         self,
         account_id: str,
@@ -1244,6 +1466,18 @@ class FactIngestionExecutionService(ServiceComponent):
                 fill_count += 1
 
             session.flush()
+            self._recover_filled_freqtrade_protection_exit(
+                session,
+                actor_id=actor_id,
+                team_id=team.team_id,
+                account_id=account_id,
+                venue=venue,
+                environment=environment,
+                instrument_id=instrument.instrument_id,
+                position=position,
+                external_fills=snapshot.fills,
+                now=now,
+            )
             bound_orders = session.scalars(
                 select(models.VenueOrder)
                 .where(
