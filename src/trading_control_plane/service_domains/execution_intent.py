@@ -886,6 +886,104 @@ class IntentExecutionService(ServiceComponent):
             )
             return token
 
+    def acquire_reduce_only_sender(
+        self,
+        intent_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        actor_id: UUID,
+        now: datetime,
+        lease_duration: timedelta = scope_rules.DEFAULT_SENDER_LEASE_DURATION,
+    ) -> int:
+        """Fence one exact READY reduce-only send without requiring a MATCH takeover."""
+
+        with self.database.session_factory.begin() as session:
+            environment, account_id, venue = scope_rules.scope_parts(execution_scope)
+            if not owner_id or lease_duration <= timedelta(0):
+                rejections.reject(
+                    "SENDER_LEASE_INVALID", "owner and positive lease duration are required"
+                )
+            intent = session.get(models.OrderIntent, intent_id, with_for_update=True)
+            campaign = None if intent is None else session.get(models.Campaign, intent.campaign_id)
+            if intent is None or campaign is None:
+                rejections.reject("ORDER_INTENT_NOT_FOUND", "reduce-only intent is unavailable")
+            team = self.transactions.require_role(
+                session,
+                actor_id,
+                "sender.manage",
+                campaign.account_id,
+                campaign.venue,
+                team_id=campaign.team_id,
+            )
+            if (
+                execution_scope
+                != scope_rules.scope_key(
+                    campaign.environment,
+                    campaign.account_id,
+                    campaign.venue,
+                )
+                or campaign.environment != environment
+                or campaign.account_id != account_id
+                or campaign.venue != venue
+                or intent.status != domain.OrderIntentStatus.READY.value
+                or not intent.reduce_only
+                or intent.kind
+                not in {
+                    domain.IntentKind.REDUCE.value,
+                    domain.IntentKind.EXIT.value,
+                }
+                or intent.dispatch_backend is not None
+                or intent.dispatch_started_at is not None
+            ):
+                rejections.reject(
+                    "REDUCE_ONLY_SENDER_SCOPE_INVALID",
+                    "sender bypass requires the exact unsent READY reduce-only intent",
+                )
+            lease = session.get(
+                models.SenderLease,
+                (team.team_id, execution_scope),
+                with_for_update=True,
+            )
+            if lease is None:
+                token = 1
+                session.add(
+                    models.SenderLease(
+                        team_id=team.team_id,
+                        execution_scope=execution_scope,
+                        owner_id=owner_id,
+                        fencing_token=token,
+                        expires_at=now + lease_duration,
+                        updated_at=now,
+                    )
+                )
+            elif lease.owner_id != owner_id and lease.expires_at > now:
+                rejections.reject("SENDER_LEASE_HELD", "another sender still owns the live lease")
+            elif lease.owner_id == owner_id and lease.expires_at > now:
+                token = lease.fencing_token
+                lease.expires_at = now + lease_duration
+                lease.updated_at = now
+            else:
+                token = lease.fencing_token + 1
+                lease.owner_id = owner_id
+                lease.fencing_token = token
+                lease.expires_at = now + lease_duration
+                lease.updated_at = now
+            self.transactions.audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="SENDER_REDUCE_ONLY_LEASE_ACQUIRED",
+                object_type="SenderLease",
+                object_id=execution_scope,
+                reason=f"intent={intent.intent_id};reduce_only=true",
+                correlation_id=intent.correlation_id,
+                object_version=token,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=account_id,
+                now=now,
+            )
+            return token
+
     def _validate_sender(
         self,
         session: Session,

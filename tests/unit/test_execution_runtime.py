@@ -54,6 +54,18 @@ class _Service:
         self.acquired.append((execution_scope, f"query:{owner_id}"))
         return 9
 
+    def acquire_reduce_only_sender(
+        self,
+        intent_id: object,
+        execution_scope: str,
+        owner_id: str,
+        actor_id: object,
+        now: datetime,
+    ) -> int:
+        del intent_id, actor_id, now
+        self.acquired.append((execution_scope, f"reduce:{owner_id}"))
+        return 10
+
 
 class _SenderTakeoverService(_Service):
     def __init__(self, status: str) -> None:
@@ -191,6 +203,25 @@ def test_worker_uses_fenced_query_recovery_for_dispatched_unknown() -> None:
     assert worker._acquire_sender(intent) == 9
     assert service.acquired == [
         ("LIVE:acct-1:BINANCE", f"query:{AUTOMATIC_EXECUTION_OWNER}")
+    ]
+
+
+def test_worker_uses_bounded_sender_takeover_for_ready_reduce_only() -> None:
+    worker = object.__new__(AutomaticExecutionWorker)
+    service = _Service()
+    intent = AutomaticIntent(
+        intent_id=uuid4(),
+        campaign_id=uuid4(),
+        actor_id=uuid4(),
+        execution_scope="LIVE:acct-1:BINANCE",
+        reduce_only=True,
+    )
+    worker.service = service
+    worker.clock = lambda: datetime(2026, 8, 20, tzinfo=UTC)
+
+    assert worker._acquire_sender(intent) == 10
+    assert service.acquired == [
+        ("LIVE:acct-1:BINANCE", f"reduce:{AUTOMATIC_EXECUTION_OWNER}")
     ]
 
 
