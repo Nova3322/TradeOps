@@ -949,6 +949,82 @@ def test_sender_fencing_rejects_old_owner_after_reconciled_takeover(
     )
 
 
+def test_expired_sender_lease_allows_only_exact_ready_reduce_only_intent(
+    database: Database,
+    service: TradingService,
+) -> None:
+    ids = seed(service)
+    proposal_id = create_approved_proposal(service, ids)
+    authorization_id = issue_authorization(service, ids, proposal_id)
+    initial = service.create_order_intent(
+        authorization_id,
+        ids["operator"],
+        IntentKind.INITIAL,
+        "acct-1",
+        "BINANCE",
+        ids["instrument"],
+        Direction.LONG,
+        Decimal("1"),
+        "opening",
+        now=NOW,
+    )
+    service.record_position(
+        "acct-1",
+        "BINANCE",
+        ids["instrument"],
+        Decimal("1"),
+        Decimal("100"),
+        Decimal("100"),
+        True,
+        ids["operator"],
+        now=NOW,
+    )
+    with database.session_factory.begin() as session:
+        stored = session.get(OrderIntent, initial.intent_id, with_for_update=True)
+        assert stored is not None
+        stored.status = OrderIntentStatus.FILLED.value
+        stored.updated_at = NOW
+
+    exit_intent_id = service.create_reduction_intent(
+        initial.campaign_id,
+        ids["operator"],
+        "reduce-only-sender",
+        candidates=(TargetCandidate(Decimal("0"), TargetUrgency.URGENT, "exit"),),
+        now=NOW,
+    )
+    scope = "TESTNET:acct-1:BINANCE"
+    first = service.acquire_sender(scope, "worker-old", ids["operator"], NOW)
+
+    with pytest.raises(DomainRejected, match="SENDER_LEASE_HELD"):
+        service.acquire_reduce_only_sender(
+            exit_intent_id,
+            scope,
+            "worker-new",
+            ids["operator"],
+            NOW + timedelta(seconds=30),
+        )
+
+    takeover_time = NOW + timedelta(minutes=2)
+    second = service.acquire_reduce_only_sender(
+        exit_intent_id,
+        scope,
+        "worker-new",
+        ids["operator"],
+        takeover_time,
+    )
+    assert second > first
+    service.validate_sender(scope, "worker-new", second, ids["operator"], takeover_time)
+
+    with pytest.raises(DomainRejected, match="REDUCE_ONLY_SENDER_SCOPE_INVALID"):
+        service.acquire_reduce_only_sender(
+            initial.intent_id,
+            scope,
+            "worker-new",
+            ids["operator"],
+            takeover_time,
+        )
+
+
 def test_active_intent_blocks_duplicate_reduce_only_intent(service: TradingService) -> None:
     ids = seed(service)
     proposal_id = create_approved_proposal(service, ids)

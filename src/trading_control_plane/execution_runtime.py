@@ -44,6 +44,7 @@ class AutomaticIntent:
     actor_id: UUID
     execution_scope: str
     query_only: bool = False
+    reduce_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +309,7 @@ class AutomaticExecutionWorker:
                     models.Campaign.account_id,
                     models.Campaign.venue,
                     models.OrderIntent.status,
+                    models.OrderIntent.reduce_only,
                 )
                 .join(
                     models.Campaign,
@@ -360,6 +362,7 @@ class AutomaticExecutionWorker:
             account_id,
             venue,
             intent_status,
+            reduce_only,
         ) in rows:
             assert actor_id is not None
             results.append(
@@ -369,6 +372,7 @@ class AutomaticExecutionWorker:
                     actor_id=actor_id,
                     execution_scope=f"{environment}:{account_id}:{venue}",
                     query_only=intent_status != domain.OrderIntentStatus.READY.value,
+                    reduce_only=bool(reduce_only),
                 )
             )
         return tuple(results)
@@ -713,6 +717,14 @@ class AutomaticExecutionWorker:
         now = self.clock()
         if intent.query_only:
             return self.service.acquire_freqtrade_recovery_sender(
+                intent.intent_id,
+                intent.execution_scope,
+                AUTOMATIC_EXECUTION_OWNER,
+                intent.actor_id,
+                now,
+            )
+        if intent.reduce_only:
+            return self.service.acquire_reduce_only_sender(
                 intent.intent_id,
                 intent.execution_scope,
                 AUTOMATIC_EXECUTION_OWNER,
