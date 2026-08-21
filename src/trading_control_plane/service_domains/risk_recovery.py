@@ -205,6 +205,7 @@ class RecoveryRiskService(ServiceComponent):
                     else exchange_account.freqtrade_hip3_dexes or []
                 )
             }
+            relevant_positions: list[models.Position] = []
             for position in positions:
                 instrument = session.get(models.Instrument, position.instrument_id)
                 hip3_dex = (
@@ -220,6 +221,7 @@ class RecoveryRiskService(ServiceComponent):
                     and position.quantity == 0
                 ):
                     continue
+                relevant_positions.append(position)
                 if position.fact_status != domain.FactStatus.KNOWN.value:
                     blockers.add(f"POSITION_UNKNOWN:{prefix}")
                     continue
@@ -256,9 +258,24 @@ class RecoveryRiskService(ServiceComponent):
                 [
                     policy.updated_at,
                     *([equity.observed_at] if equity is not None else []),
-                    *(position.observed_at for position in positions),
+                    *(position.observed_at for position in relevant_positions),
                 ]
             )
+            reconciliation_sensitive_state = any(
+                position.fact_status != domain.FactStatus.KNOWN.value
+                or position.quantity != 0
+                for position in relevant_positions
+            ) or session.scalar(
+                select(models.Campaign.campaign_id)
+                .where(
+                    models.Campaign.team_id == policy.team_id,
+                    models.Campaign.environment == environment.value,
+                    models.Campaign.account_id == account_id,
+                    models.Campaign.venue == venue,
+                    models.Campaign.status != domain.CampaignStatus.CLOSED.value,
+                )
+                .limit(1)
+            ) is not None
             if (
                 reconciliation is None
                 or reconciliation.status != domain.ReconciliationStatus.MATCH.value
@@ -267,7 +284,10 @@ class RecoveryRiskService(ServiceComponent):
                 blockers.add(f"COMPUTED_RECONCILIATION_MATCH_REQUIRED:{prefix}")
             elif (
                 scope_rules.fact_is_stale(reconciliation.completed_at, now, max_age)
-                or reconciliation.completed_at < latest_source_at
+                or (
+                    reconciliation_sensitive_state
+                    and reconciliation.completed_at < latest_source_at
+                )
             ):
                 blockers.add(f"RECONCILIATION_STALE:{prefix}")
         return sorted(blockers)

@@ -28,6 +28,7 @@ from trading_control_plane.fact_adapter_ingestion import normalize_fact_adapter_
 from trading_control_plane.fact_adapter_runtime import (
     FactAdapterRuntime,
     _bootstrap_symbol_provider,
+    _persist_runtime_snapshot,
 )
 from trading_control_plane.service import PreparedRuntimeAccountBinding
 
@@ -1235,6 +1236,63 @@ def test_runtime_reuses_one_connection_and_rotates_on_credential_version() -> No
         assert exchanges[1].closed is True
 
     asyncio.run(scenario())
+
+
+def test_periodic_runtime_snapshot_persists_then_computes_scope_reconciliation() -> None:
+    binding = PreparedRuntimeAccountBinding(
+        exchange_account_id=UUID("00000000-0000-0000-0000-000000000001"),
+        workspace_id=UUID("00000000-0000-0000-0000-000000000002"),
+        team_id=UUID("00000000-0000-0000-0000-000000000003"),
+        service_principal_id=UUID("00000000-0000-0000-0000-000000000004"),
+        service_principal_username="runtime-sync",
+        account_id="account-a",
+        venue="BINANCE",
+        environment="LIVE",
+        account_version=1,
+        credential_version=1,
+        credentials={"api_key": "key-a", "api_secret": "secret-a"},
+    )
+    adapter = CcxtProFactAdapter(
+        _scope(),
+        credentials=_credentials("BINANCE"),
+        exchange_factory=lambda *_args: FakeCcxtProExchange(),
+        clock=lambda: _NOW,
+    )
+    initial = asyncio.run(adapter.snapshot(reason="INITIAL"))
+    events: list[tuple[str, object]] = []
+
+    class ServiceStub:
+        def ingest_normalized_read_only_account_snapshot(self, *args: object, **kwargs: object):
+            events.append(("ingest", (args, kwargs)))
+
+        def reconcile_scope(self, execution_scope: str, actor_id: UUID, *, now: datetime):
+            events.append(("reconcile", (execution_scope, actor_id, now)))
+
+        def record_runtime_source_health(self, *args: object, **kwargs: object):
+            events.append(("health", (args, kwargs)))
+
+    service = ServiceStub()
+    _persist_runtime_snapshot(  # type: ignore[arg-type]
+        service,
+        binding,
+        replace(initial, reason="PERIODIC_RECONCILIATION"),
+        now=_NOW,
+    )
+    assert [event[0] for event in events] == ["ingest", "reconcile"]
+    assert events[1][1] == (
+        "LIVE:account-a:BINANCE",
+        binding.service_principal_id,
+        _NOW,
+    )
+
+    events.clear()
+    _persist_runtime_snapshot(  # type: ignore[arg-type]
+        service,
+        binding,
+        replace(initial, reason="WEBSOCKET_INCREMENT"),
+        now=_NOW,
+    )
+    assert [event[0] for event in events] == ["ingest"]
 
 
 def test_websocket_disconnect_reconnects_then_rest_compensates_before_increment() -> None:
