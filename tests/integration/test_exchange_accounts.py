@@ -568,6 +568,128 @@ def test_confirmed_external_fill_closes_matching_unbound_order(
         assert session.query(PersistedVenueFill).count() == 1
         assert session.query(OrderIntent).count() == 0
 
+    fail_closed_at = filled_at + timedelta(seconds=2)
+    nonzero_snapshot = replace(
+        base,
+        symbol="ETHUSDT",
+        observed_at=fail_closed_at,
+        instrument=replace(base.instrument, symbol="ETHUSDT"),
+        orders=(
+            replace(
+                base.orders[1],
+                order_id="nonzero-protection-order",
+                client_order_id="nonzero-protection-client",
+                observed_at=fail_closed_at,
+            ),
+            replace(
+                base.orders[1],
+                order_id="still-open-protection-order",
+                client_order_id="still-open-protection-client",
+                observed_at=fail_closed_at,
+            ),
+            replace(
+                base.orders[0],
+                order_id="ordinary-market-order",
+                client_order_id="ordinary-market-client",
+                reduce_only=False,
+                observed_at=fail_closed_at,
+            ),
+            replace(
+                base.orders[0],
+                order_id="ordinary-limit-order",
+                client_order_id="ordinary-limit-client",
+                order_type="LIMIT",
+                reduce_only=False,
+                observed_at=fail_closed_at,
+            ),
+        ),
+        fills=(),
+        position=replace(
+            base.position,
+            quantity=Decimal("0.2"),
+            average_entry_price=Decimal("3000"),
+            mark_price=Decimal("3010"),
+            observed_at=fail_closed_at,
+        ),
+        equity=replace(base.equity, observed_at=fail_closed_at),
+    )
+    unknown_snapshot = replace(
+        nonzero_snapshot,
+        symbol="XRPUSDT",
+        instrument=replace(nonzero_snapshot.instrument, symbol="XRPUSDT"),
+        orders=(
+            replace(
+                base.orders[1],
+                order_id="unknown-position-protection-order",
+                client_order_id="unknown-position-protection-client",
+                observed_at=fail_closed_at,
+            ),
+        ),
+        position=replace(
+            base.position,
+            quantity=Decimal("10"),
+            average_entry_price=Decimal("1"),
+            mark_price=Decimal("1"),
+            observed_at=fail_closed_at,
+        ),
+    )
+    service.ingest_normalized_read_only_account_snapshot(
+        binding.account_id,
+        binding.service_principal_id,
+        (nonzero_snapshot, unknown_snapshot),
+        venue=binding.venue,
+        environment=ExecutionEnvironment.LIVE,
+        runtime_binding=binding,
+        now=fail_closed_at,
+    )
+    with database.session_factory.begin() as session:
+        unknown_position = session.scalar(
+            select(Position)
+            .join(Instrument, Position.instrument_id == Instrument.instrument_id)
+            .where(
+                Position.team_id == binding.team_id,
+                Position.account_id == binding.account_id,
+                Position.venue == binding.venue,
+                Instrument.symbol == "XRPUSDT",
+            )
+            .with_for_update()
+        )
+        assert unknown_position is not None
+        unknown_position.fact_status = "UNKNOWN"
+
+    service._cover_absent_positions(
+        binding.account_id,
+        binding.service_principal_id,
+        venue=binding.venue,
+        environment=ExecutionEnvironment.LIVE,
+        active_symbols={"ETHUSDT", "XRPUSDT"},
+        observed_order_ids={"still-open-protection-order"},
+        now=fail_closed_at + timedelta(seconds=1),
+    )
+    with database.session_factory() as session:
+        states = dict(
+            session.execute(
+                select(VenueOrder.venue_order_id, VenueOrder.status).where(
+                    VenueOrder.venue_order_id.in_(
+                        {
+                            "nonzero-protection-order",
+                            "unknown-position-protection-order",
+                            "still-open-protection-order",
+                            "ordinary-market-order",
+                            "ordinary-limit-order",
+                        }
+                    )
+                )
+            ).all()
+        )
+        assert states == {
+            "nonzero-protection-order": "UNKNOWN",
+            "unknown-position-protection-order": "UNKNOWN",
+            "still-open-protection-order": "SENT",
+            "ordinary-market-order": "UNKNOWN",
+            "ordinary-limit-order": "UNKNOWN",
+        }
+
 
 def encryption_key() -> str:
     return base64.urlsafe_b64encode(b"exchange-account-test-key-32byt!"[:32]).decode().rstrip("=")
