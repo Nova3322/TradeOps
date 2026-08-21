@@ -29,6 +29,7 @@ test("Binance connection diagnostics distinguish rate limit causes and retry tim
     "BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED",
     "BINANCE_RATE_LIMITED_COOLDOWN:'币安当前进程仍在临时冷却，本次未向币安发送请求'",
     "BINANCE_CONNECTION_RETRY_DEFERRED:'币安当前进程仍在临时冷却，本次未向币安发送请求'",
+    "BINANCE_CAPITAL_RESPONSE_INVALID:'币安资金 API 返回了未识别的数据格式，本次操作未提交。",
     "fmtBinanceConnectionDiagnostic",
   ]) {
     assert.equal(shared.includes(marker), true, marker);

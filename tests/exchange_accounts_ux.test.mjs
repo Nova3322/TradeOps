@@ -35,9 +35,9 @@ test('production account cards expose the exact-account detail workflow', () => 
   assert.match(routerSource, /venueAccountMatch = path\.match\(\/\^\\\/venues\\\/\(\[\^\/\]\+\)\$\/\)/);
   assert.match(routerSource, /renderVenueAccountDetail\(venueAccountMatch\[1\]\)/);
   assert.match(indexSource, /execution\.js\?v=195/);
-  assert.match(indexSource, /shared\.js\?v=16/);
+  assert.match(indexSource, /shared\.js\?v=17/);
   assert.match(indexSource, /accounts\.js\?v=183/);
-  assert.match(serviceWorkerSource, /trading-shell-v230/);
+  assert.match(serviceWorkerSource, /trading-shell-v231/);
 });
 
 test('standard Binance account mode is rendered as known product truth', () => {
