@@ -1372,6 +1372,101 @@ class FakeExchangeConnectionVerifier:
         return self.outcomes[venue]
 
 
+def test_binance_process_cooldown_defers_without_mutating_account_state(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    TradingService(database).bootstrap_admin("binance-cooldown-admin", now=now)
+    retry_at = now + timedelta(minutes=5)
+    verifier = FakeExchangeConnectionVerifier(
+        {
+            "BINANCE": ConnectionProbeResult(
+                False,
+                "BINANCE_RATE_LIMITED_COOLDOWN",
+                {
+                    "category": "IP_TEMPORARILY_BANNED",
+                    "http_status": 418,
+                    "failed_at": now.isoformat(),
+                    "next_retry_at": retry_at.isoformat(),
+                },
+            )
+        }
+    )
+    settings = Settings(
+        environment="test",
+        database_url=str(database.engine.url),
+        allow_mock_identity=True,
+        session_signing_secret="binance-cooldown-secret-long-enough",  # noqa: S106
+        credential_encryption_key=encryption_key(),
+        public_base_url="http://test",
+        _env_file=None,
+    )
+    app = create_app(
+        settings,
+        database,
+        PerptapeClient(
+            base_url="https://perptape.com",
+            api_key=None,
+            contract_version="breakouts-v1",
+            cache_ttl=timedelta(minutes=1),
+        ),
+        exchange_connection_verifier=verifier,
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            login = await client.post(
+                "/api/auth/mock/login", json={"username": "binance-cooldown-admin"}
+            )
+            assert login.status_code == 200
+            created = await client.post(
+                "/api/exchange-accounts",
+                json={
+                    "account_id": "binance-cooldown-account",
+                    "venue": "BINANCE",
+                    "label": "Binance Cooldown",
+                    "credentials": {"api_key": "key", "api_secret": "secret"},
+                    "idempotency_key": "binance-cooldown-create",
+                },
+            )
+            assert created.status_code == 200, created.text
+            account_id = created.json()["exchange_account_id"]
+
+            deferred = await client.post(
+                f"/api/exchange-accounts/{account_id}/connection-verifications",
+                json={
+                    "expected_version": 1,
+                    "idempotency_key": "binance-cooldown-verify",
+                },
+            )
+            assert deferred.status_code == 429, deferred.text
+            assert deferred.json()["error"] == {
+                "code": "BINANCE_CONNECTION_RETRY_DEFERRED",
+                "message": (
+                    "Binance connection verification was not sent while the current "
+                    "process cooldown is active"
+                ),
+                "details": {
+                    "category": "IP_TEMPORARILY_BANNED",
+                    "http_status": 418,
+                    "failed_at": now.isoformat(),
+                    "next_retry_at": retry_at.isoformat(),
+                },
+                "retryable": True,
+            }
+
+            listed = (await client.get("/api/exchange-accounts")).json()["data"]["data"]
+            account = next(item for item in listed if item["exchange_account_id"] == account_id)
+            assert account["version"] == 1
+            assert account["connection"]["status"] == "NOT_VERIFIED"
+            assert account["connection"]["error_code"] is None
+            assert account["runtime_binding"]["bound"] is False
+            assert account["trading"]["status"] == "DISABLED"
+            assert len(verifier.calls) == 1
+
+    asyncio.run(scenario())
+
+
 class WorkerProbeFixture:
     def __init__(
         self,
