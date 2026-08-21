@@ -575,6 +575,14 @@ def test_live_restore_ignores_only_inactive_flat_hyperliquid_hip3_facts(
     assert status["restore_conditions"]["ready"] is True
     assert status["restore_conditions"]["blockers"] == []
 
+    fixture.now = current_at + timedelta(seconds=3)
+    fixture.record_flat_facts(mark_price=Decimal("101"))
+    refreshed_status = service.risk_control_status(
+        fixture.ids["admin"], scope, now=current_at + timedelta(seconds=4)
+    )
+    assert refreshed_status["restore_conditions"]["ready"] is True
+    assert refreshed_status["restore_conditions"]["blockers"] == []
+
     with database.session_factory.begin() as session:
         account = session.scalar(
             select(ExchangeAccount).where(
@@ -587,7 +595,7 @@ def test_live_restore_ignores_only_inactive_flat_hyperliquid_hip3_facts(
         account.freqtrade_hip3_dexes = ["xyz"]
 
     enabled_status = service.risk_control_status(
-        fixture.ids["admin"], scope, now=current_at + timedelta(seconds=3)
+        fixture.ids["admin"], scope, now=current_at + timedelta(seconds=5)
     )
     assert enabled_status["restore_conditions"]["ready"] is False
     assert (
@@ -616,10 +624,10 @@ def test_live_restore_ignores_only_inactive_flat_hyperliquid_hip3_facts(
         fixture.ids["operator"],
         environment=ExecutionEnvironment.LIVE,
         observed_at=NOW,
-        now=current_at + timedelta(seconds=4),
+        now=current_at + timedelta(seconds=6),
     )
     exposed_status = service.risk_control_status(
-        fixture.ids["admin"], scope, now=current_at + timedelta(seconds=5)
+        fixture.ids["admin"], scope, now=current_at + timedelta(seconds=7)
     )
     assert (
         "POSITION_STALE:LIVE:acct-1:HYPERLIQUID"
@@ -636,10 +644,10 @@ def test_live_restore_ignores_only_inactive_flat_hyperliquid_hip3_facts(
         False,
         fixture.ids["operator"],
         environment=ExecutionEnvironment.LIVE,
-        now=current_at + timedelta(seconds=6),
+        now=current_at + timedelta(seconds=8),
     )
     unknown_status = service.risk_control_status(
-        fixture.ids["admin"], scope, now=current_at + timedelta(seconds=7)
+        fixture.ids["admin"], scope, now=current_at + timedelta(seconds=9)
     )
     assert (
         "POSITION_UNKNOWN:LIVE:acct-1:HYPERLIQUID"

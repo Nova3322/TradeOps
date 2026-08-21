@@ -424,6 +424,65 @@ def _bootstrap_symbol_provider(settings: Settings) -> SymbolProvider:
     return provider
 
 
+def _persist_runtime_snapshot(
+    service: TradingService,
+    binding: PreparedRuntimeAccountBinding,
+    snapshot: ExchangeFactSnapshot,
+    *,
+    now: datetime,
+) -> None:
+    if snapshot.data_status == "CURRENT":
+        service.ingest_normalized_read_only_account_snapshot(
+            binding.account_id,
+            binding.service_principal_id,
+            normalize_fact_adapter_snapshot(snapshot),
+            venue=binding.venue,
+            environment=ExecutionEnvironment(binding.environment),
+            runtime_binding=binding,
+            now=now,
+        )
+        if snapshot.reason == "PERIODIC_RECONCILIATION":
+            try:
+                service.reconcile_scope(
+                    f"{binding.environment}:{binding.account_id}:{binding.venue}",
+                    binding.service_principal_id,
+                    now=now,
+                )
+            except DomainRejected as exc:
+                logger.warning(
+                    "Periodic computed reconciliation deferred",
+                    extra={
+                        "event": "fact_adapter_computed_reconciliation_deferred",
+                        "component": "fact-adapter",
+                        "venue": binding.venue,
+                        "account_id": binding.account_id,
+                        "error_code": exc.code,
+                    },
+                )
+        return
+    error_code = next(
+        (
+            str(field).split(":", 1)[0]
+            for field in snapshot.unknown_fields
+            if str(field).startswith("FACT_ADAPTER_")
+        ),
+        f"FACT_ADAPTER_{snapshot.data_status}",
+    )
+    service.record_runtime_source_health(
+        binding.service_principal_id,
+        {
+            binding.venue: {
+                "status": "FAILED",
+                "items_observed": 0,
+                "error_code": error_code,
+            }
+        },
+        scopes={binding.venue: (binding.account_id, binding.venue)},
+        runtime_account_binding=binding,
+        now=now,
+    )
+
+
 def create_runtime_app(
     *,
     settings: Settings | None = None,
@@ -446,38 +505,11 @@ def create_runtime_app(
         binding: PreparedRuntimeAccountBinding,
         snapshot: ExchangeFactSnapshot,
     ) -> None:
-        now = datetime.now(UTC)
-        if snapshot.data_status == "CURRENT":
-            service.ingest_normalized_read_only_account_snapshot(
-                binding.account_id,
-                binding.service_principal_id,
-                normalize_fact_adapter_snapshot(snapshot),
-                venue=binding.venue,
-                environment=ExecutionEnvironment(binding.environment),
-                runtime_binding=binding,
-                now=now,
-            )
-            return
-        error_code = next(
-            (
-                str(field).split(":", 1)[0]
-                for field in snapshot.unknown_fields
-                if str(field).startswith("FACT_ADAPTER_")
-            ),
-            f"FACT_ADAPTER_{snapshot.data_status}",
-        )
-        service.record_runtime_source_health(
-            binding.service_principal_id,
-            {
-                binding.venue: {
-                    "status": "FAILED",
-                    "items_observed": 0,
-                    "error_code": error_code,
-                }
-            },
-            scopes={binding.venue: (binding.account_id, binding.venue)},
-            runtime_account_binding=binding,
-            now=now,
+        _persist_runtime_snapshot(
+            service,
+            binding,
+            snapshot,
+            now=datetime.now(UTC),
         )
 
     runtime = FactAdapterRuntime(
