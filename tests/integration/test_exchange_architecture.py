@@ -127,6 +127,7 @@ class _WorkerFixture:
         self.enter_tag: str | None = None
         self.side = "long"
         self.open_quantity = Decimal(0)
+        self.leverage = Decimal(1)
         self.last_closed_quantity = Decimal(0)
         self.orders: list[dict[str, Any]] = []
         self.is_open = False
@@ -158,13 +159,13 @@ class _WorkerFixture:
             "pair": self.pair,
             "is_short": self.side == "short",
             "amount": str(reported_quantity),
-            "stake_amount": str(reported_quantity * self.mark * Decimal("0.98")),
+            "stake_amount": str(reported_quantity * self.mark / self.leverage),
             "open_rate": str(self.mark),
             "current_rate": str(self.mark),
             "close_rate": None if self.is_open else str(self.mark),
             "is_open": self.is_open,
             "enter_tag": self.enter_tag,
-            "leverage": "1",
+            "leverage": str(self.leverage),
             "stop_loss_abs": str(self.mark * Decimal("0.95")),
             "stoploss_order_id": stop_id if self.is_open else None,
             "open_timestamp": int(NOW.timestamp() * 1_000),
@@ -213,8 +214,9 @@ class _WorkerFixture:
             requested_quantity = (
                 Decimal(str(payload["stakeamount"]))
                 * Decimal(str(payload["leverage"]))
-                / (self.mark * Decimal("0.98"))
+                / self.mark
             )
+            self.leverage = Decimal(str(payload["leverage"]))
             quantity = self.entry_order_quantity or requested_quantity
             filled = self.entry_fill if self.entry_fill is not None else quantity
             assert Decimal(0) < filled <= quantity <= requested_quantity
@@ -495,7 +497,7 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
         key=slug,
         direction=Direction(direction),
         quantity=Decimal(2) if lifecycle else quantity,
-        max_risk=Decimal("5"),
+        max_risk=Decimal("10"),
         details={
             "invalidation_price": "95",
             "allow_auto_add": lifecycle,
@@ -802,6 +804,7 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
     asyncio.run(scenario())
 
     assert worker_fixture.writes == (4 if lifecycle else 1)
+    assert worker_fixture.leverage == Decimal(10)
     if (venue, environment, direction) == ("BINANCE", "LIVE", "LONG"):
         rpc_binding = service.runtime_freqtrade_worker_bindings()[0]
         controlled_trade = parse_freqtrade_trade(worker_fixture._trade())

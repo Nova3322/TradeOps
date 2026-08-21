@@ -150,6 +150,9 @@ class CampaignExecutionService(ServiceComponent):
             campaign = session.get(models.Campaign, campaign_id, with_for_update=True)
             if campaign is None:
                 rejections.reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            authorization = session.get(
+                models.TradingAuthorization, campaign.authorization_id
+            )
             self.transactions.require_role(
                 session,
                 actor_id,
@@ -275,6 +278,7 @@ class CampaignExecutionService(ServiceComponent):
                 kind=kind.value,
                 side=side,
                 quantity=reduction_quantity,
+                leverage=None if authorization is None else authorization.leverage,
                 limit_price=limit_price,
                 reduce_only=True,
                 trigger_source="CAMPAIGN_TARGET",
@@ -450,6 +454,7 @@ class CampaignExecutionService(ServiceComponent):
                 kind=domain.IntentKind.EXIT.value,
                 side="SELL" if position.quantity > 0 else "BUY",
                 quantity=abs(position.quantity),
+                leverage=proposal.leverage,
                 limit_price=limit_price,
                 reduce_only=True,
                 trigger_source=reason,

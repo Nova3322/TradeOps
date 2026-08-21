@@ -436,7 +436,7 @@ def test_ccxt_pro_fact_contract_normalizes_all_supported_venues(venue: str) -> N
     snapshot = asyncio.run(adapter.snapshot(reason="INITIAL"))
 
     assert snapshot.data_status == "CURRENT"
-    assert snapshot.positions[0]["quantity"] == "-0.002"
+    assert snapshot.positions[0]["quantity"] == "-2"
     assert snapshot.positions[0]["unrealized_pnl"] == "2"
     assert snapshot.orders[0]["order_id"] == "external-order"
     assert snapshot.fills[0]["fill_id"] == "external-fill"
@@ -477,7 +477,7 @@ def test_ccxt_pro_fact_contract_normalizes_all_supported_venues(venue: str) -> N
 
     normalized = normalize_fact_adapter_snapshot(snapshot)
     assert normalized[0].symbol == "BTCUSDT"
-    assert normalized[0].position.quantity == Decimal("-0.002")
+    assert normalized[0].position.quantity == Decimal("-2")
     assert normalized[0].orders[0].status == "SENT"
     assert normalized[0].fills[0].fill_id == "external-fill"
     assert normalized[0].equity.equity == Decimal(100)
@@ -1142,7 +1142,7 @@ def test_snapshot_freshness_marks_old_data_stale_without_zeroing_unknowns() -> N
         await registry.publish_snapshot(snapshot)
         stale = await registry.latest(adapter.scope.key, stale_after=timedelta(seconds=30))
         assert stale.data_status == "STALE"
-        assert stale.positions[0]["quantity"] == "-0.002"
+        assert stale.positions[0]["quantity"] == "-2"
         assert all(row["currency"] != "UNKNOWN" for row in stale.balances)
         await registry.close()
 
@@ -1696,7 +1696,7 @@ def test_non_authoritative_position_increment_preserves_absent_positions_until_s
                         **next(
                             row for row in initial.positions if row["native_symbol"] == "BTCUSDT"
                         ),
-                        "quantity": "-0.003",
+                        "quantity": "-3",
                         "observed_at": (_NOW + timedelta(seconds=2)).isoformat(),
                     }
                 ]
@@ -1711,7 +1711,7 @@ def test_non_authoritative_position_increment_preserves_absent_positions_until_s
             next(row for row in increment.positions if row["native_symbol"] == "ETHUSDT")[
                 "quantity"
             ]
-            == "0.001"
+            == "1"
         )
 
         authoritative = replace(

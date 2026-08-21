@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
@@ -107,7 +106,6 @@ def execute_intent(
     service: TradingService,
     worker_resolver: WorkerResolver,
     require_enabled: Callable[[], None],
-    live_leverage: Decimal,
     clock: Callable[[], datetime],
 ) -> ExecuteIntentResult:
     environment, _venue, expected_mode = _execution_mode(request.execution_scope)
@@ -128,7 +126,6 @@ def execute_intent(
         request.owner_id,
         request.fencing_token,
         hip3_dexes=binding.hip3_dexes,
-        leverage=live_leverage,
         now=clock(),
     )
     probe_result = worker.probe(expected_mode=expected_mode, required_pair=command.pair)

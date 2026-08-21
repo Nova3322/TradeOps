@@ -202,7 +202,7 @@ def create_app(
                         if item["collateral_currency"] is None
                         else str(item["collateral_currency"])
                     ),
-                    leverage=str(resolved_settings.freqtrade_live_leverage),
+                    leverage=None if item["leverage"] is None else str(item["leverage"]),
                 )
             )
         return todos
@@ -559,7 +559,7 @@ def create_app(
                         if detail["collateral_currency"] is None
                         else str(detail["collateral_currency"])
                     ),
-                    leverage=str(resolved_settings.freqtrade_live_leverage),
+                    leverage=None if detail["leverage"] is None else str(detail["leverage"]),
                 )
             )
 

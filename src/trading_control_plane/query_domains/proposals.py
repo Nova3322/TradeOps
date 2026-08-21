@@ -334,6 +334,7 @@ class ProposalQueries(QueryComponent):
                         "account_id": proposal.account_id,
                         "result": risk.result,
                         "approved_quantity": str(risk.approved_quantity),
+                        "leverage": None if risk.leverage is None else str(risk.leverage),
                         "risk_amount": str(risk.risk_amount),
                         "reasons": risk.reasons,
                         "data_as_of": iso_datetime(risk.data_as_of),
@@ -387,6 +388,9 @@ class ProposalQueries(QueryComponent):
                         "environment": authorization.environment,
                         "created_at": iso_datetime(authorization.created_at),
                         "quantity_limit": str(authorization.quantity_limit),
+                        "leverage": (
+                            None if authorization.leverage is None else str(authorization.leverage)
+                        ),
                         "used_quantity": str(authorization.used_quantity),
                         "remaining_quantity": str(
                             max(
@@ -411,6 +415,11 @@ class ProposalQueries(QueryComponent):
                         "campaign_status": campaign.status,
                         "intent_id": str(initial_intent.intent_id),
                         "intent_status": initial_intent.status,
+                        "leverage": (
+                            None
+                            if initial_intent.leverage is None
+                            else str(initial_intent.leverage)
+                        ),
                         "created_at": iso_datetime(initial_intent.created_at),
                     },
                 }

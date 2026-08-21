@@ -135,6 +135,11 @@ def normalize_fact_adapter_snapshot(
     }
     results: list[VenueReadOnlySnapshot] = []
     for native, instrument in sorted(instruments.items()):
+        if instrument.get("contract") is not True or instrument.get("linear") is not True:
+            raise DomainRejected(
+                "FACT_ADAPTER_CONTRACT_UNSUPPORTED",
+                "only active linear U-margined contracts can enter the Instrument Catalog",
+            )
         instrument_positions = [
             row
             for row in positions.get(native, [])
@@ -170,13 +175,19 @@ def normalize_fact_adapter_snapshot(
             instrument.get("minimum_notional"),
             "instrument.minimum_notional",
         )
+        contract_multiplier = _decimal(
+            instrument.get("contract_size"),
+            "instrument.contract_size",
+        )
         if (
             tick_size is None
             or lot_size is None
             or minimum_notional is None
+            or contract_multiplier is None
             or tick_size <= 0
             or lot_size <= 0
-            or minimum_notional < 0
+            or minimum_notional <= 0
+            or contract_multiplier <= 0
         ):
             raise DomainRejected(
                 "FACT_ADAPTER_SNAPSHOT_INVALID",
@@ -243,6 +254,7 @@ def normalize_fact_adapter_snapshot(
                     quote_currency=str(instrument.get("quote") or settle),
                     collateral_currency=settle,
                     active=bool(instrument.get("active")),
+                    contract_multiplier=contract_multiplier,
                 ),
                 orders=normalized_orders,
                 fills=normalized_fills,

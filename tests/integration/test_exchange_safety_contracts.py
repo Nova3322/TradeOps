@@ -33,6 +33,7 @@ from trading_control_plane.freqtrade import (
     FreqtradeWorkerSpec,
 )
 from trading_control_plane.models import (
+    AccountEquity,
     AuditEvent,
     Campaign,
     ExchangeAccount,
@@ -428,6 +429,55 @@ def test_confirmed_zero_fill_releases_frozen_risk_and_authorization(database: Da
         assert reservation is not None
         assert reservation.status == ReservationStatus.RELEASED.value
         assert authorization.used_quantity == used_quantity - intent.quantity
+
+
+def test_pre_send_rejects_insufficient_exact_account_available_margin(
+    database: Database,
+) -> None:
+    contract = _execution_contract(database)
+    worker = _OutcomeUnknownWorker(contract.binding)
+    with database.session_factory.begin() as session:
+        equity = session.scalar(
+            select(AccountEquity)
+            .where(
+                AccountEquity.account_id == contract.fixture.account_id,
+                AccountEquity.venue == contract.fixture.venue,
+                AccountEquity.environment == ExecutionEnvironment.LIVE.value,
+            )
+            .with_for_update()
+        )
+        assert equity is not None
+        equity.available_balance = Decimal("10")
+    app = create_app(
+        _settings(database),
+        database,
+        _perptape(),
+        freqtrade_workers=(worker,),  # type: ignore[arg-type]
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            await _login(client, "exchange-safety-operator")
+            response = await client.post(
+                f"/api/intents/{contract.intent_id}/execute",
+                json={
+                    "execution_scope": contract.scope,
+                    "owner_id": contract.owner_id,
+                    "fencing_token": contract.fencing_token,
+                    "idempotency_key": "insufficient-exact-account-margin",
+                },
+            )
+            assert response.status_code == 422, response.text
+            assert response.json()["error"]["code"] == "INSUFFICIENT_AVAILABLE_MARGIN"
+
+    asyncio.run(scenario())
+    assert worker.writes == 0
+    assert worker.recoveries == 0
+    with database.session_factory() as session:
+        intent = session.get(OrderIntent, contract.intent_id)
+        assert intent is not None
+        assert intent.status == OrderIntentStatus.READY.value
+        assert intent.dispatch_backend is None
 
 
 @pytest.mark.parametrize(

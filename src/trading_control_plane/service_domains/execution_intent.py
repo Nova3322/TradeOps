@@ -152,6 +152,15 @@ class IntentExecutionService(ServiceComponent):
             proposal = session.get(models.Proposal, authorization.proposal_id, with_for_update=True)
             if proposal is None or proposal.status != domain.ProposalStatus.APPROVED.value:
                 rejections.reject("PROPOSAL_NOT_APPROVED", "authorization proposal is not approved")
+            if (
+                proposal.leverage is None
+                or authorization.leverage is None
+                or authorization.leverage != proposal.leverage
+            ):
+                rejections.reject(
+                    "LEVERAGE_FREEZE_MISMATCH",
+                    "proposal and authorization do not share one frozen leverage",
+                )
             if proposal.expires_at <= now:
                 rejections.reject("PROPOSAL_EXPIRED", "authorization proposal expired")
             if (
@@ -371,6 +380,7 @@ class IntentExecutionService(ServiceComponent):
                 kind=kind.value,
                 side=side,
                 quantity=quantity,
+                leverage=authorization.leverage,
                 limit_price=proposal_limit_price(proposal),
                 reduce_only=False,
                 trigger_source=(
@@ -412,7 +422,7 @@ class IntentExecutionService(ServiceComponent):
                 event_type="ORDER_INTENT_PREPARED",
                 object_type="OrderIntent",
                 object_id=intent.intent_id,
-                reason=kind.value,
+                reason=f"{kind.value} quantity={intent.quantity} leverage={intent.leverage}x",
                 correlation_id=intent.correlation_id,
                 object_version=intent.version,
                 idempotency_key=idempotency_key,

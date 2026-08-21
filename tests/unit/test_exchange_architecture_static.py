@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -102,7 +103,15 @@ def test_all_freqtrade_configs_use_built_in_sync_and_async_rate_limiting() -> No
         assert "rateLimit" not in exchange["ccxt_config"], path
         assert "rateLimit" not in exchange["ccxt_async_config"], path
         assert payload["process_only_new_candles"] is True, path
-        assert 1 <= len(exchange["pair_whitelist"]) <= 2, path
+        assert len(exchange["pair_whitelist"]) == 1, path
+        pattern = exchange["pair_whitelist"][0]
+        quote = payload["stake_currency"]
+        assert re.fullmatch(pattern, f"MIRA/{quote}:{quote}"), path
+        assert not re.fullmatch(pattern, f"MIRA/{'USDC' if quote == 'USDT' else 'USDT'}"), path
+        assert payload["pairlists"] == [
+            {"method": "StaticPairList"},
+            {"method": "PrecisionFilter"},
+        ], path
 
 
 def test_live_freqtrade_workers_start_stopped_and_never_cancel_external_orders_on_exit() -> None:

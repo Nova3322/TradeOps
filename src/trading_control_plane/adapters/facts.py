@@ -752,13 +752,6 @@ class CcxtProFactAdapter:
         native = market.get("id")
         return str(native) if native else symbol
 
-    @staticmethod
-    def _contract_size(markets: Mapping[str, Any], symbol: str) -> Decimal:
-        market = markets.get(symbol)
-        if not isinstance(market, Mapping):
-            return Decimal(1)
-        return _decimal(market.get("contractSize"), default=Decimal(1)) or Decimal(1)
-
     def _instruments(
         self,
         markets: Mapping[str, Any],
@@ -838,7 +831,7 @@ class CcxtProFactAdapter:
                     "FACT_ADAPTER_RESPONSE_INCOMPLETE",
                     "CCXT position quantity is unknown",
                 )
-            size = contracts * self._contract_size(markets, symbol)
+            size = contracts
             side = str(item.get("side") or "").lower()
             if side == "short":
                 size = -abs(size)
@@ -891,7 +884,6 @@ class CcxtProFactAdapter:
                     "FACT_ADAPTER_RESPONSE_INCOMPLETE",
                     "CCXT open-order quantity is unknown",
                 )
-            size = self._contract_size(markets, symbol)
             rows.append(
                 {
                     "order_id": str(item["id"]),
@@ -901,14 +893,8 @@ class CcxtProFactAdapter:
                     "status": item.get("status"),
                     "side": item.get("side"),
                     "type": item.get("type"),
-                    "quantity": _decimal_text(
-                        amount * size,
-                        default="0",
-                    ),
-                    "filled_quantity": _decimal_text(
-                        filled * size,
-                        default="0",
-                    ),
+                    "quantity": _decimal_text(amount, default="0"),
+                    "filled_quantity": _decimal_text(filled, default="0"),
                     "trigger_price": _decimal_text(item.get("triggerPrice", item.get("stopPrice"))),
                     "reduce_only": bool(item.get("reduceOnly")),
                     "observed_at": _timestamp(
@@ -943,7 +929,6 @@ class CcxtProFactAdapter:
                 )
             fee = item.get("fee")
             fee_mapping = fee if isinstance(fee, Mapping) else {}
-            size = self._contract_size(markets, symbol)
             rows.append(
                 {
                     "fill_id": str(item["id"]),
@@ -951,10 +936,7 @@ class CcxtProFactAdapter:
                     "symbol": symbol,
                     "native_symbol": self._market_id(markets, symbol),
                     "side": item.get("side"),
-                    "quantity": _decimal_text(
-                        amount * size,
-                        default="0",
-                    ),
+                    "quantity": _decimal_text(amount, default="0"),
                     "price": format(price, "f"),
                     "fee": _decimal_text(fee_mapping.get("cost"), default="0"),
                     "fee_currency": fee_mapping.get("currency"),

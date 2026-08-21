@@ -170,6 +170,15 @@ class AuthorizationRiskService(ServiceComponent):
                 rejections.reject(
                     "RISK_DECISION_NOT_ALLOWING", "latest risk decision does not allow risk"
                 )
+            if (
+                proposal.leverage is None
+                or decision.leverage is None
+                or decision.leverage != proposal.leverage
+            ):
+                rejections.reject(
+                    "LEVERAGE_FREEZE_MISMATCH",
+                    "proposal and risk decision do not share one frozen leverage",
+                )
             frozen_policy = decision.input_data.get("policy")
             if not isinstance(frozen_policy, dict) or (
                 frozen_policy.get("policy_id") != str(policy.policy_id)
@@ -225,6 +234,7 @@ class AuthorizationRiskService(ServiceComponent):
                 instrument_id=proposal.instrument_id,
                 direction=proposal.direction,
                 quantity_limit=decision.approved_quantity,
+                leverage=decision.leverage,
                 used_quantity=Decimal(0),
                 risk_limit=decision.risk_amount,
                 expires_at=expires_at,
@@ -253,7 +263,7 @@ class AuthorizationRiskService(ServiceComponent):
                 event_type="AUTHORIZATION_ISSUED",
                 object_type="TradingAuthorization",
                 object_id=authorization.authorization_id,
-                reason="approved proposal and risk decision",
+                reason=f"approved proposal and risk decision leverage={authorization.leverage}x",
                 correlation_id=proposal.correlation_id,
                 object_version=1,
                 idempotency_key=idempotency_key,

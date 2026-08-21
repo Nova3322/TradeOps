@@ -14,6 +14,7 @@ class VenueInstrument:
     quote_currency: str
     collateral_currency: str
     active: bool
+    contract_multiplier: Decimal = Decimal(1)
 
 
 @dataclass(frozen=True, slots=True)

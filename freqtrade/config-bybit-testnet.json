@@ -56,13 +56,16 @@
       "enableRateLimit": true
     },
     "pair_whitelist": [
-      "SOL/USDT:USDT"
+      ".+/USDT:USDT"
     ],
     "pair_blacklist": []
   },
   "pairlists": [
     {
       "method": "StaticPairList"
+    },
+    {
+      "method": "PrecisionFilter"
     }
   ],
   "entry_pricing": {

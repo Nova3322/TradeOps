@@ -127,6 +127,7 @@ def create_approved_proposal(
         source_readiness="READY" if source is ProposalSource.SYSTEM else None,
         details=(
             {
+                "trigger_price": "100",
                 "allow_auto_add": True,
                 "requested_adds": 1,
                 "add_trigger_price": "105",
@@ -134,7 +135,7 @@ def create_approved_proposal(
                 "invalidation_price": "90",
             }
             if allow_auto_add
-            else None
+            else {"trigger_price": "100"}
         ),
         now=NOW,
     )
@@ -246,6 +247,7 @@ def test_proposal_idempotency_and_semantic_conflict(
         max_risk=Decimal("40"),
         expires_at=NOW + timedelta(hours=2),
         idempotency_key="proposal-1",
+        details={"trigger_price": "100"},
         now=NOW,
     )
     with pytest.raises(IdempotencyConflict):
@@ -261,6 +263,7 @@ def test_proposal_idempotency_and_semantic_conflict(
             max_risk=Decimal("40"),
             expires_at=NOW + timedelta(hours=2),
             idempotency_key="proposal-1",
+            details={"trigger_price": "100"},
             now=NOW,
         )
 
@@ -352,6 +355,7 @@ def test_perptape_manual_and_automatic_entry_points_share_one_active_scope(
         source_candidate_id="ptr_auto_scope",
         source_observed_at=NOW,
         source_readiness="READY",
+        details={"trigger_price": "100"},
         now=NOW,
     )
     service.submit_proposal(automatic_id, ids["strategy"], now=NOW)
@@ -373,6 +377,7 @@ def test_perptape_manual_and_automatic_entry_points_share_one_active_scope(
         source_candidate_id="pt_one_click_scope",
         source_observed_at=NOW + timedelta(seconds=1),
         source_readiness="READY",
+        details={"trigger_price": "100"},
         deduplicate_active_system_scope=True,
         now=NOW + timedelta(seconds=1),
     )
@@ -488,6 +493,7 @@ def test_self_review_is_forbidden_and_high_risk_needs_two_reviewers(
         max_risk=Decimal("40"),
         expires_at=NOW + timedelta(hours=1),
         idempotency_key="review-proposal",
+        details={"trigger_price": "100"},
         now=NOW,
     )
     service.submit_proposal(proposal_id, ids["proposer"], now=NOW)
@@ -604,6 +610,7 @@ def test_proposal_rejection_and_expiry_are_durable_terminal_states(
         max_risk=Decimal("10"),
         expires_at=NOW + timedelta(hours=1),
         idempotency_key="rejected-proposal",
+        details={"trigger_price": "100"},
         now=NOW,
     )
     service.submit_proposal(rejected, ids["proposer"], now=NOW)
@@ -630,6 +637,7 @@ def test_proposal_rejection_and_expiry_are_durable_terminal_states(
         max_risk=Decimal("10"),
         expires_at=NOW + timedelta(minutes=1),
         idempotency_key="expired-draft",
+        details={"trigger_price": "100"},
         now=NOW,
     )
     with pytest.raises(DomainRejected, match="PROPOSAL_EXPIRED"):
@@ -647,6 +655,7 @@ def test_proposal_rejection_and_expiry_are_durable_terminal_states(
         max_risk=Decimal("10"),
         expires_at=NOW + timedelta(minutes=1),
         idempotency_key="expired-review",
+        details={"trigger_price": "100"},
         now=NOW,
     )
     service.submit_proposal(expired_review, ids["proposer"], now=NOW)
