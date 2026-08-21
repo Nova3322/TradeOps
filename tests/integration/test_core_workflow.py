@@ -949,6 +949,116 @@ def test_sender_fencing_rejects_old_owner_after_reconciled_takeover(
     )
 
 
+def test_reconciliation_ignores_stale_flat_hyperliquid_dex_outside_worker_scope(
+    service: TradingService,
+) -> None:
+    fixture = WorkflowFixture.create(
+        service,
+        now=NOW,
+        admin_username="hyperliquid-reconciliation-admin",
+        account_id="acct-1",
+        venue="HYPERLIQUID",
+        actors=(ActorSpec("operator", "hyperliquid-operator", Role.OPERATOR),),
+        symbol="BTC",
+        tick_size=Decimal("1"),
+        lot_size=Decimal("0.00001"),
+        minimum_notional=Decimal("10"),
+        quote_currency="USDC",
+        risk_version="hyperliquid-reconciliation-v1",
+        max_fact_age=timedelta(seconds=30),
+    )
+    hip3_instrument = service.register_instrument(
+        actor_id=fixture.ids["admin"],
+        venue="HYPERLIQUID",
+        symbol="xyz:TSLA",
+        tick_size=Decimal("0.01"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("10"),
+        contract_multiplier=Decimal(1),
+        quote_currency="USDC",
+        collateral_currency="USDC",
+        protection_supported=True,
+        now=NOW,
+    )
+    service.record_position(
+        "acct-1",
+        "HYPERLIQUID",
+        hip3_instrument,
+        Decimal(0),
+        Decimal(0),
+        Decimal("300"),
+        True,
+        fixture.ids["operator"],
+        now=NOW,
+    )
+    refreshed_at = NOW + timedelta(minutes=1)
+    fixture.now = refreshed_at
+    fixture.record_flat_facts(mark_price=Decimal("78000"))
+
+    reconciliation_id = service.reconcile_scope(
+        "TESTNET:acct-1:HYPERLIQUID",
+        fixture.ids["operator"],
+        now=refreshed_at,
+    )
+
+    assert service.reconciliation_status(reconciliation_id) is ReconciliationStatus.MATCH
+
+
+def test_reconciliation_keeps_nonzero_hyperliquid_dex_outside_worker_scope_fail_closed(
+    service: TradingService,
+) -> None:
+    fixture = WorkflowFixture.create(
+        service,
+        now=NOW,
+        admin_username="hyperliquid-nonzero-admin",
+        account_id="acct-1",
+        venue="HYPERLIQUID",
+        actors=(ActorSpec("operator", "hyperliquid-nonzero-operator", Role.OPERATOR),),
+        symbol="BTC",
+        tick_size=Decimal("1"),
+        lot_size=Decimal("0.00001"),
+        minimum_notional=Decimal("10"),
+        quote_currency="USDC",
+        risk_version="hyperliquid-nonzero-v1",
+        max_fact_age=timedelta(seconds=30),
+    )
+    hip3_instrument = service.register_instrument(
+        actor_id=fixture.ids["admin"],
+        venue="HYPERLIQUID",
+        symbol="xyz:TSLA",
+        tick_size=Decimal("0.01"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("10"),
+        contract_multiplier=Decimal(1),
+        quote_currency="USDC",
+        collateral_currency="USDC",
+        protection_supported=True,
+        now=NOW,
+    )
+    service.record_position(
+        "acct-1",
+        "HYPERLIQUID",
+        hip3_instrument,
+        Decimal("1"),
+        Decimal("300"),
+        Decimal("300"),
+        True,
+        fixture.ids["operator"],
+        now=NOW,
+    )
+    refreshed_at = NOW + timedelta(minutes=1)
+    fixture.now = refreshed_at
+    fixture.record_flat_facts(mark_price=Decimal("78000"))
+
+    reconciliation_id = service.reconcile_scope(
+        "TESTNET:acct-1:HYPERLIQUID",
+        fixture.ids["operator"],
+        now=refreshed_at,
+    )
+
+    assert service.reconciliation_status(reconciliation_id) is ReconciliationStatus.UNKNOWN
+
+
 def test_expired_sender_lease_allows_only_exact_ready_reduce_only_intent(
     database: Database,
     service: TradingService,

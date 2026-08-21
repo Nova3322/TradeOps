@@ -211,6 +211,22 @@ class ReconciliationRiskService(ServiceComponent):
                     differences.append(f"EXTERNAL_ORDER_UNBOUND:{unbound_order.venue_order_id}")
 
             active_instrument_ids = {campaign.instrument_id for campaign in campaigns}
+            exchange_account = session.scalar(
+                select(models.ExchangeAccount).where(
+                    models.ExchangeAccount.team_id == team.team_id,
+                    models.ExchangeAccount.account_id == account_id,
+                    models.ExchangeAccount.venue == venue,
+                    models.ExchangeAccount.environment == environment.value,
+                )
+            )
+            hyperliquid_dexes = {
+                str(item).lower()
+                for item in (
+                    []
+                    if exchange_account is None
+                    else exchange_account.freqtrade_hip3_dexes or []
+                )
+            }
             scope_positions = session.scalars(
                 select(models.Position).where(
                     models.Position.team_id == team.team_id,
@@ -220,6 +236,20 @@ class ReconciliationRiskService(ServiceComponent):
                 )
             ).all()
             for scope_position in scope_positions:
+                instrument = session.get(models.Instrument, scope_position.instrument_id)
+                hip3_dex = (
+                    None
+                    if instrument is None or ":" not in instrument.symbol
+                    else instrument.symbol.split(":", 1)[0].lower()
+                )
+                if (
+                    venue == "HYPERLIQUID"
+                    and hip3_dex is not None
+                    and hip3_dex not in hyperliquid_dexes
+                    and scope_position.fact_status == domain.FactStatus.KNOWN.value
+                    and scope_position.quantity == 0
+                ):
+                    continue
                 if scope_position.instrument_id not in active_instrument_ids:
                     if scope_position.fact_status != domain.FactStatus.KNOWN.value:
                         unknown.append(f"POSITION_UNKNOWN:{scope_position.instrument_id}")
