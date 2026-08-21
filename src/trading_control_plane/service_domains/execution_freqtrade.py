@@ -681,15 +681,17 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                         "Freqtrade exit changed the frozen full or partial reduction semantics",
                     )
             native_order_id = execution_order.order_id
+            ordered_quantity = execution_order.amount
             filled_quantity = execution_order.filled
+            fully_filled = filled_quantity == ordered_quantity
             order_status = (
                 domain.VenueOrderStatus.FILLED.value
-                if filled_quantity == intent.quantity
+                if fully_filled
                 else domain.VenueOrderStatus.PARTIALLY_FILLED.value
             )
             intent_status = (
                 domain.OrderIntentStatus.FILLED.value
-                if filled_quantity == intent.quantity
+                if fully_filled
                 else domain.OrderIntentStatus.PARTIALLY_FILLED.value
             )
             observed_at = execution_order.filled_at or trade.observed_at
@@ -727,7 +729,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                     order_type="MARKET",
                     reduce_only=intent.reduce_only,
                     status=order_status,
-                    ordered_quantity=intent.quantity,
+                    ordered_quantity=ordered_quantity,
                     filled_quantity=filled_quantity,
                     observed_at=observed_at,
                     updated_at=now,
@@ -746,7 +748,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
             else:
                 fact.venue_order_id = native_order_id
                 fact.status = order_status
-                fact.ordered_quantity = intent.quantity
+                fact.ordered_quantity = ordered_quantity
                 fact.filled_quantity = filled_quantity
                 fact.observed_at = observed_at
                 fact.updated_at = now

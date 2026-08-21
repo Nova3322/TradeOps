@@ -37,10 +37,12 @@ from trading_control_plane.freqtrade import (
     parse_freqtrade_trade,
 )
 from trading_control_plane.models import (
+    Campaign,
     CapabilityGate,
     ExchangeAccount,
     OrderIntent,
     ProtectionOrder,
+    RiskReservation,
     VenueOrder,
 )
 from trading_control_plane.perptape import PerptapeClient
@@ -110,6 +112,7 @@ class _WorkerFixture:
         quantity: Decimal,
         mark: Decimal,
         entry_fill: Decimal | None = None,
+        entry_order_quantity: Decimal | None = None,
     ) -> None:
         self.exchange = exchange
         self.pair = pair
@@ -117,6 +120,7 @@ class _WorkerFixture:
         self.testnet = testnet
         self.expected_initial_quantity = quantity
         self.entry_fill = entry_fill
+        self.entry_order_quantity = entry_order_quantity
         self.mark = mark
         self.enter_tag: str | None = None
         self.side = "long"
@@ -203,16 +207,17 @@ class _WorkerFixture:
         if path.endswith("/forceenter"):
             assert method == "POST" and payload is not None
             assert payload["pair"] == self.pair
-            quantity = (
+            requested_quantity = (
                 Decimal(str(payload["stakeamount"]))
                 * Decimal(str(payload["leverage"]))
                 / (self.mark * Decimal("0.98"))
             )
+            quantity = self.entry_order_quantity or requested_quantity
             filled = self.entry_fill if self.entry_fill is not None else quantity
-            assert Decimal(0) < filled <= quantity
+            assert Decimal(0) < filled <= quantity <= requested_quantity
             tag = str(payload["entry_tag"])
             if self.enter_tag is None:
-                assert quantity == self.expected_initial_quantity
+                assert requested_quantity == self.expected_initial_quantity
                 self.enter_tag = tag
                 self.side = str(payload["side"])
             else:
@@ -273,9 +278,20 @@ class _WorkerFixture:
         "direction",
         "hip3_dexes",
         "partial_fill",
+        "entry_order_quantity",
     ),
     [
-        ("BINANCE", "XRPUSDT", "XRP/USDT:USDT", "binance", "LIVE", "LONG", (), False),
+        (
+            "BINANCE",
+            "XRPUSDT",
+            "XRP/USDT:USDT",
+            "binance",
+            "LIVE",
+            "LONG",
+            (),
+            False,
+            None,
+        ),
         (
             "HYPERLIQUID",
             "BTC",
@@ -285,6 +301,7 @@ class _WorkerFixture:
             "SHORT",
             (),
             False,
+            None,
         ),
         (
             "HYPERLIQUID",
@@ -295,10 +312,52 @@ class _WorkerFixture:
             "LONG",
             ("xyz",),
             False,
+            None,
         ),
-        ("OKX", "XRP-USDT-SWAP", "XRP/USDT:USDT", "okx", "LIVE", "LONG", (), False),
-        ("BYBIT", "XRPUSDT", "XRP/USDT:USDT", "bybit", "LIVE", "SHORT", (), False),
-        ("BYBIT", "XRPUSDT", "XRP/USDT:USDT", "bybit", "TESTNET", "LONG", (), True),
+        (
+            "OKX",
+            "XRP-USDT-SWAP",
+            "XRP/USDT:USDT",
+            "okx",
+            "LIVE",
+            "LONG",
+            (),
+            False,
+            None,
+        ),
+        (
+            "BYBIT",
+            "XRPUSDT",
+            "XRP/USDT:USDT",
+            "bybit",
+            "LIVE",
+            "SHORT",
+            (),
+            False,
+            None,
+        ),
+        (
+            "BYBIT",
+            "XRPUSDT",
+            "XRP/USDT:USDT",
+            "bybit",
+            "TESTNET",
+            "LONG",
+            (),
+            True,
+            None,
+        ),
+        (
+            "BINANCE",
+            "SOLUSDT",
+            "SOL/USDT:USDT",
+            "binance",
+            "TESTNET",
+            "LONG",
+            (),
+            False,
+            Decimal("0.8"),
+        ),
     ],
 )
 def test_exact_account_freqtrade_is_the_only_execution_chain(
@@ -311,6 +370,7 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
     direction: str,
     hip3_dexes: tuple[str, ...],
     partial_fill: bool,
+    entry_order_quantity: Decimal | None,
 ) -> None:
     slug = (
         f"architecture-{venue.lower()}-{environment.lower()}-{direction.lower()}-{symbol.lower()}"
@@ -319,6 +379,7 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
     mark = Decimal("100")
     quantity = Decimal("2") if partial_fill else Decimal("1")
     lifecycle = (venue, environment, direction) == ("BINANCE", "LIVE", "LONG")
+    automatic_open = lifecycle or entry_order_quantity is not None
     service = TradingService(database, credential_encryption_key=_credential_key())
     fixture = WorkflowFixture.create(
         service,
@@ -455,7 +516,7 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
         allowed_adds=1 if lifecycle else 0,
     )
     scope = f"{environment}:{account_id}:{venue}"
-    owner_id = AUTOMATIC_EXECUTION_OWNER if lifecycle else f"{slug}-sender"
+    owner_id = AUTOMATIC_EXECUTION_OWNER if automatic_open else f"{slug}-sender"
     if environment == "LIVE":
         service.set_capability_gate(
             "LIVE_ORDER_SEND",
@@ -473,6 +534,7 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
         quantity=quantity,
         mark=mark,
         entry_fill=Decimal("1") if partial_fill else None,
+        entry_order_quantity=entry_order_quantity,
     )
     worker = FreqtradeWorkerClient(
         FreqtradeWorkerSpec(
@@ -490,7 +552,7 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
         confirmation_timeout_seconds=10,
         fetcher=worker_fixture,
     )
-    if lifecycle:
+    if automatic_open:
         automatic_settings = _settings(database, workers=True).model_copy(
             update={"execution_worker_enabled": True}
         )
@@ -508,6 +570,29 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
         replay_report = automatic_worker.run_once()
         assert replay_report.intents_selected == 0
         assert worker_fixture.writes == 1
+        if entry_order_quantity is not None:
+            with database.session_factory.begin() as session:
+                intent = session.get(OrderIntent, opening.intent_id, with_for_update=True)
+                assert intent is not None and intent.reservation_id is not None
+                order = session.scalar(
+                    select(VenueOrder)
+                    .where(VenueOrder.order_intent_id == opening.intent_id)
+                    .with_for_update()
+                )
+                campaign = session.get(Campaign, opening.campaign_id, with_for_update=True)
+                reservation = session.get(
+                    RiskReservation, intent.reservation_id, with_for_update=True
+                )
+                assert order is not None and campaign is not None and reservation is not None
+                intent.status = "UNKNOWN"
+                order.status = "UNKNOWN"
+                order.ordered_quantity = quantity
+                campaign.status = "UNKNOWN"
+                reservation.status = "UNKNOWN"
+            recovery_report = automatic_worker.run_once()
+            assert recovery_report.intents_selected == 1
+            assert recovery_report.intents_completed == 1
+            assert worker_fixture.writes == 1
     fencing_token = service.acquire_sender(
         scope,
         owner_id,
@@ -539,7 +624,7 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
                 "fencing_token": fencing_token,
                 "idempotency_key": f"{slug}-dispatch",
             }
-            if not lifecycle:
+            if not automatic_open:
                 response = await client.post(
                     f"/api/intents/{opening.intent_id}/execute",
                     json=action,
