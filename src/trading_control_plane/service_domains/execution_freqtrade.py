@@ -716,28 +716,57 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                 .with_for_update()
             )
             if fact is None:
-                fact = models.VenueOrder(
-                    team_id=campaign.team_id,
-                    order_intent_id=intent.intent_id,
-                    account_id=campaign.account_id,
-                    venue=campaign.venue,
-                    environment=campaign.environment,
-                    instrument_id=campaign.instrument_id,
-                    venue_order_id=native_order_id,
-                    client_order_id=command.client_order_id,
-                    side=side,
-                    order_type="MARKET",
-                    reduce_only=intent.reduce_only,
-                    status=order_status,
-                    ordered_quantity=ordered_quantity,
-                    filled_quantity=filled_quantity,
-                    observed_at=observed_at,
-                    updated_at=now,
+                fact = session.scalar(
+                    select(models.VenueOrder)
+                    .where(
+                        models.VenueOrder.team_id == campaign.team_id,
+                        models.VenueOrder.environment == campaign.environment,
+                        models.VenueOrder.account_id == campaign.account_id,
+                        models.VenueOrder.venue == campaign.venue,
+                        models.VenueOrder.venue_order_id == native_order_id,
+                    )
+                    .with_for_update()
                 )
-                session.add(fact)
+                if fact is None:
+                    fact = models.VenueOrder(
+                        team_id=campaign.team_id,
+                        order_intent_id=intent.intent_id,
+                        account_id=campaign.account_id,
+                        venue=campaign.venue,
+                        environment=campaign.environment,
+                        instrument_id=campaign.instrument_id,
+                        venue_order_id=native_order_id,
+                        client_order_id=command.client_order_id,
+                        side=side,
+                        order_type="MARKET",
+                        reduce_only=intent.reduce_only,
+                        status=order_status,
+                        ordered_quantity=ordered_quantity,
+                        filled_quantity=filled_quantity,
+                        observed_at=observed_at,
+                        updated_at=now,
+                    )
+                    session.add(fact)
+                elif (
+                    fact.order_intent_id is not None
+                    or fact.instrument_id != campaign.instrument_id
+                    or fact.side != side
+                    or fact.order_type != "MARKET"
+                    or fact.reduce_only != intent.reduce_only
+                    or fact.ordered_quantity != ordered_quantity
+                    or fact.filled_quantity != filled_quantity
+                ):
+                    _reject(
+                        "FREQTRADE_ORDER_IDENTITY_CONFLICT",
+                        "pre-observed venue order changed Freqtrade execution semantics",
+                    )
+                else:
+                    fact.order_intent_id = intent.intent_id
+                    fact.status = order_status
+                    fact.observed_at = observed_at
+                    fact.updated_at = now
             elif (
-                fact.client_order_id != command.client_order_id
-                or fact.side != side
+                fact.side != side
                 or fact.order_type != "MARKET"
                 or fact.reduce_only != intent.reduce_only
             ):
