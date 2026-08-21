@@ -1306,7 +1306,7 @@ def test_three_timeframe_resonance_creates_one_pending_system_proposal(
         account_id="acct-1",
         risk_tier=RiskTier.MEDIUM,
         notional=Decimal("100"),
-        max_risk=Decimal("1"),
+        max_risk=Decimal("2"),
         invalidation_bps=200,
         expires_in_minutes=480,
         rationale="automatic resonance proposal awaiting independent review",
@@ -1403,7 +1403,10 @@ def test_three_timeframe_resonance_creates_one_pending_system_proposal(
         source_candidate_id="ptr_legacy_refresh_duplicate",
         source_observed_at=NOW + timedelta(seconds=10),
         source_readiness="READY",
-        details={"resonance_timeframes": ["1h", "4h", "1d"]},
+        details={
+            "trigger_price": "100000",
+            "resonance_timeframes": ["1h", "4h", "1d"],
+        },
         now=NOW + timedelta(seconds=10),
     )
     service.submit_proposal(
@@ -1470,8 +1473,8 @@ def test_three_timeframe_resonance_creates_one_pending_system_proposal(
         "resonance-policy-v2",
         account_id="acct-1",
         risk_tier=RiskTier.LOW,
-        notional=Decimal("80"),
-        max_risk=Decimal("0.8"),
+        notional=Decimal("120"),
+        max_risk=Decimal("2"),
         invalidation_bps=150,
         expires_in_minutes=480,
         rationale="four timeframe policy for new signals only",

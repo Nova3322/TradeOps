@@ -174,6 +174,7 @@ def enqueue_proposal_review_notification(
             "direction": proposal.direction,
             "risk_tier": proposal.risk_tier,
             "quantity": str(proposal.quantity),
+            "leverage": None if proposal.leverage is None else str(proposal.leverage),
             "max_risk": str(proposal.max_risk),
             "expires_at": proposal.expires_at.isoformat(),
         },

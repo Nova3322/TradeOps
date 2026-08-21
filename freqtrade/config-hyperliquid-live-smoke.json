@@ -29,13 +29,16 @@
       "enableRateLimit": true
     },
     "pair_whitelist": [
-      "BTC/USDC:USDC"
+      ".+/USDC:USDC"
     ],
     "pair_blacklist": []
   },
   "pairlists": [
     {
       "method": "StaticPairList"
+    },
+    {
+      "method": "PrecisionFilter"
     }
   ],
   "entry_pricing": {

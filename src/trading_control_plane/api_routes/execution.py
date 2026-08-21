@@ -1114,7 +1114,6 @@ class _ExecutionRoutes:
                 service=self.service(),
                 worker_resolver=self.require_freqtrade_worker,
                 require_enabled=self.require_freqtrade_enabled,
-                live_leverage=self.resolved_settings.freqtrade_live_leverage,
                 clock=_now,
             )
             detail = self.queries().campaign_detail(identity.user_id, campaign_id)

@@ -119,7 +119,6 @@ class Settings(BaseSettings):
     freqtrade_workers_enabled: bool = False
     freqtrade_timeout_seconds: float = Field(default=5, ge=1, le=15)
     freqtrade_confirmation_timeout_seconds: float = Field(default=90, ge=10, le=120)
-    freqtrade_live_leverage: Decimal = Field(default=Decimal(1), ge=1, le=20)
     execution_worker_enabled: bool = False
     execution_worker_interval_seconds: int = Field(default=5, ge=1, le=60)
     execution_worker_batch_size: int = Field(default=20, ge=1, le=200)

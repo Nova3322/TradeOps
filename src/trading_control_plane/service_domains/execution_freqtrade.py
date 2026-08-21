@@ -21,7 +21,7 @@ from trading_control_plane.service_domains.accounts import (
 from trading_control_plane.service_domains.execution_intent import consume_add_unit
 from trading_control_plane.service_domains.risk_policy import managed_capital_context, occupied_risk
 
-DEFAULT_FREQTRADE_LEVERAGE = Decimal(1)
+FREQTRADE_MARGIN_FEE_BUFFER_RATE = Decimal("0.02")
 _reject = rejections.reject
 _scope_key = execution_scope.scope_key
 _scope_parts = execution_scope.scope_parts
@@ -391,6 +391,8 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
             _reject("INSTRUMENT_UNAVAILABLE", "campaign instrument is unavailable")
         if intent.quantity % instrument.lot_size != 0:
             _reject("INSTRUMENT_QUANTITY_INVALID", "intent quantity is not aligned to lot size")
+        if intent.limit_price is not None and intent.limit_price % instrument.tick_size != 0:
+            _reject("INSTRUMENT_PRICE_INVALID", "intent limit price is not aligned to tick size")
         if intent.status == domain.OrderIntentStatus.READY.value and not intent.reduce_only:
             authorization = session.get(models.TradingAuthorization, intent.authorization_id)
             proposal = (
@@ -412,6 +414,40 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                 or proposal.expires_at <= now
             ):
                 _reject("AUTHORIZATION_EXPIRED", "new-risk authorization is no longer valid")
+            if (
+                proposal.leverage is None
+                or authorization.leverage is None
+                or intent.leverage is None
+                or proposal.leverage != authorization.leverage
+                or authorization.leverage != intent.leverage
+                or proposal.leverage
+                != domain.leverage_for_risk_tier(domain.RiskTier(proposal.risk_tier))
+            ):
+                _reject(
+                    "LEVERAGE_FREEZE_MISMATCH",
+                    "proposal, authorization and intent do not share the risk-tier leverage",
+                )
+            details = proposal.frozen_payload.get("details")
+            resolution = details.get("instrument_resolution") if isinstance(details, dict) else None
+            expected_spec = {
+                "tick_size": instrument.tick_size,
+                "lot_size": instrument.lot_size,
+                "minimum_notional": instrument.minimum_notional,
+                "contract_multiplier": instrument.contract_multiplier,
+            }
+            try:
+                frozen_spec = {
+                    key: Decimal(str(resolution[key]))
+                    for key in expected_spec
+                    if isinstance(resolution, dict)
+                }
+            except (ArithmeticError, KeyError, TypeError, ValueError):
+                frozen_spec = {}
+            if frozen_spec != expected_spec:
+                _reject(
+                    "INSTRUMENT_SPEC_CHANGED",
+                    "current Catalog precision or contract terms differ from the reviewed proposal",
+                )
             if (
                 intent.kind == domain.IntentKind.ADD.value
                 and authorization.add_revoked_at is not None
@@ -540,6 +576,17 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
             notional = intent.quantity * position.mark_price * instrument.contract_multiplier
             if notional < instrument.minimum_notional:
                 _reject("MINIMUM_NOTIONAL", "intent is below current instrument minimum notional")
+            assert intent.leverage is not None
+            required_margin = notional / intent.leverage
+            fee_buffer = required_margin * FREQTRADE_MARGIN_FEE_BUFFER_RATE
+            required_available_balance = required_margin + fee_buffer
+            if equity.available_balance < required_available_balance:
+                _reject(
+                    "INSUFFICIENT_AVAILABLE_MARGIN",
+                    "exact account available balance "
+                    f"{equity.available_balance} is below required margin plus fee buffer "
+                    f"{required_available_balance}",
+                )
         return intent, campaign, instrument
 
     def prepare_freqtrade_order(
@@ -551,11 +598,8 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
         fencing_token: int,
         *,
         hip3_dexes: tuple[str, ...] = (),
-        leverage: Decimal = DEFAULT_FREQTRADE_LEVERAGE,
         now: datetime,
     ) -> freqtrade.FreqtradeEntryCommand | freqtrade.FreqtradeExitCommand:
-        if leverage <= 0:
-            _reject("FREQTRADE_LEVERAGE_INVALID", "Freqtrade leverage must be positive")
         with self.database.session_factory() as session:
             intent, campaign, instrument = self._validate_freqtrade_intent_boundary(
                 session,
@@ -585,13 +629,18 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                     client_order_id=client_order_id,
                     close_all=intent.kind == domain.IntentKind.EXIT.value,
                 )
+            if intent.leverage is None or intent.leverage <= 0:
+                _reject(
+                    "FREQTRADE_LEVERAGE_INVALID",
+                    "entry intent has no positive frozen leverage",
+                )
             position = find_position_for_scope(session, campaign)
             if position is None or position.mark_price <= 0:
                 _reject("POSITION_UNKNOWN", "Freqtrade entry requires a current mark price")
             requested_notional = (
                 intent.quantity * position.mark_price * instrument.contract_multiplier
             )
-            stake_amount = requested_notional * Decimal("0.98") / leverage
+            stake_amount = requested_notional / intent.leverage
             if stake_amount <= 0:
                 _reject("FREQTRADE_ORDER_INVALID", "Freqtrade stake amount is invalid")
             return freqtrade.FreqtradeEntryCommand(
@@ -599,7 +648,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                 side="long" if intent.side == "BUY" else "short",
                 stake_amount=stake_amount,
                 max_quantity=intent.quantity,
-                leverage=leverage,
+                leverage=intent.leverage,
                 enter_tag=f"tcp-{intent.intent_id.hex}",
                 client_order_id=client_order_id,
                 position_adjustment=intent.kind == domain.IntentKind.ADD.value,
@@ -1354,6 +1403,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                 kind=domain.IntentKind.EXIT.value,
                 side=exit_side,
                 quantity=entry_quantity,
+                leverage=entry.leverage,
                 limit_price=None,
                 reduce_only=True,
                 trigger_source="FREQTRADE_EMERGENCY_RECOVERY",

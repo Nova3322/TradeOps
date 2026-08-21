@@ -22,8 +22,7 @@
       "xyz"
     ],
     "pair_whitelist": [
-      "BTC/USDC:USDC",
-      "XYZ-TSLA/USDC:USDC"
+      ".+/USDC:USDC"
     ],
     "pair_blacklist": [],
     "ccxt_config": {
@@ -36,6 +35,9 @@
   "pairlists": [
     {
       "method": "StaticPairList"
+    },
+    {
+      "method": "PrecisionFilter"
     }
   ],
   "entry_pricing": {

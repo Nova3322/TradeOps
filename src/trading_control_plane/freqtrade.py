@@ -78,6 +78,12 @@ def _default_fetcher(
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             raw = response.read()
     except urllib.error.HTTPError as exc:
+        response_body = exc.read().decode(errors="replace").lower()
+        if "leverage" in response_body:
+            raise DomainRejected(
+                "FREQTRADE_LEVERAGE_UNSUPPORTED",
+                "Freqtrade or the bound exchange account rejected the frozen leverage",
+            ) from exc
         raise DomainRejected(
             "FREQTRADE_WORKER_REJECTED",
             f"Freqtrade worker rejected the request with HTTP {exc.code}",

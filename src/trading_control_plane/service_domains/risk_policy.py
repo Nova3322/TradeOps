@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -325,6 +325,7 @@ def server_risk_context(
         "kind": kind.value,
         "requested_quantity": str(requested_quantity),
         "requested_risk": str(requested_risk),
+        "leverage": None if proposal.leverage is None else str(proposal.leverage),
         "current_risk": str(current_risk),
         "current_account_risk": str(current_account_risk),
         "team_consecutive_losses": team_loss_streak,
@@ -362,6 +363,7 @@ def server_risk_context(
             "account_equity_id": str(equity.account_equity_id),
             "fact_status": equity.fact_status,
             "currency": equity.currency,
+            "available_balance": str(equity.available_balance),
             "observed_at": equity.observed_at.isoformat(),
             "written_at": equity.updated_at.isoformat(),
         },
@@ -422,12 +424,25 @@ def decide_risk_in_session(
         proposal.venue,
         team_id=proposal.team_id,
     )
-    quantity = proposal.quantity if requested_quantity is None else requested_quantity
+    if proposal.leverage is None:
+        rejections.reject(
+            "PROPOSAL_LEVERAGE_NOT_FROZEN",
+            "legacy proposal has no frozen risk-tier leverage; create and review a new proposal",
+        )
+    instrument = session.get(models.Instrument, proposal.instrument_id)
+    if instrument is None or not instrument.active or instrument.lot_size <= 0:
+        rejections.reject("INSTRUMENT_UNAVAILABLE", "proposal instrument is unavailable")
+    raw_quantity = proposal.quantity if requested_quantity is None else requested_quantity
+    quantity = (
+        (raw_quantity / instrument.lot_size).to_integral_value(rounding=ROUND_DOWN)
+        * instrument.lot_size
+    )
     request_payload = {
         "proposal_id": str(proposal.proposal_id),
         "team_id": str(proposal.team_id),
         "kind": kind.value,
         "requested_quantity": str(quantity),
+        "leverage": str(proposal.leverage),
     }
     digest, response = transactions.idempotency(
         session,
@@ -453,7 +468,18 @@ def decide_risk_in_session(
     transactions.lock_risk_capacity(session, proposal.team_id)
     policy = active_risk_policy(session, proposal.team_id)
     current_risk = occupied_risk(session, proposal.team_id)
-    requested_risk = proposal.max_risk * quantity / proposal.quantity
+    details = proposal.frozen_payload.get("details")
+    resolved_risk_raw = details.get("resolved_risk") if isinstance(details, dict) else None
+    try:
+        resolved_proposal_risk = Decimal(str(resolved_risk_raw))
+    except (ArithmeticError, TypeError, ValueError):
+        rejections.reject(
+            "PROPOSAL_RISK_NOT_RESOLVED",
+            "proposal has no valid Catalog-resolved risk; create and review a new proposal",
+        )
+    if resolved_proposal_risk <= 0 or resolved_proposal_risk > proposal.max_risk:
+        rejections.reject("PROPOSAL_RISK_NOT_RESOLVED", "proposal resolved risk is invalid")
+    requested_risk = resolved_proposal_risk * quantity / proposal.quantity
     if requested_risk > proposal.max_risk:
         rejections.reject("PROPOSAL_RISK_EXCEEDED", "requested risk exceeds proposal cap")
     inputs, facts, data_as_of, effective_max_total_risk = server_risk_context(
@@ -477,6 +503,41 @@ def decide_risk_in_session(
         ),
         inputs,
     )
+    if outcome.allowed_quantity > 0:
+        allowed_quantity = (
+            (outcome.allowed_quantity / instrument.lot_size).to_integral_value(
+                rounding=ROUND_DOWN
+            )
+            * instrument.lot_size
+        )
+        resolved_notional_raw = (
+            details.get("resolved_notional") if isinstance(details, dict) else None
+        )
+        try:
+            resolved_notional = Decimal(str(resolved_notional_raw))
+        except (ArithmeticError, TypeError, ValueError):
+            rejections.reject(
+                "PROPOSAL_NOTIONAL_NOT_RESOLVED",
+                "proposal has no valid Catalog-resolved notional; create and review a new proposal",
+            )
+        allowed_notional = resolved_notional * allowed_quantity / proposal.quantity
+        if allowed_quantity <= 0 or allowed_notional < instrument.minimum_notional:
+            outcome = domain.RiskOutcome(
+                domain.RiskResult.DENY,
+                Decimal(0),
+                Decimal(0),
+                ("MINIMUM_NOTIONAL_AFTER_RISK_SCALE",),
+            )
+        else:
+            outcome = domain.RiskOutcome(
+                outcome.result,
+                allowed_quantity,
+                (resolved_proposal_risk * allowed_quantity / proposal.quantity).quantize(
+                    domain.MONEY_QUANTUM,
+                    rounding=ROUND_DOWN,
+                ),
+                outcome.reasons,
+            )
     decision = models.RiskDecision(
         team_id=proposal.team_id,
         proposal_id=proposal.proposal_id,
@@ -484,6 +545,7 @@ def decide_risk_in_session(
         input_data=facts,
         result=outcome.result.value,
         approved_quantity=outcome.allowed_quantity,
+        leverage=proposal.leverage,
         risk_amount=outcome.allowed_risk,
         reasons=list(outcome.reasons),
         data_as_of=data_as_of,
@@ -509,7 +571,10 @@ def decide_risk_in_session(
         event_type="RISK_DECIDED",
         object_type="RiskDecision",
         object_id=decision.decision_id,
-        reason=outcome.result.value,
+        reason=(
+            f"{outcome.result.value} quantity={decision.approved_quantity} "
+            f"leverage={decision.leverage}x"
+        ),
         correlation_id=proposal.correlation_id,
         object_version=1,
         idempotency_key=idempotency_key,
@@ -533,6 +598,7 @@ def decide_risk_in_session(
             "venue": proposal.venue,
             "intent_kind": kind.value,
             "risk_amount": str(decision.risk_amount),
+            "leverage": str(decision.leverage),
             "approved_quantity": (
                 None
                 if decision.approved_quantity is None

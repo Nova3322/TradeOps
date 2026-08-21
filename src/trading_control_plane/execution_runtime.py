@@ -648,7 +648,6 @@ class AutomaticExecutionWorker:
                     service=self.service,
                     worker_resolver=self.worker_factory,
                     require_enabled=self._require_enabled,
-                    live_leverage=self.settings.freqtrade_live_leverage,
                     clock=self.clock,
                 )
             except domain.DomainRejected as exc:

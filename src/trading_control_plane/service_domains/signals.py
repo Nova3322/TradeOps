@@ -2004,7 +2004,8 @@ class SignalService(ServiceComponent):
             or not instrument.symbol
             or instrument.tick_size <= 0
             or instrument.lot_size <= 0
-            or instrument.minimum_notional < 0
+            or instrument.minimum_notional <= 0
+            or instrument.contract_multiplier <= 0
             or not instrument.quote_currency
             or not instrument.collateral_currency
             for instrument in instruments
@@ -2034,7 +2035,7 @@ class SignalService(ServiceComponent):
                     snapshot.tick_size,
                     snapshot.lot_size,
                     snapshot.minimum_notional,
-                    Decimal(1),
+                    snapshot.contract_multiplier,
                     snapshot.quote_currency,
                     snapshot.collateral_currency,
                     True,

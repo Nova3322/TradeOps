@@ -19,7 +19,7 @@
     "key": "",
     "secret": "",
     "pair_whitelist": [
-      "BTC/USDT:USDT"
+      ".+/USDT:USDT"
     ],
     "pair_blacklist": [],
     "ccxt_config": {
@@ -32,6 +32,9 @@
   "pairlists": [
     {
       "method": "StaticPairList"
+    },
+    {
+      "method": "PrecisionFilter"
     }
   ],
   "entry_pricing": {

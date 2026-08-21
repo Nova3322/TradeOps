@@ -154,9 +154,12 @@ def proposal_summary(
         if isinstance(details, dict) and isinstance(candidate, dict)
         else None
     )
+    resolved_notional = details.get("resolved_notional") if isinstance(details, dict) else None
     try:
         estimated_notional = (
-            None
+            Decimal(str(resolved_notional))
+            if resolved_notional is not None
+            else None
             if reference_price is None
             else (
                 proposal.quantity
@@ -192,6 +195,7 @@ def proposal_summary(
         "collateral_currency": (None if instrument is None else instrument.collateral_currency),
         "direction": proposal.direction,
         "quantity": str(proposal.quantity),
+        "leverage": None if proposal.leverage is None else str(proposal.leverage),
         "estimated_notional": (None if estimated_notional is None else str(estimated_notional)),
         "max_risk": str(proposal.max_risk),
         "expires_at": iso_datetime(proposal.expires_at),
@@ -404,6 +408,11 @@ class ExecutionQueries(QueryComponent):
                             None if attribution is None else attribution["strategy_version"]
                         ),
                         "risk_tier": None if proposal is None else proposal.risk_tier,
+                        "leverage": (
+                            None
+                            if proposal is None or proposal.leverage is None
+                            else str(proposal.leverage)
+                        ),
                         "fill_count": len(fills),
                         "filled_quantity": str(sum((item.quantity for item in fills), Decimal(0))),
                         "realized_pnl": str(campaign.realized_pnl),
@@ -500,6 +509,9 @@ class ExecutionQueries(QueryComponent):
                             "instrument_id": str(proposal.instrument_id),
                             "direction": proposal.direction,
                             "risk_tier": proposal.risk_tier,
+                            "leverage": (
+                                None if decision.leverage is None else str(decision.leverage)
+                            ),
                             "source": proposal.source,
                             **attribution,
                             "result": decision.result,
@@ -1133,6 +1145,9 @@ class ExecutionQueries(QueryComponent):
                         "environment": authorization.environment,
                         "active": authorization.active,
                         "quantity_limit": str(authorization.quantity_limit),
+                        "leverage": (
+                            None if authorization.leverage is None else str(authorization.leverage)
+                        ),
                         "used_quantity": str(authorization.used_quantity),
                         "allowed_adds": authorization.allowed_adds,
                         "used_adds": authorization.used_adds,
@@ -1162,6 +1177,7 @@ class ExecutionQueries(QueryComponent):
                             "kind": item.kind,
                             "side": item.side,
                             "quantity": str(item.quantity),
+                            "leverage": None if item.leverage is None else str(item.leverage),
                             "limit_price": (
                                 None if item.limit_price is None else str(item.limit_price)
                             ),

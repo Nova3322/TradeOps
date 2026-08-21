@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -17,6 +17,179 @@ from trading_control_plane.service_domains.accounts import (
 )
 from trading_control_plane.service_domains.notifications import enqueue_proposal_review_notification
 from trading_control_plane.service_domains.risk_policy import decide_risk_in_session
+
+
+def _floor_to_step(value: Decimal, step: Decimal, *, field: str) -> Decimal:
+    if not value.is_finite() or value <= 0 or not step.is_finite() or step <= 0:
+        rejections.reject("INSTRUMENT_PRECISION_INVALID", f"{field} precision input is invalid")
+    return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+
+def _detail_decimal(details: dict[str, Any], key: str) -> Decimal | None:
+    raw = details.get(key)
+    if raw is None:
+        return None
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, TypeError, ValueError):
+        rejections.reject("PROPOSAL_PRICE_INVALID", f"proposal {key} is invalid")
+    if not value.is_finite() or value <= 0:
+        rejections.reject("PROPOSAL_PRICE_INVALID", f"proposal {key} is invalid")
+    return value
+
+
+def _reference_price(details: dict[str, Any]) -> Decimal:
+    direct = _detail_decimal(details, "trigger_price")
+    if direct is not None:
+        return direct
+    for name in ("candidate", "signal"):
+        nested = details.get(name)
+        if not isinstance(nested, dict):
+            continue
+        for key in ("reference_price", "threshold_price"):
+            raw = nested.get(key)
+            if raw is None:
+                continue
+            try:
+                value = Decimal(str(raw))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if value.is_finite() and value > 0:
+                return value
+    rejections.reject(
+        "PROPOSAL_REFERENCE_PRICE_REQUIRED",
+        "proposal creation requires a positive reference price for precision and notional checks",
+    )
+
+
+def resolve_proposal_terms(
+    *,
+    instrument: models.Instrument,
+    risk_tier: domain.RiskTier,
+    raw_quantity: Decimal,
+    max_risk: Decimal,
+    details: dict[str, Any] | None,
+) -> tuple[Decimal, Decimal, Decimal, dict[str, Any]]:
+    """Resolve one immutable Catalog-backed quantity, price, notional, risk and leverage."""
+
+    if (
+        not instrument.active
+        or instrument.tick_size <= 0
+        or instrument.lot_size <= 0
+        or instrument.minimum_notional <= 0
+        or instrument.contract_multiplier <= 0
+        or instrument.quote_currency not in {"USDT", "USDC"}
+        or instrument.collateral_currency != instrument.quote_currency
+    ):
+        rejections.reject(
+            "INSTRUMENT_SPEC_INCOMPLETE",
+            "instrument must be an active U-margined contract with complete current "
+            "precision and minimum-order terms",
+        )
+    resolved_quantity = _floor_to_step(raw_quantity, instrument.lot_size, field="quantity")
+    if resolved_quantity <= 0:
+        rejections.reject(
+            "INSTRUMENT_QUANTITY_ROUNDED_TO_ZERO",
+            f"quantity {raw_quantity} rounds to zero at lot_size {instrument.lot_size}",
+        )
+
+    resolved_details = dict(details or {})
+    raw_reference_price = _reference_price(resolved_details)
+    reference_price = _floor_to_step(
+        raw_reference_price,
+        instrument.tick_size,
+        field="reference price",
+    )
+    resolved_details["trigger_price"] = str(reference_price)
+    for key in ("limit_price", "invalidation_price", "add_trigger_price"):
+        value = _detail_decimal(resolved_details, key)
+        if value is not None:
+            resolved_details[key] = str(
+                _floor_to_step(value, instrument.tick_size, field=key.replace("_", " "))
+            )
+
+    initial_quantity = _detail_decimal(resolved_details, "initial_quantity")
+    if initial_quantity is None:
+        resolved_initial_quantity = resolved_quantity
+    else:
+        resolved_initial_quantity = _floor_to_step(
+            initial_quantity,
+            instrument.lot_size,
+            field="initial quantity",
+        )
+        if resolved_initial_quantity <= 0:
+            rejections.reject(
+                "INITIAL_QUANTITY_ROUNDED_TO_ZERO",
+                f"initial quantity {initial_quantity} rounds to zero at lot_size "
+                f"{instrument.lot_size}",
+            )
+        if resolved_initial_quantity > resolved_quantity:
+            rejections.reject(
+                "INITIAL_POSITION_EXCEEDS_CAP",
+                "resolved initial quantity exceeds the resolved proposal quantity",
+            )
+    resolved_details["initial_quantity"] = str(resolved_initial_quantity)
+
+    resolved_notional = (
+        resolved_quantity * reference_price * instrument.contract_multiplier
+    ).quantize(domain.MONEY_QUANTUM, rounding=ROUND_DOWN)
+    initial_notional = (
+        resolved_initial_quantity * reference_price * instrument.contract_multiplier
+    ).quantize(domain.MONEY_QUANTUM, rounding=ROUND_DOWN)
+    if resolved_notional < instrument.minimum_notional:
+        rejections.reject(
+            "MINIMUM_NOTIONAL",
+            f"resolved notional {resolved_notional} is below minimum_notional "
+            f"{instrument.minimum_notional}",
+        )
+    if initial_notional < instrument.minimum_notional:
+        rejections.reject(
+            "INITIAL_MINIMUM_NOTIONAL",
+            f"resolved initial notional {initial_notional} is below minimum_notional "
+            f"{instrument.minimum_notional}",
+        )
+
+    invalidation_price = _detail_decimal(resolved_details, "invalidation_price")
+    resolved_risk = max_risk
+    if invalidation_price is not None:
+        resolved_risk = (
+            abs(reference_price - invalidation_price)
+            * resolved_quantity
+            * instrument.contract_multiplier
+        ).quantize(domain.MONEY_QUANTUM, rounding=ROUND_DOWN)
+        if resolved_risk <= 0:
+            rejections.reject(
+                "PROPOSAL_RISK_INVALID",
+                "rounded reference and invalidation prices produce zero risk",
+            )
+        if resolved_risk > max_risk:
+            rejections.reject(
+                "PROPOSAL_RISK_EXCEEDED",
+                f"resolved risk {resolved_risk} exceeds requested maximum risk {max_risk}",
+            )
+
+    leverage = domain.leverage_for_risk_tier(risk_tier)
+    resolved_details.update(
+        {
+            "resolved_notional": str(resolved_notional),
+            "resolved_risk": str(resolved_risk),
+            "instrument_resolution": {
+                "instrument_updated_at": instrument.updated_at.isoformat(),
+                "raw_quantity": str(raw_quantity),
+                "resolved_quantity": str(resolved_quantity),
+                "raw_reference_price": str(raw_reference_price),
+                "reference_price": str(reference_price),
+                "requested_max_risk": str(max_risk),
+                "tick_size": str(instrument.tick_size),
+                "lot_size": str(instrument.lot_size),
+                "minimum_notional": str(instrument.minimum_notional),
+                "contract_multiplier": str(instrument.contract_multiplier),
+            },
+        }
+    )
+    if resolved_details.get("resolved_position_notional") is not None:
+        resolved_details["resolved_position_notional"] = str(resolved_notional)
+    return resolved_quantity, leverage, resolved_risk, resolved_details
 
 
 def manual_execution_key(
@@ -523,6 +696,86 @@ class ProposalService(ServiceComponent):
                 rejections.reject(
                     "INSTRUMENT_UNAVAILABLE", "instrument is inactive or outside venue scope"
                 )
+            if deduplicate_active_system_scope:
+                if source is not domain.ProposalSource.SYSTEM or not strategy_id:
+                    rejections.reject(
+                        "PROPOSAL_DEDUPLICATION_SCOPE_INVALID",
+                        "active-scope deduplication is restricted to identified SYSTEM strategies",
+                    )
+                strategy_family, strategy_ids = system_proposal_strategy_family(strategy_id)
+                active_scope = ":".join(
+                    [
+                        str(team.team_id),
+                        environment.value,
+                        account_id,
+                        venue,
+                        str(instrument_id),
+                        direction.value,
+                        strategy_family,
+                    ]
+                )
+                session.execute(
+                    text("SELECT pg_advisory_xact_lock(:key)"),
+                    {
+                        "key": scope_rules.advisory_lock_key(
+                            "proposal.active-system-scope",
+                            strategy_family,
+                            active_scope,
+                        )
+                    },
+                )
+                existing = session.scalar(
+                    select(models.Proposal)
+                    .where(
+                        models.Proposal.source == domain.ProposalSource.SYSTEM.value,
+                        models.Proposal.team_id == team.team_id,
+                        models.Proposal.proposer_id == actor_id,
+                        models.Proposal.strategy_id.in_(strategy_ids),
+                        models.Proposal.environment == environment.value,
+                        models.Proposal.account_id == account_id,
+                        models.Proposal.venue == venue,
+                        models.Proposal.instrument_id == instrument_id,
+                        models.Proposal.direction == direction.value,
+                        models.Proposal.status.in_(
+                            [
+                                domain.ProposalStatus.DRAFT.value,
+                                domain.ProposalStatus.PENDING_REVIEW.value,
+                            ]
+                        ),
+                        models.Proposal.expires_at > now,
+                    )
+                    .order_by(models.Proposal.created_at, models.Proposal.proposal_id)
+                    .limit(1)
+                )
+                if existing is not None:
+                    self.transactions.audit(
+                        session,
+                        actor_id=str(actor_id),
+                        event_type="PROPOSAL_DUPLICATE_REUSED",
+                        object_type="Proposal",
+                        object_id=existing.proposal_id,
+                        reason=f"matching active SYSTEM proposal family {strategy_family}",
+                        correlation_id=existing.correlation_id,
+                        object_version=existing.version,
+                        idempotency_key=idempotency_key,
+                        now=now,
+                    )
+                    return existing.proposal_id
+            quantity, leverage, max_risk, details = resolve_proposal_terms(
+                instrument=instrument,
+                risk_tier=risk_tier,
+                raw_quantity=quantity,
+                max_risk=max_risk,
+                details=details,
+            )
+            payload.update(
+                {
+                    "quantity": str(quantity),
+                    "leverage": str(leverage),
+                    "max_risk": str(max_risk),
+                    "details": details,
+                }
+            )
             if signal_event is not None and (
                 signal_event.venue != venue
                 or signal_event.symbol != instrument.symbol
@@ -636,71 +889,6 @@ class ProposalService(ServiceComponent):
                         now=now,
                     )
                     return existing.proposal_id
-            if deduplicate_active_system_scope:
-                if source is not domain.ProposalSource.SYSTEM or not strategy_id:
-                    rejections.reject(
-                        "PROPOSAL_DEDUPLICATION_SCOPE_INVALID",
-                        "active-scope deduplication is restricted to identified SYSTEM strategies",
-                    )
-                strategy_family, strategy_ids = system_proposal_strategy_family(strategy_id)
-                active_scope = ":".join(
-                    [
-                        str(team.team_id),
-                        environment.value,
-                        account_id,
-                        venue,
-                        str(instrument_id),
-                        direction.value,
-                        strategy_family,
-                    ]
-                )
-                session.execute(
-                    text("SELECT pg_advisory_xact_lock(:key)"),
-                    {
-                        "key": scope_rules.advisory_lock_key(
-                            "proposal.active-system-scope",
-                            strategy_family,
-                            active_scope,
-                        )
-                    },
-                )
-                existing = session.scalar(
-                    select(models.Proposal)
-                    .where(
-                        models.Proposal.source == domain.ProposalSource.SYSTEM.value,
-                        models.Proposal.team_id == team.team_id,
-                        models.Proposal.proposer_id == actor_id,
-                        models.Proposal.strategy_id.in_(strategy_ids),
-                        models.Proposal.environment == environment.value,
-                        models.Proposal.account_id == account_id,
-                        models.Proposal.venue == venue,
-                        models.Proposal.instrument_id == instrument_id,
-                        models.Proposal.direction == direction.value,
-                        models.Proposal.status.in_(
-                            [
-                                domain.ProposalStatus.DRAFT.value,
-                                domain.ProposalStatus.PENDING_REVIEW.value,
-                            ]
-                        ),
-                        models.Proposal.expires_at > now,
-                    )
-                    .order_by(models.Proposal.created_at, models.Proposal.proposal_id)
-                    .limit(1)
-                )
-                if existing is not None:
-                    self.transactions.audit(
-                        session,
-                        actor_id=str(actor_id),
-                        event_type="PROPOSAL_DUPLICATE_REUSED",
-                        object_type="Proposal",
-                        object_id=existing.proposal_id,
-                        reason=f"matching active SYSTEM proposal family {strategy_family}",
-                        correlation_id=existing.correlation_id,
-                        object_version=existing.version,
-                        idempotency_key=idempotency_key,
-                        now=now,
-                    )
-                    return existing.proposal_id
             correlation_id = uuid4()
             proposal = models.Proposal(
                 team_id=team.team_id,
@@ -722,6 +910,7 @@ class ProposalService(ServiceComponent):
                 instrument_id=instrument_id,
                 direction=direction.value,
                 quantity=quantity,
+                leverage=leverage,
                 max_risk=max_risk,
                 frozen_payload={
                     **payload,
@@ -774,7 +963,7 @@ class ProposalService(ServiceComponent):
                 event_type="PROPOSAL_CREATED",
                 object_type="Proposal",
                 object_id=proposal.proposal_id,
-                reason=source.value,
+                reason=f"{source.value} quantity={proposal.quantity} leverage={proposal.leverage}x",
                 correlation_id=correlation_id,
                 object_version=1,
                 idempotency_key=idempotency_key,

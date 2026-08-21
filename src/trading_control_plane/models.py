@@ -535,7 +535,7 @@ class Instrument(Base):
         UniqueConstraint("venue", "symbol", name="uq_instruments_venue_symbol"),
         CheckConstraint("tick_size > 0", name="ck_instruments_tick_size_positive"),
         CheckConstraint("lot_size > 0", name="ck_instruments_lot_size_positive"),
-        CheckConstraint("minimum_notional >= 0", name="ck_instruments_min_notional_nonnegative"),
+        CheckConstraint("minimum_notional > 0", name="ck_instruments_min_notional_positive"),
         CheckConstraint("contract_multiplier > 0", name="ck_instruments_multiplier_positive"),
     )
 
@@ -868,6 +868,9 @@ class Proposal(Base):
             name="ck_proposals_status",
         ),
         CheckConstraint("quantity > 0", name="ck_proposals_quantity_positive"),
+        CheckConstraint(
+            "leverage IS NULL OR leverage > 0", name="ck_proposals_leverage_positive"
+        ),
         CheckConstraint("max_risk > 0", name="ck_proposals_risk_positive"),
         CheckConstraint(
             "source = 'MANUAL' OR (strategy_id IS NOT NULL AND strategy_version IS NOT NULL)",
@@ -933,6 +936,7 @@ class Proposal(Base):
     instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
     direction: Mapped[str] = mapped_column(String(16), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    leverage: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     max_risk: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     frozen_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -1835,6 +1839,9 @@ class RiskDecision(Base):
         CheckConstraint("result IN ('ALLOW','SCALE','DENY')", name="ck_risk_decisions_result"),
         CheckConstraint("approved_quantity >= 0", name="ck_risk_decisions_quantity_nonnegative"),
         CheckConstraint("risk_amount >= 0", name="ck_risk_decisions_risk_nonnegative"),
+        CheckConstraint(
+            "leverage IS NULL OR leverage > 0", name="ck_risk_decisions_leverage_positive"
+        ),
         Index("ix_risk_decisions_proposal_created", "proposal_id", "created_at"),
         ForeignKeyConstraint(
             ["team_id", "proposal_id"],
@@ -1859,6 +1866,7 @@ class RiskDecision(Base):
     input_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     result: Mapped[str] = mapped_column(String(16), nullable=False)
     approved_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    leverage: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     risk_amount: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     reasons: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     data_as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -1887,6 +1895,10 @@ class TradingAuthorization(Base):
             "used_quantity <= quantity_limit", name="ck_authorizations_used_within_limit"
         ),
         CheckConstraint("risk_limit > 0", name="ck_authorizations_risk_positive"),
+        CheckConstraint(
+            "leverage IS NULL OR leverage > 0",
+            name="ck_trading_authorizations_leverage_positive",
+        ),
         CheckConstraint("allowed_adds >= 0", name="ck_authorizations_adds_nonnegative"),
         CheckConstraint(
             "used_adds >= 0 AND used_adds <= allowed_adds", name="ck_authorizations_adds"
@@ -1913,6 +1925,7 @@ class TradingAuthorization(Base):
     instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
     direction: Mapped[str] = mapped_column(String(16), nullable=False)
     quantity_limit: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    leverage: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     used_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False, default=Decimal(0))
     risk_limit: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -2063,6 +2076,9 @@ class OrderIntent(Base):
         ),
         CheckConstraint("quantity > 0", name="ck_order_intents_quantity_positive"),
         CheckConstraint(
+            "leverage IS NULL OR leverage > 0", name="ck_order_intents_leverage_positive"
+        ),
+        CheckConstraint(
             "limit_price IS NULL OR limit_price > 0",
             name="ck_order_intents_limit_price_positive",
         ),
@@ -2093,6 +2109,7 @@ class OrderIntent(Base):
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     side: Mapped[str] = mapped_column(String(8), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    leverage: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     limit_price: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
     trigger_source: Mapped[str | None] = mapped_column(String(255), nullable=True)

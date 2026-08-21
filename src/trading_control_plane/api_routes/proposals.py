@@ -682,7 +682,7 @@ class _ProposalsRoutes:
                 "quantity": detail["quantity"],
                 "estimated_notional": detail["estimated_notional"],
                 "quote_currency": detail["quote_currency"],
-                "leverage": str(self.resolved_settings.freqtrade_live_leverage),
+                "leverage": detail["leverage"],
             }
             return detail
 

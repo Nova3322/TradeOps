@@ -139,6 +139,17 @@ class RiskTier(StrEnum):
     HIGH = "HIGH"
 
 
+RISK_TIER_LEVERAGE: Final[dict[RiskTier, Decimal]] = {
+    RiskTier.LOW: Decimal(3),
+    RiskTier.MEDIUM: Decimal(5),
+    RiskTier.HIGH: Decimal(10),
+}
+
+
+def leverage_for_risk_tier(risk_tier: RiskTier) -> Decimal:
+    return RISK_TIER_LEVERAGE[risk_tier]
+
+
 class RiskResult(StrEnum):
     ALLOW = "ALLOW"
     SCALE = "SCALE"

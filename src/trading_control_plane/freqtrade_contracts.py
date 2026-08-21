@@ -399,10 +399,14 @@ def freqtrade_execution_order(
         order.amount > command.max_quantity
         or order.filled > command.max_quantity
         or order.price <= 0
+        or (
+            isinstance(command, FreqtradeEntryCommand)
+            and trade.leverage != command.leverage
+        )
     ):
         raise DomainRejected(
             "FREQTRADE_ORDER_IDENTITY_CONFLICT",
-            "Freqtrade execution exceeded the frozen quantity or has no confirmed price",
+            "Freqtrade execution changed the frozen quantity/leverage or has no confirmed price",
         )
     return order
 
