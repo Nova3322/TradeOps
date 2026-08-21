@@ -21,6 +21,69 @@ const proposalExpiryPresentation = item => {
   }
   return {at:item.expires_at, state:fmtTimeRemaining(item.expires_at)};
 };
+const normalizeRecordPageSize = value => Number(value) === 100 ? 100 : 50;
+function recordPage(items, page = 1, pageSize = 50) {
+  const size = normalizeRecordPageSize(pageSize);
+  const total = items.length;
+  const totalPages = Math.max(1, Math.ceil(total / size));
+  const currentPage = Math.min(Math.max(1, Number(page) || 1), totalPages);
+  const start = (currentPage - 1) * size;
+  return {
+    items:items.slice(start, start + size),
+    page:currentPage,
+    pageSize:size,
+    total,
+    totalPages,
+  };
+}
+function recordPageSummary(page) {
+  return currentLanguage === 'en'
+    ? `Page ${page.page} of ${page.totalPages} · ${page.total} records`
+    : `第 ${page.page} / ${page.totalPages} 页 · 共 ${page.total} 条`;
+}
+function recordPaginationMarkup(total, ariaLabel) {
+  const initial = {page:1, totalPages:Math.max(1, Math.ceil(total / 50)), total};
+  return `<nav class="record-pagination" aria-label="${escapeHtml(ariaLabel)}" data-record-pagination><span data-record-page-summary>${escapeHtml(recordPageSummary(initial))}</span><div><label>每页<select data-record-page-size aria-label="每页记录数"><option value="50" selected>50</option><option value="100">100</option></select>条记录</label><button class="secondary" type="button" data-record-page-delta="-1" disabled>上一页</button><button class="secondary" type="button" data-record-page-delta="1" ${initial.totalPages <= 1 ? 'disabled' : ''}>下一页</button></div></nav>`;
+}
+function bindRecordList({rowSelector, filterSelectors, matches, emptySelector, visibleCountSelector, totalCountSelector}) {
+  const rows = [...document.querySelectorAll(rowSelector)];
+  const pagination = document.querySelector('[data-record-pagination]');
+  let page = 1;
+  let pageSize = 50;
+  const apply = ({resetPage = false} = {}) => {
+    if (resetPage) page = 1;
+    const matched = rows.filter(matches);
+    const current = recordPage(matched, page, pageSize);
+    page = current.page;
+    pageSize = current.pageSize;
+    rows.forEach(row => { row.hidden = true; });
+    current.items.forEach(row => { row.hidden = false; });
+    document.querySelectorAll(totalCountSelector).forEach(node => { node.textContent = current.total; });
+    const visible = document.querySelector(visibleCountSelector);
+    if (visible) visible.textContent = current.items.length;
+    const empty = document.querySelector(emptySelector);
+    if (empty) empty.hidden = current.total !== 0;
+    if (pagination) {
+      pagination.hidden = current.total === 0;
+      pagination.querySelector('[data-record-page-summary]').textContent = recordPageSummary(current);
+      pagination.querySelector('[data-record-page-size]').value = String(current.pageSize);
+      const previous = pagination.querySelector('[data-record-page-delta="-1"]');
+      const next = pagination.querySelector('[data-record-page-delta="1"]');
+      previous.disabled = current.page <= 1;
+      next.disabled = current.page >= current.totalPages;
+    }
+  };
+  filterSelectors.forEach(selector => document.querySelector(selector)?.addEventListener('input', () => apply({resetPage:true})));
+  pagination?.querySelectorAll('[data-record-page-delta]').forEach(button => button.addEventListener('click', () => {
+    page += Number(button.dataset.recordPageDelta);
+    apply();
+  }));
+  pagination?.querySelector('[data-record-page-size]')?.addEventListener('change', event => {
+    pageSize = normalizeRecordPageSize(event.currentTarget.value);
+    apply({resetPage:true});
+  });
+  apply();
+}
 const statusLabels = {DRAFT:'草稿',PENDING_REVIEW:'待审核',APPROVED:'已批准',REJECTED:'已拒绝',EXPIRED:'已过期',ALLOW:'通过',SCALE:'缩小仓位',DENY:'拒绝',PENDING:'等待中',RETRY_WAIT:'等待重试',SENDING:'发送中',DEAD_LETTER:'投递失败',OUTCOME_UNKNOWN:'发送结果未知',RESERVED:'已预留',READY:'待发送',DISPATCHING:'已派发，等待确认',SENT:'已发送',PARTIALLY_FILLED:'部分成交',FILLED:'已成交',CANCELLED:'已取消',UNKNOWN:'结果未知',KNOWN:'已确认',OPENING:'建仓中',OPEN:'持仓中',REDUCING:'减仓中',CLOSING:'退出中',CLOSED:'已结束',ACTIVE:'有效',DEGRADED:'保护不足',RELEASED:'已释放',MATCH:'对账一致',DIFFERENCE:'存在差异',MANUAL_REQUIRED:'需要人工处理',RESOLVED:'已解决',NORMAL:'正常',URGENT:'紧急',IMMEDIATE:'立即',ENABLED:'已开启',DISABLED:'已关闭',SUCCESS:'连接正常',FAILED:'连接失败',SKIPPED:'未运行',STALE:'数据已过期',WAITING:'等待首次同步',UNCONFIGURED:'未配置',NOT_CONFIGURED:'未配置',NOT_VERIFIED:'待验证',VERIFIED:'已验证',ON_DEMAND:'按需读取',MISSING:'缺失',CURRENT:'当前有效',INCOMPLETE:'数据不完整',EMPTY:'暂无数据',AVAILABLE:'可用',CONTROLLED:'受控',READ_ONLY:'只读',BLOCKED:'已安全阻断',NOT_SUBMITTED:'未提交',SOURCE_RESERVED:'源端已预留',SUBMITTED:'已提交',IN_FLIGHT:'划转中',DESTINATION_CONFIRMED:'目的端已确认',SETTLED:'已结算',FAILED_SOURCE_RESTORED:'失败，源端已恢复',DEPOSIT_PLAN_READY:'充值计划待执行',DEPOSIT_CONFIRMED:'充值已确认',RELEASE_REQUEST_PLAN_READY:'释放申请计划待执行',RELEASE_REQUEST_CONFIRMED:'释放申请已确认',RELEASE_EXECUTION_PLAN_READY:'释放执行计划待执行',RELEASE_EXECUTION_CONFIRMED:'释放执行已确认',RELEASE_CANCELLATION_PLAN_READY:'释放取消计划待执行',RELEASE_CANCELLED:'释放已取消'};
 const riskLabels = {LOW:'低风险',MEDIUM:'中风险',HIGH:'高风险'};
 const intentKindLabels = {INITIAL:'初仓',ADD:'加仓',REDUCE:'减仓',EXIT:'退出'};

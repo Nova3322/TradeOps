@@ -24,7 +24,7 @@ function restoreRouteViewport(position) {
 
 function notFoundView(path) {
   const context = path.startsWith('/campaigns/')
-    ? {eyebrow:'交易任务', title:'该交易任务不存在', copy:'链接可能已失效，或记录不属于当前团队与环境。', href:'/campaigns', action:'返回交易任务'}
+    ? {eyebrow:'交易历史', title:'该交易记录不存在', copy:'链接可能已失效，或记录不属于当前团队与环境。', href:'/campaigns', action:'返回交易历史'}
     : path.startsWith('/proposals/')
       ? {eyebrow:'审核队列', title:'该提案不存在', copy:'链接可能已失效，或记录不属于当前团队与环境。', href:'/reviews?view=current', action:'返回审核队列'}
       : path.startsWith('/venues/')
