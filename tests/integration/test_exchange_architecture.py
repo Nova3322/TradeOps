@@ -42,6 +42,7 @@ from trading_control_plane.models import (
     CapabilityGate,
     ExchangeAccount,
     OrderIntent,
+    Position,
     ProtectionOrder,
     RiskReservation,
     VenueOrder,
@@ -916,3 +917,51 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
             account_row = session.get(ExchangeAccount, exchange_account_id)
             assert account_row is not None and account_row.trading_status == "BLOCKED"
             assert session.query(OrderIntent).count() == 4
+
+    if lifecycle:
+        with database.session_factory.begin() as session:
+            exit_intent = session.scalar(
+                select(OrderIntent).where(
+                    OrderIntent.campaign_id == opening.campaign_id,
+                    OrderIntent.kind == "EXIT",
+                )
+            )
+            campaign = session.get(Campaign, opening.campaign_id)
+            assert exit_intent is not None and campaign is not None
+            bound_exit = session.scalar(
+                select(VenueOrder)
+                .where(VenueOrder.order_intent_id == exit_intent.intent_id)
+                .with_for_update()
+            )
+            position = session.scalar(
+                select(Position).where(
+                    Position.team_id == campaign.team_id,
+                    Position.account_id == account_id,
+                    Position.venue == venue,
+                    Position.instrument_id == fixture.ids["instrument"],
+                )
+            )
+            assert bound_exit is not None and position is not None
+            bound_exit.order_type = "STOPLOSS"
+            bound_exit.status = "SENT"
+            bound_exit.filled_quantity = Decimal(0)
+            position.quantity = Decimal(0)
+            position.average_entry_price = Decimal(0)
+            position.fact_status = "KNOWN"
+            position.observed_at = NOW + timedelta(seconds=1)
+            position.updated_at = NOW + timedelta(seconds=1)
+        service._cover_absent_positions(
+            account_id,
+            fixture.ids["operator"],
+            venue=venue,
+            environment=ExecutionEnvironment.LIVE,
+            active_symbols=set(),
+            observed_order_ids=set(),
+            now=NOW + timedelta(seconds=2),
+        )
+        with database.session_factory() as session:
+            bound_exit = session.scalar(
+                select(VenueOrder).where(VenueOrder.order_intent_id == exit_intent.intent_id)
+            )
+            assert bound_exit is not None
+            assert bound_exit.status == "UNKNOWN"
