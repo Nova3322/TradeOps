@@ -43,6 +43,7 @@ class AutomaticIntent:
     campaign_id: UUID
     actor_id: UUID
     execution_scope: str
+    proposal_id: UUID | None = None
     query_only: bool = False
     reduce_only: bool = False
 
@@ -102,8 +103,9 @@ class AutomaticExecutionWorker:
         *,
         proposal_id: UUID,
         now: datetime,
+        require_retryable_denial: bool = True,
     ) -> UUID | None:
-        """Refresh a stale configured Safe fact before retrying approved risk."""
+        """Refresh a stale configured Safe fact before approved new-risk work."""
 
         with self.database.session_factory() as session:
             proposal = session.get(models.Proposal, proposal_id)
@@ -112,18 +114,20 @@ class AutomaticExecutionWorker:
                 or proposal.environment != domain.ExecutionEnvironment.LIVE.value
             ):
                 return None
-            decision = session.scalar(
-                select(models.RiskDecision)
-                .where(models.RiskDecision.proposal_id == proposal_id)
-                .order_by(models.RiskDecision.created_at.desc())
-                .limit(1)
-            )
-            if (
-                decision is None
-                or decision.result != domain.RiskResult.DENY.value
-                or not frozenset(decision.reasons) & {"STALE_FACTS", "EQUITY_UNKNOWN"}
-            ):
-                return None
+            if require_retryable_denial:
+                decision = session.scalar(
+                    select(models.RiskDecision)
+                    .where(models.RiskDecision.proposal_id == proposal_id)
+                    .order_by(models.RiskDecision.created_at.desc())
+                    .limit(1)
+                )
+                if (
+                    decision is None
+                    or decision.result != domain.RiskResult.DENY.value
+                    or not frozenset(decision.reasons)
+                    & {"STALE_FACTS", "EQUITY_UNKNOWN"}
+                ):
+                    return None
             next_at = self._safe_refresh_next_at.get(proposal.team_id)
             if next_at is not None and now < next_at:
                 return None
@@ -304,6 +308,7 @@ class AutomaticExecutionWorker:
                 select(
                     models.OrderIntent.intent_id,
                     models.Campaign.campaign_id,
+                    models.Campaign.proposal_id,
                     models.ExchangeAccount.runtime_service_principal_id,
                     models.Campaign.environment,
                     models.Campaign.account_id,
@@ -357,6 +362,7 @@ class AutomaticExecutionWorker:
         for (
             intent_id,
             campaign_id,
+            proposal_id,
             actor_id,
             environment,
             account_id,
@@ -371,6 +377,7 @@ class AutomaticExecutionWorker:
                     campaign_id=campaign_id,
                     actor_id=actor_id,
                     execution_scope=f"{environment}:{account_id}:{venue}",
+                    proposal_id=proposal_id,
                     query_only=intent_status != domain.OrderIntentStatus.READY.value,
                     reduce_only=bool(reduce_only),
                 )
@@ -615,6 +622,18 @@ class AutomaticExecutionWorker:
         intents_completed = 0
         for intent in intents:
             try:
+                if (
+                    intent.proposal_id is not None
+                    and not intent.query_only
+                    and not intent.reduce_only
+                    and self._refresh_safe_capital_fact(
+                        proposal_id=intent.proposal_id,
+                        now=self.clock(),
+                        require_retryable_denial=False,
+                    )
+                    is not None
+                ):
+                    capital_facts_refreshed += 1
                 fencing_token = self._acquire_sender(intent)
                 execution_result: ExecuteIntentResult = execute_intent(
                     ExecuteIntent(
