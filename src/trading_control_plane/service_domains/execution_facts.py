@@ -879,11 +879,27 @@ class FactIngestionExecutionService(ServiceComponent):
             campaign.authorization_id,
             with_for_update=True,
         )
-        if authorization is None or authorization.leverage is None:
+        if authorization is None:
             _reject(
                 f"{venue}_PROTECTION_EXIT_AUTHORIZATION_INVALID",
-                "filled Freqtrade protection order lacks frozen authorization leverage",
+                "filled Freqtrade protection order lacks its authorization",
             )
+        if authorization.leverage is None:
+            legacy_entry_intents = session.scalars(
+                select(models.OrderIntent).where(
+                    models.OrderIntent.campaign_id == campaign.campaign_id,
+                    models.OrderIntent.kind.in_(
+                        {domain.IntentKind.INITIAL.value, domain.IntentKind.ADD.value}
+                    ),
+                )
+            ).all()
+            if not legacy_entry_intents or any(
+                intent.leverage is not None for intent in legacy_entry_intents
+            ):
+                _reject(
+                    f"{venue}_PROTECTION_EXIT_AUTHORIZATION_INVALID",
+                    "filled Freqtrade protection order has inconsistent leverage history",
+                )
         existing_reductions = session.scalars(
             select(models.OrderIntent).where(
                 models.OrderIntent.campaign_id == campaign.campaign_id,
@@ -1044,13 +1060,21 @@ class FactIngestionExecutionService(ServiceComponent):
         for cleanup_fill in cleanup_fills:
             cleanup_fill.order_intent_id = exit_intent.intent_id
             cleanup_fill.campaign_id = campaign.campaign_id
+        leverage_audit = (
+            "LEGACY_UNAVAILABLE"
+            if authorization.leverage is None
+            else str(authorization.leverage)
+        )
         self.transactions.audit(
             session,
             actor_id=str(actor_id),
             event_type="FREQTRADE_PROTECTION_EXIT_RECOVERED",
             object_type="OrderIntent",
             object_id=exit_intent.intent_id,
-            reason=f"order={order.venue_order_id};fills={len(cleanup_fills)}",
+            reason=(
+                f"order={order.venue_order_id};fills={len(cleanup_fills)};"
+                f"leverage={leverage_audit}"
+            ),
             correlation_id=exit_intent.correlation_id,
             object_version=1,
             now=now,

@@ -116,8 +116,10 @@ def test_openapi_contains_only_account_facts_and_backend_neutral_execution(
     )
 
 
+@pytest.mark.parametrize("legacy_missing_leverage", [False, True])
 def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
     database: Database,
+    legacy_missing_leverage: bool,
 ) -> None:
     service = TradingService(database, credential_encryption_key=_credential_key())
     fixture = WorkflowFixture.create(
@@ -173,7 +175,16 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
         position = session.get(Position, fixture.ids["position"], with_for_update=True)
         assert intent is not None and campaign is not None and position is not None
         reservation = session.get(RiskReservation, intent.reservation_id, with_for_update=True)
-        assert reservation is not None
+        authorization = session.get(
+            TradingAuthorization,
+            campaign.authorization_id,
+            with_for_update=True,
+        )
+        assert reservation is not None and authorization is not None
+        if legacy_missing_leverage:
+            intent.leverage = None
+            authorization.leverage = None
+        expected_recovery_leverage = authorization.leverage
         intent.status = "FILLED"
         intent.updated_at = entry_at
         intent.version += 1
@@ -317,6 +328,7 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
         assert exit_intent.status == "FILLED"
         assert exit_intent.reduce_only is True
         assert exit_intent.trigger_source == "FREQTRADE_PROTECTION_FILLED"
+        assert exit_intent.leverage == expected_recovery_leverage
         protection_order = session.scalar(
             select(VenueOrder).where(VenueOrder.venue_order_id == "hl-protection-order")
         )
