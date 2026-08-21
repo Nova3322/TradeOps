@@ -84,6 +84,7 @@ def prepare_add_proposal(service: TradingService, ids: dict[str, UUID], *, key: 
         expires_at=NOW + timedelta(hours=2),
         idempotency_key=f"{key}-proposal",
         details={
+            "trigger_price": "100",
             "allow_auto_add": True,
             "requested_adds": 1,
             "add_trigger_price": "105",
