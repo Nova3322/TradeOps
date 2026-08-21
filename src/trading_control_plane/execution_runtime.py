@@ -509,8 +509,6 @@ class AutomaticExecutionWorker:
                     .limit(1)
                 )
                 if latest is not None and latest.completed_at >= intent_updated_at:
-                    if latest.status == domain.ReconciliationStatus.MATCH.value:
-                        continue
                     latest_fact_at = max(
                         (
                             value
@@ -678,7 +676,7 @@ class AutomaticExecutionWorker:
         reconciliations_completed = 0
         for intent in self._reconciliation_intents():
             try:
-                self.service.reconcile_scope(
+                reconciliation_id = self.service.reconcile_scope(
                     intent.execution_scope,
                     intent.actor_id,
                     now=self.clock(),
@@ -687,6 +685,24 @@ class AutomaticExecutionWorker:
                 blocked[exc.code] = blocked.get(exc.code, 0) + 1
                 continue
             reconciliations_completed += 1
+            if (
+                self.service.reconciliation_status(reconciliation_id)
+                is domain.ReconciliationStatus.MATCH
+            ):
+                try:
+                    self.service.close_campaign(
+                        intent.campaign_id,
+                        intent.actor_id,
+                        now=self.clock(),
+                    )
+                except domain.DomainRejected as exc:
+                    if exc.code not in {
+                        "CAMPAIGN_POSITION_NOT_CLOSED",
+                        "CAMPAIGN_EXIT_NOT_TERMINAL",
+                        "RECONCILIATION_REQUIRED",
+                        "RISK_RESERVATION_UNRESOLVED",
+                    }:
+                        blocked[exc.code] = blocked.get(exc.code, 0) + 1
 
         completed_at = self.clock()
         return AutomaticExecutionReport(
