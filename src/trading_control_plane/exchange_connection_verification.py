@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
+from trading_control_plane.domain import DomainRejected
 from trading_control_plane.runtime_contracts import ConnectionProbeResult
 from trading_control_plane.service import TradingService
 
@@ -92,6 +93,13 @@ class ExchangeConnectionVerification:
                 credentials=command.credentials,
                 now=clock(),
             )
+            if outcome.error_code == "BINANCE_RATE_LIMITED_COOLDOWN":
+                raise DomainRejected(
+                    "BINANCE_CONNECTION_RETRY_DEFERRED",
+                    "Binance connection verification was not sent while the current "
+                    "process cooldown is active",
+                    metadata=outcome.diagnostics,
+                )
             return service.record_exchange_account_connection_verification(
                 command,
                 outcome,

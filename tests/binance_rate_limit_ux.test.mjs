@@ -27,6 +27,8 @@ test("Binance connection diagnostics distinguish rate limit causes and retry tim
     "IP_TEMPORARILY_BANNED:'IP 临时封禁'",
     "BINANCE_CONNECTION_WEIGHT_HEADROOM_DEFERRED",
     "BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED",
+    "BINANCE_RATE_LIMITED_COOLDOWN:'币安当前进程仍在临时冷却，本次未向币安发送请求'",
+    "BINANCE_CONNECTION_RETRY_DEFERRED:'币安当前进程仍在临时冷却，本次未向币安发送请求'",
     "fmtBinanceConnectionDiagnostic",
   ]) {
     assert.equal(shared.includes(marker), true, marker);
