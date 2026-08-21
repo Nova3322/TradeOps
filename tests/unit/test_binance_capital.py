@@ -298,6 +298,45 @@ def test_false_api_restriction_flag_does_not_override_actual_transfer_endpoint()
     assert probe[2]["size"] == "1"
 
 
+def test_empty_universal_transfer_history_may_omit_rows_for_both_directions() -> None:
+    values = responses()
+    values["/sapi/v1/asset/transfer"] = {"total": 0}
+    client = gateway(values)
+
+    deposit = client.prepare_deposit(
+        expected_address=DESTINATION,
+        amount=Decimal("10"),
+        source_address=SOURCE,
+        now=NOW,
+    )
+    withdrawal = client.prepare_withdrawal(
+        destination=DESTINATION,
+        amount=Decimal("25"),
+        max_fee=Decimal("2"),
+        operation_id="operation-empty-history",
+        now=NOW,
+    )
+
+    assert deposit["kind"] == "BINANCE_ARBITRUM_DEPOSIT_PREFLIGHT"
+    assert withdrawal["kind"] == "BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT"
+
+
+@pytest.mark.parametrize("payload", [{}, {"total": 1}, {"rows": None}, []])
+def test_malformed_universal_transfer_history_remains_blocked(payload: object) -> None:
+    values = responses()
+    values["/sapi/v1/asset/transfer"] = payload
+
+    with pytest.raises(DomainRejected) as caught:
+        gateway(values).prepare_deposit(
+            expected_address=DESTINATION,
+            amount=Decimal("10"),
+            source_address=SOURCE,
+            now=NOW,
+        )
+
+    assert caught.value.code == "BINANCE_CAPITAL_RESPONSE_INVALID"
+
+
 def test_actual_universal_transfer_endpoint_rejection_remains_blocked() -> None:
     values = responses()
 

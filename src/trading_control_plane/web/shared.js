@@ -306,6 +306,7 @@ const apiErrorGuidance = {
   BINANCE_CAPITAL_QUOTA_EXCEEDED:'币安生产账户当前可用提现额度不足。请等待额度恢复或降低金额。',
   BINANCE_CAPITAL_TRAVEL_RULE_REQUIRED:'币安要求本次提现完成 Travel Rule 信息。当前固定资金路径保持阻断，请先在币安完成所需信息。',
   BINANCE_CAPITAL_SUBMISSION_DISABLED:'币安真实提现提交开关当前关闭。请由系统管理员核对生产运行配置。',
+  BINANCE_CAPITAL_RESPONSE_INVALID:'币安资金 API 返回了未识别的数据格式，本次操作未提交。请刷新后重试；持续出现时请由系统管理员检查币安接口兼容性。',
   BINANCE_CAPITAL_API_REJECTED:'币安拒绝了资金 API 请求。请核对 API 权限、固定出口 IP、账户状态和请求时间。',
   BINANCE_CAPITAL_API_UNAVAILABLE:'币安资金 API 当前不可达，资金操作保持原位。请稍后重试。',
   SAFE_ACCOUNT_NOT_DEPLOYED:'当前 Safe Smart Account 尚未部署在 Arbitrum。请核对链与 Safe 地址。',

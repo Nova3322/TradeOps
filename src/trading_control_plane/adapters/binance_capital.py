@@ -79,6 +79,21 @@ def _evm_address(value: str, *, field: str) -> str:
     return value.lower()
 
 
+def _universal_transfer_rows(raw: object) -> list[Any]:
+    if isinstance(raw, dict):
+        rows = raw.get("rows")
+        if isinstance(rows, list):
+            return rows
+        total = raw.get("total")
+        if rows is None and not isinstance(total, bool) and str(total) == "0":
+            # Binance omits ``rows`` when the bounded history window is empty.
+            return []
+    _reject(
+        "BINANCE_CAPITAL_RESPONSE_INVALID",
+        "universal transfer history response is invalid",
+    )
+
+
 def _binance_http_error(exc: urllib.error.HTTPError) -> tuple[int | None, str | None]:
     try:
         raw = json.loads(exc.read())
@@ -466,12 +481,7 @@ class BinanceCapitalGateway:
                 "size": 100,
             },
         )
-        rows = raw.get("rows") if isinstance(raw, dict) else None
-        if not isinstance(rows, list):
-            _reject(
-                "BINANCE_CAPITAL_RESPONSE_INVALID",
-                "universal transfer history response is invalid",
-            )
+        rows = _universal_transfer_rows(raw)
         matches = []
         for row in rows:
             if not isinstance(row, dict):
@@ -534,12 +544,7 @@ class BinanceCapitalGateway:
                     "Binance rejected the Universal Transfer endpoint for this API key",
                 ) from exc
             raise
-        rows = raw.get("rows") if isinstance(raw, dict) else None
-        if not isinstance(rows, list):
-            _reject(
-                "BINANCE_CAPITAL_RESPONSE_INVALID",
-                "universal transfer capability probe returned an invalid response",
-            )
+        _universal_transfer_rows(raw)
 
     def _ensure_universal_transfer(
         self,
