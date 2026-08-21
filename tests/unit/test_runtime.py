@@ -197,6 +197,57 @@ def test_database_binding_supervisor_builds_exact_scoped_perptape_workers() -> N
     assert "perptape-fixture-key" not in repr(signal_binding)
 
 
+def test_database_binding_supervisor_reuses_stream_worker_for_polling() -> None:
+    now = datetime(2026, 8, 21, tzinfo=UTC)
+    binding = PreparedPerptapeRuntimeBinding(
+        signal_source_id=UUID("11111111-1111-1111-1111-111111111111"),
+        workspace_id=UUID("22222222-2222-2222-2222-222222222222"),
+        team_id=UUID("33333333-3333-3333-3333-333333333333"),
+        service_principal_id=UUID("44444444-4444-4444-4444-444444444444"),
+        service_principal_username="signal-team-source",
+        source_version=2,
+        credential_version=1,
+        api_key="shared-client-fixture-key",
+    )
+    polling_calls = 0
+
+    class FakeWorker:
+        def run_bound_perptape_once(
+            self,
+            prepared: PreparedPerptapeRuntimeBinding,
+            *,
+            now: datetime,
+        ) -> SourceSyncResult:
+            nonlocal polling_calls
+            assert prepared is binding
+            assert now == datetime(2026, 8, 21, tzinfo=UTC)
+            polling_calls += 1
+            return SourceSyncResult("SUCCESS", items_observed=2)
+
+    worker = FakeWorker()
+    supervisor = RuntimeBindingSupervisor(
+        settings=Settings(
+            database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+            _env_file=None,
+        ),
+        database=object(),  # type: ignore[arg-type]
+        clock=lambda: now,
+        worker_factory=lambda _settings, _database: pytest.fail(
+            "polling must reuse the stream worker and its shared Perptape client"
+        ),
+    )
+    supervisor.service = SimpleNamespace(perptape_runtime_bindings=lambda: (binding,))
+    supervisor._perptape_streams[binding.signal_source_id] = SimpleNamespace(
+        version=supervisor._perptape_binding_version(binding),
+        worker=worker,
+    )
+
+    report = supervisor.run_once()
+
+    assert report.successful is True
+    assert polling_calls == 1
+
+
 def test_database_binding_supervisor_isolates_team_stream_failure_and_restarts_rotation() -> None:
     now = datetime(2026, 8, 11, tzinfo=UTC)
     workspace_id = UUID("22222222-2222-2222-2222-222222222222")
@@ -319,6 +370,103 @@ def test_database_binding_supervisor_isolates_team_stream_failure_and_restarts_r
         supervisor._shutdown_perptape_streams()
 
     assert supervisor.dependencies_in_use is False
+
+
+def test_database_binding_supervisor_restarts_transient_stream_after_bounded_cooldown() -> None:
+    now = datetime(2026, 8, 21, tzinfo=UTC)
+    binding = PreparedPerptapeRuntimeBinding(
+        signal_source_id=UUID("11111111-1111-1111-1111-111111111111"),
+        workspace_id=UUID("22222222-2222-2222-2222-222222222222"),
+        team_id=UUID("33333333-3333-3333-3333-333333333333"),
+        service_principal_id=UUID("44444444-4444-4444-4444-444444444444"),
+        service_principal_username="signal-team-source",
+        source_version=2,
+        credential_version=1,
+        api_key="transient-stream-secret",
+    )
+    builds = 0
+
+    class FakeStream:
+        def __init__(self, *, transient_failure: bool) -> None:
+            self.transient_failure = transient_failure
+            self.fatal_error_code: str | None = None
+            self.connection_healthy = False
+            self.stats = SimpleNamespace(messages_received=0)
+            self.started = threading.Event()
+
+        def run_forever(self, stop_event: threading.Event) -> None:
+            self.started.set()
+            if self.transient_failure:
+                self.fatal_error_code = "PERPTAPE_STREAM_UNAVAILABLE"
+                stop_event.set()
+                return
+            self.connection_healthy = True
+            self.stats.messages_received = 1
+            stop_event.wait()
+
+    class FakeWorker:
+        def build_bound_perptape_stream(
+            self, prepared: PreparedPerptapeRuntimeBinding
+        ) -> FakeStream:
+            nonlocal builds
+            assert prepared is binding
+            builds += 1
+            return FakeStream(transient_failure=builds == 1)
+
+    health: list[dict[str, dict[str, Any]]] = []
+    supervisor = RuntimeBindingSupervisor(
+        settings=Settings(
+            database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+            runtime_sync_interval_seconds=30,
+            perptape_websocket_reconnect_max_seconds=1,
+            credential_encryption_key=("eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg"),
+            _env_file=None,
+        ),
+        database=object(),  # type: ignore[arg-type]
+        worker_factory=lambda _settings, _database: FakeWorker(),  # type: ignore[arg-type]
+    )
+    supervisor.service = SimpleNamespace(
+        record_runtime_source_health=lambda _actor, sources, **_kwargs: health.append(sources)
+    )
+
+    try:
+        supervisor._reconcile_perptape_streams((binding,), now=now)
+        assert supervisor._perptape_streams[binding.signal_source_id].stream.started.wait(1)
+        supervisor._reconcile_perptape_streams((binding,), now=now)
+
+        assert builds == 1
+        assert supervisor._perptape_stream_retry_at[binding.signal_source_id] == now + timedelta(
+            seconds=30
+        )
+        supervisor._reconcile_perptape_streams(
+            (binding,),
+            now=now + timedelta(seconds=29),
+        )
+        assert builds == 1
+
+        supervisor._reconcile_perptape_streams(
+            (binding,),
+            now=now + timedelta(seconds=30),
+        )
+        restarted = supervisor._perptape_streams[binding.signal_source_id]
+        assert restarted.stream.started.wait(1)
+        assert builds == 2
+        supervisor._reconcile_perptape_streams(
+            (binding,),
+            now=now + timedelta(seconds=30),
+        )
+
+        assert binding.signal_source_id not in supervisor._failed_perptape_stream_versions
+        assert binding.signal_source_id not in supervisor._perptape_stream_retry_at
+        assert binding.signal_source_id not in supervisor._perptape_stream_failure_counts
+        assert any(
+            value["PERPTAPE_WEBSOCKET"]["retry_at"]
+            == (now + timedelta(seconds=30)).isoformat()
+            for value in health
+            if value["PERPTAPE_WEBSOCKET"]["status"] == "FAILED"
+        )
+    finally:
+        supervisor._shutdown_perptape_streams()
 
 
 def test_persisted_capital_completeness_is_independent_of_retired_venue_pollers() -> None:
@@ -503,7 +651,11 @@ def test_runtime_https_snapshot_preserves_persisted_incomplete_stream_target() -
         perptape_cache_seconds=60,
         perptape_websocket_reconciliation_seconds=300,
     )
-    worker.queries = SimpleNamespace(perptape_feed=lambda _actor: current)
+    worker.queries = SimpleNamespace(
+        perptape_feed=lambda _actor, **_kwargs: current,
+        perptape_feeds=lambda _actor, **_kwargs: {"BN": current},
+        perptape_polling_health=lambda _actor: {},
+    )
     worker.perptape = SimpleNamespace(refresh=lambda **_kwargs: incoming)
     worker.service = SimpleNamespace(
         record_perptape_feed=lambda _actor_id, feed, **_kwargs: recorded.append(feed),

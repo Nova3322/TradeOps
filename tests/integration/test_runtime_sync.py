@@ -6,7 +6,7 @@ import threading
 from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -40,6 +40,7 @@ from trading_control_plane.perptape import (
     PerptapeCandidate,
     PerptapeClient,
     PerptapeFeedSnapshot,
+    PerptapeRateLimited,
     perptape_payload_size_bytes,
     perptape_snapshot_identity,
 )
@@ -178,6 +179,151 @@ def perptape_test_service(
     actor = service.create_service_principal(f"{label}-perptape", admin, now=NOW)
     service.assign_role(actor, Role.PROPOSER, admin, now=NOW)
     return service, queries, actor, perptape_test_client()
+
+
+def test_binance_refresh_does_not_delete_saved_hyperliquid_feed(database: Database) -> None:
+    service, queries, actor, client = perptape_test_service(database, "venue-isolation")
+    hyperliquid = client.parse_stream_alert(
+        {
+            "id": "saved-hl",
+            "ex": "HL",
+            "s": "ETH",
+            "cs": "ETH",
+            "dir": "LL",
+            "p": 2_500,
+            "th": 2_550,
+            "tf": "4h",
+            "t": int(NOW.timestamp() * 1_000),
+            "u": int(NOW.timestamp() * 1_000),
+            "kr": {"status": "ready"},
+            "vq24": 20_000,
+            "oi": 10_000,
+        },
+        event_time=NOW,
+    )
+    hyperliquid_feed = PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=NOW,
+        fetched_at=NOW,
+        next_allowed_at=NOW,
+        candidates=(hyperliquid,),
+        source_exchange="HL",
+    )
+    service.record_perptape_feed(
+        actor,
+        hyperliquid_feed,
+        now=NOW,
+        base_snapshot=None,
+        feed_key="BREAKOUTS:HL",
+    )
+    binance_candidates = tuple(
+        perptape_candidate(
+            client,
+            symbol=f"B{index}USDT",
+            triggered_at=NOW,
+            observed_at=NOW + timedelta(seconds=1),
+        )
+        for index in range(200)
+    )
+    binance_feed = PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=NOW + timedelta(seconds=1),
+        fetched_at=NOW + timedelta(seconds=1),
+        next_allowed_at=NOW + timedelta(seconds=1),
+        candidates=binance_candidates,
+        source_exchange="BN",
+    )
+    service.record_perptape_feed(
+        actor,
+        binance_feed,
+        now=NOW + timedelta(seconds=1),
+        base_snapshot=None,
+        feed_key="BREAKOUTS:BN",
+    )
+
+    persisted = queries.perptape_feeds(actor, include_legacy=False)
+
+    assert len(persisted["BN"].candidates) == 200
+    assert [candidate.symbol for candidate in persisted["HL"].candidates] == ["ETH"]
+
+
+@pytest.mark.parametrize("hyperliquid_failure", ["RATE_LIMITED", "TIMEOUT"])
+def test_perptape_venue_poll_failures_preserve_independent_data_and_health(
+    database: Database,
+    hyperliquid_failure: str,
+) -> None:
+    service, queries, actor, _client = perptape_test_service(
+        database,
+        f"venue-health-{hyperliquid_failure.lower()}",
+    )
+    first_deadline = NOW + timedelta(seconds=1)
+    failure_deadline = NOW + timedelta(minutes=2)
+    requests: list[str] = []
+
+    def fetch(url: str, _headers: dict[str, str], _timeout: float) -> dict[str, Any]:
+        source_exchange = "HL" if "ex=HL" in url else "BN"
+        requests.append(source_exchange)
+        if source_exchange == "HL":
+            if hyperliquid_failure == "RATE_LIMITED":
+                raise PerptapeRateLimited(failure_deadline, is_remote=True)
+            raise DomainRejected("PERPTAPE_UNAVAILABLE", "temporary timeout")
+        payload = perptape_payload()
+        payload["rateLimit"] = {
+            "nextAllowedAt": int(first_deadline.timestamp() * 1_000)
+        }
+        return payload
+
+    settings = Settings(
+        database_url=str(database.engine.url),
+        perptape_api_key="venue-health-key",
+        perptape_cache_seconds=1,
+        _env_file=None,
+    )
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="venue-health-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(seconds=1),
+        fetcher=fetch,
+    )
+    worker = RuntimeSyncWorker(
+        settings=settings,
+        database=database,
+        perptape=client,
+        notilt=NoTiltReader(),  # type: ignore[arg-type]
+        notilt_valuator=NoTiltUsdValuator(),
+    )
+
+    first_source, first_result = worker._poll_perptape(actor, now=NOW)
+    service.record_runtime_source_health(
+        actor,
+        {f"PERPTAPE:{first_source}": asdict(first_result)},
+        now=NOW,
+    )
+    second_source, second_result = worker._poll_perptape(actor, now=first_deadline)
+    service.record_runtime_source_health(
+        actor,
+        {f"PERPTAPE:{second_source}": asdict(second_result)},
+        now=first_deadline,
+    )
+
+    feeds = queries.perptape_feeds(actor, include_legacy=False)
+    health = queries.perptape_polling_health(actor)
+    assert requests == ["BN", "HL"]
+    assert first_source == "BN"
+    assert first_result.status == "SUCCESS"
+    assert second_source == "HL"
+    assert second_result.status == "FAILED"
+    assert "BN" in feeds
+    assert "HL" not in feeds
+    assert [candidate.symbol for candidate in feeds["BN"].candidates] == ["BTCUSDT"]
+    assert health["BN"]["status"] == "SUCCESS"
+    assert health["HL"]["status"] == "FAILED"
+    assert health["HL"]["error_code"] == (
+        "PERPTAPE_RATE_LIMITED"
+        if hyperliquid_failure == "RATE_LIMITED"
+        else "PERPTAPE_UNAVAILABLE"
+    )
 
 
 @pytest.mark.parametrize(

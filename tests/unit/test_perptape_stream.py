@@ -824,6 +824,77 @@ def test_reconnect_uses_bounded_exponential_backoff_and_wait_is_stoppable() -> N
     assert stream.fatal_error_code is None
 
 
+def test_transient_stream_stops_after_eight_bounded_attempts_for_supervisor_cooldown() -> None:
+    stop = RecordingStopEvent()
+    connector = RecordingConnector(
+        [
+            DomainRejected("PERPTAPE_STREAM_UNAVAILABLE", "temporary outage")
+            for _index in range(8)
+        ]
+    )
+    store = SnapshotStore()
+    stream, _https_calls = worker(
+        responses=[response() for _index in range(9)],
+        connector=connector,
+        store=store,
+        max_reconnect_attempts=8,
+    )
+
+    stream.run_forever(stop)
+
+    assert len(connector.calls) == 8
+    assert stop.waits == [1, 2, 4, 8, 8, 8, 8]
+    assert stop.stopped is True
+    assert stream.fatal_error_code == "PERPTAPE_STREAM_UNAVAILABLE"
+
+
+def test_auth_failed_stream_stops_without_reconnect() -> None:
+    stop = RecordingStopEvent()
+    socket = FakeSocket(
+        [
+            message("hello", sequence=1, event_time=NOW),
+            json.dumps(
+                {
+                    "e": "error",
+                    "code": "AUTH_FAILED",
+                    "E": int(NOW.timestamp() * 1_000),
+                }
+            ),
+        ]
+    )
+    connector = RecordingConnector([socket])
+    stream, _https_calls = worker(
+        responses=[response()],
+        connector=connector,
+        store=SnapshotStore(),
+        max_reconnect_attempts=8,
+    )
+
+    stream.run_forever(stop)
+
+    assert stream.fatal_error_code == "PERPTAPE_AUTH_FAILED"
+    assert stop.waits == []
+    assert len(connector.calls) == 1
+
+
+def test_not_configured_stream_stops_without_reconnect() -> None:
+    stop = RecordingStopEvent()
+    connector = RecordingConnector([])
+    stream, _https_calls = worker(
+        responses=[response()],
+        connector=connector,
+        store=SnapshotStore(),
+        max_reconnect_attempts=8,
+    )
+    stream._api_key = None
+
+    stream.run_forever(stop)
+
+    assert stream.fatal_error_code == "PERPTAPE_NOT_CONFIGURED"
+    assert stop.waits == []
+    assert connector.calls == []
+
+
 def test_failed_startup_snapshot_retries_once_per_backoff_cycle() -> None:
     stop = RecordingStopEvent()
 
@@ -1675,7 +1746,7 @@ def test_invalid_messages_stop_after_bounded_failures_and_never_log_secret(
         stream.run_forever(stop)
 
     assert stream.fatal_error_code == "PERPTAPE_STREAM_MESSAGE_INVALID"
-    assert stop.waits == [1]
+    assert stop.waits == []
     assert API_KEY not in caplog.text
     assert store.current is not None
     assert all(item.readiness != "READY" for item in store.current.candidates)

@@ -27,10 +27,14 @@ from trading_control_plane.domain import (
 from trading_control_plane.logging import configure_logging
 from trading_control_plane.notilt import NoTiltGateway, NoTiltUsdValuator
 from trading_control_plane.perptape import (
+    PERPTAPE_FEED_KEYS,
     PERPTAPE_OPERATIONAL_TIME_HEADROOM,
+    PERPTAPE_SOURCE_EXCHANGES,
     PerptapeCandidate,
     PerptapeClient,
     PerptapeFeedSnapshot,
+    PerptapeRateLimited,
+    PerptapeSourceExchange,
     merge_incomplete_perptape_candidates,
     normalize_perptape_operational_datetime,
 )
@@ -46,6 +50,26 @@ logger = logging.getLogger(__name__)
 SourceStatus = Literal["SUCCESS", "FAILED", "SKIPPED"]
 TIMEFRAME_ORDER = {"1h": 0, "4h": 1, "1d": 2, "1w": 3}
 AMOUNT_QUANTUM = Decimal("0.000000000000000001")
+PERPTAPE_TRANSIENT_STREAM_ERROR_CODES = {
+    "PERPTAPE_RATE_LIMITED",
+    "PERPTAPE_STREAM_STALE",
+    "PERPTAPE_STREAM_STOPPED",
+    "PERPTAPE_STREAM_UNAVAILABLE",
+    "PERPTAPE_UNAVAILABLE",
+}
+PERPTAPE_DETERMINISTIC_STREAM_ERROR_CODES = {
+    "PERPTAPE_AUTH_FAILED",
+    "PERPTAPE_NOT_CONFIGURED",
+    "PERPTAPE_PLAN_DENIED",
+    "PERPTAPE_RESPONSE_INVALID",
+    "PERPTAPE_STREAM_MESSAGE_INVALID",
+    "PERPTAPE_STREAM_PROTOCOL_ERROR",
+    "PERPTAPE_DATETIME_INVALID",
+    "PERPTAPE_DECIMAL_INVALID",
+    "PERPTAPE_FIELD_TOO_LARGE",
+    "PERPTAPE_PAYLOAD_TOO_LARGE",
+    "PERPTAPE_STREAM_PENDING_LIMIT",
+}
 
 
 def _resonance_decimal_identity(value: Decimal) -> str:
@@ -287,29 +311,63 @@ class RuntimeSyncWorker:
     def _runtime_clock(self, *, continuous: bool) -> datetime:
         return self._normalize_runtime_time(self.clock(), continuous=continuous)
 
+    def _perptape_poll_target(
+        self,
+        actor_id: UUID,
+        *,
+        now: datetime,
+    ) -> tuple[PerptapeSourceExchange, datetime | None]:
+        feeds = self.queries.perptape_feeds(actor_id, include_legacy=False)
+        health = self.queries.perptape_polling_health(actor_id)
+        minimum = datetime.min.replace(tzinfo=UTC)
+
+        def last_attempt(source_exchange: PerptapeSourceExchange) -> datetime:
+            values = [minimum]
+            feed = feeds.get(source_exchange)
+            if feed is not None:
+                values.append(feed.fetched_at)
+            checked_at = health.get(source_exchange, {}).get("checked_at")
+            if isinstance(checked_at, datetime):
+                values.append(checked_at)
+            return max(values)
+
+        source_exchange = min(
+            PERPTAPE_SOURCE_EXCHANGES,
+            key=lambda value: (
+                last_attempt(value),
+                PERPTAPE_SOURCE_EXCHANGES.index(value),
+            ),
+        )
+        deadlines = [feed.next_allowed_at for feed in feeds.values()]
+        legacy = self.queries.perptape_feed(actor_id, feed_key="BREAKOUTS")
+        if legacy is not None:
+            deadlines.append(legacy.next_allowed_at)
+        deadlines.extend(
+            retry_at
+            for value in health.values()
+            for retry_at in (value.get("retry_at"),)
+            if isinstance(retry_at, datetime)
+        )
+        retry_at = max(deadlines, default=now)
+        return source_exchange, retry_at if now < retry_at else None
+
     def _record_perptape(
         self,
         actor_id: UUID,
         now: datetime,
         *,
         runtime_binding: PreparedPerptapeRuntimeBinding | None = None,
+        source_exchange: PerptapeSourceExchange | None = None,
     ) -> int:
         now = self._normalize_runtime_time(now, continuous=False)
-        base = self.queries.perptape_feed(actor_id)
-        if (
-            base is not None
-            and base.contract_version == self.settings.perptape_contract_version
-            and now < base.next_allowed_at
-        ):
-            self._create_resonance_proposals(
-                actor_id,
-                base,
-                now=now,
-                runtime_binding=runtime_binding,
-            )
-            return len(base.candidates)
-        feed = self.perptape.refresh(now=now)
-        current = self.queries.perptape_feed(actor_id)
+        if source_exchange is None:
+            source_exchange, retry_at = self._perptape_poll_target(actor_id, now=now)
+            if retry_at is not None:
+                raise PerptapeRateLimited(retry_at)
+        feed_key = PERPTAPE_FEED_KEYS[source_exchange]
+        base = self.queries.perptape_feed(actor_id, feed_key=feed_key)
+        feed = self.perptape.refresh(now=now, source_exchange=source_exchange)
+        current = self.queries.perptape_feed(actor_id, feed_key=feed_key)
         if current is not None and current.contract_version == feed.contract_version:
             feed = merge_incomplete_perptape_candidates(
                 feed,
@@ -328,8 +386,64 @@ class RuntimeSyncWorker:
             now=now,
             base_snapshot=base,
             runtime_binding=runtime_binding,
+            feed_key=feed_key,
         )
         return len(feed.candidates)
+
+    def _poll_perptape(
+        self,
+        actor_id: UUID,
+        *,
+        now: datetime,
+        runtime_binding: PreparedPerptapeRuntimeBinding | None = None,
+    ) -> tuple[PerptapeSourceExchange, SourceSyncResult]:
+        source_exchange, retry_at = self._perptape_poll_target(actor_id, now=now)
+        if retry_at is not None:
+            return source_exchange, SourceSyncResult(
+                "SKIPPED",
+                error_code="PERPTAPE_RATE_LIMITED_COOLDOWN",
+                retry_at=retry_at.isoformat(),
+            )
+        try:
+            items_observed = self._record_perptape(
+                actor_id,
+                now,
+                runtime_binding=runtime_binding,
+                source_exchange=source_exchange,
+            )
+        except DomainRejected as exc:
+            error_retry_at: datetime | None = None
+            if isinstance(exc, PerptapeRateLimited):
+                error_retry_at = exc.next_allowed_at
+            elif exc.metadata is not None and exc.metadata.get("next_retry_at") is not None:
+                try:
+                    error_retry_at = datetime.fromisoformat(
+                        str(exc.metadata["next_retry_at"])
+                    ).astimezone(UTC)
+                except ValueError:
+                    error_retry_at = None
+            if error_retry_at is not None:
+                self.service.defer_perptape_feed(
+                    actor_id,
+                    feed_key=PERPTAPE_FEED_KEYS[source_exchange],
+                    retry_at=error_retry_at,
+                    now=now,
+                    runtime_binding=runtime_binding,
+                )
+            logger.warning(
+                "Runtime read-only Perptape venue synchronization failed",
+                extra={
+                    "event": "runtime_sync_source_failed",
+                    "component": f"PERPTAPE:{source_exchange}",
+                    "error_code": exc.code,
+                },
+            )
+            return source_exchange, SourceSyncResult(
+                "FAILED",
+                error_code=exc.code,
+                retry_at=None if error_retry_at is None else error_retry_at.isoformat(),
+            )
+        return source_exchange, SourceSyncResult("SUCCESS", items_observed=items_observed)
 
     def _record_perptape_snapshot(
         self,
@@ -339,6 +453,7 @@ class RuntimeSyncWorker:
         now: datetime,
         base_snapshot: PerptapeFeedSnapshot | None,
         runtime_binding: PreparedPerptapeRuntimeBinding | None = None,
+        feed_key: str | None = None,
     ) -> None:
         self.service.record_perptape_feed(
             actor_id,
@@ -346,6 +461,7 @@ class RuntimeSyncWorker:
             now=now,
             base_snapshot=base_snapshot,
             runtime_binding=runtime_binding,
+            feed_key=feed_key,
         )
         self._create_resonance_proposals(
             actor_id,
@@ -583,16 +699,17 @@ class RuntimeSyncWorker:
             self.settings.runtime_sync_service_username
         )
         results: dict[str, SourceSyncResult] = {}
+        perptape_venue_result: tuple[PerptapeSourceExchange, SourceSyncResult] | None = None
 
         if self.settings.perptape_api_key:
             perptape_actor = self.queries.service_principal_by_username(
                 self.settings.perptape_service_username
             )
-            self._attempt(
-                "PERPTAPE",
-                lambda: self._record_perptape(perptape_actor.user_id, started_at),
-                results,
+            perptape_venue_result = self._poll_perptape(
+                perptape_actor.user_id,
+                now=started_at,
             )
+            results["PERPTAPE"] = perptape_venue_result[1]
         else:
             results["PERPTAPE"] = SourceSyncResult("SKIPPED")
 
@@ -612,9 +729,13 @@ class RuntimeSyncWorker:
             results["NOTILT"] = SourceSyncResult("SKIPPED")
 
         net_worth = self.queries.capital_center(actor.user_id)["net_worth"]
+        health_results = dict(results)
+        if perptape_venue_result is not None:
+            source_exchange, venue_result = perptape_venue_result
+            health_results[f"PERPTAPE:{source_exchange}"] = venue_result
         self.service.record_runtime_source_health(
             actor.user_id,
-            {source: asdict(result) for source, result in results.items()},
+            {source: asdict(result) for source, result in health_results.items()},
             require_exact_account_scope=False,
             now=completed_at,
         )
@@ -636,20 +757,17 @@ class RuntimeSyncWorker:
                 "SIGNAL_RUNTIME_WORKER_SCOPE_MISMATCH",
                 "the runtime worker does not match the frozen Perptape binding",
             )
-        results: dict[str, SourceSyncResult] = {}
-        self._attempt(
-            "PERPTAPE",
-            lambda: self._record_perptape(
-                binding.service_principal_id,
-                now,
-                runtime_binding=binding,
-            ),
-            results,
+        source_exchange, result = self._poll_perptape(
+            binding.service_principal_id,
+            now=now,
+            runtime_binding=binding,
         )
-        result = results["PERPTAPE"]
         self.service.record_runtime_source_health(
             binding.service_principal_id,
-            {"PERPTAPE": asdict(result)},
+            {
+                "PERPTAPE": asdict(result),
+                f"PERPTAPE:{source_exchange}": asdict(result),
+            },
             perptape_runtime_binding=binding,
             now=now,
         )
@@ -691,6 +809,7 @@ class RuntimeSyncWorker:
             reconnect_initial_seconds=(self.settings.perptape_websocket_reconnect_initial_seconds),
             reconnect_max_seconds=self.settings.perptape_websocket_reconnect_max_seconds,
             max_reconnect_attempts=(self.settings.perptape_websocket_max_reconnect_attempts),
+            startup_reconciliation_enabled=False,
             clock=self.clock,
         )
 
@@ -732,6 +851,7 @@ class RuntimeSyncWorker:
                     max_reconnect_attempts=(
                         self.settings.perptape_websocket_max_reconnect_attempts
                     ),
+                    startup_reconciliation_enabled=False,
                     clock=self.clock,
                 )
                 stream_thread = threading.Thread(
@@ -816,6 +936,8 @@ class RuntimeBindingSupervisor:
         )
         self._perptape_streams: dict[UUID, _BoundPerptapeStream] = {}
         self._failed_perptape_stream_versions: dict[UUID, tuple[UUID, UUID, int, int]] = {}
+        self._perptape_stream_retry_at: dict[UUID, datetime] = {}
+        self._perptape_stream_failure_counts: dict[UUID, int] = {}
 
     @property
     def dependencies_in_use(self) -> bool:
@@ -868,6 +990,49 @@ class RuntimeBindingSupervisor:
                 },
             )
 
+    def _record_perptape_stream_failure(
+        self,
+        binding: PreparedPerptapeRuntimeBinding,
+        version: tuple[UUID, UUID, int, int],
+        error_code: str,
+        *,
+        now: datetime,
+    ) -> None:
+        signal_source_id = binding.signal_source_id
+        self._failed_perptape_stream_versions[signal_source_id] = version
+        retry_at: datetime | None = None
+        if error_code in PERPTAPE_TRANSIENT_STREAM_ERROR_CODES:
+            failures = self._perptape_stream_failure_counts.get(signal_source_id, 0) + 1
+            self._perptape_stream_failure_counts[signal_source_id] = failures
+            initial = max(
+                self.settings.perptape_websocket_reconnect_max_seconds,
+                float(self.settings.runtime_sync_interval_seconds),
+            )
+            maximum = max(
+                initial,
+                min(900.0, self.settings.perptape_websocket_reconnect_max_seconds * 8),
+            )
+            delay = min(initial * (2 ** min(failures - 1, 8)), maximum)
+            retry_at = now + timedelta(seconds=delay)
+            self._perptape_stream_retry_at[signal_source_id] = retry_at
+        else:
+            self._perptape_stream_retry_at.pop(signal_source_id, None)
+            self._perptape_stream_failure_counts.pop(signal_source_id, None)
+        self._record_perptape_stream_health(
+            binding,
+            SourceSyncResult(
+                "FAILED",
+                error_code=error_code,
+                retry_at=None if retry_at is None else retry_at.isoformat(),
+            ),
+            now=now,
+        )
+
+    def _clear_perptape_stream_failure(self, signal_source_id: UUID) -> None:
+        self._failed_perptape_stream_versions.pop(signal_source_id, None)
+        self._perptape_stream_retry_at.pop(signal_source_id, None)
+        self._perptape_stream_failure_counts.pop(signal_source_id, None)
+
     def _stop_perptape_stream(self, handle: _BoundPerptapeStream) -> None:
         handle.stop_event.set()
         timeout_seconds = (
@@ -893,10 +1058,10 @@ class RuntimeBindingSupervisor:
             worker = self._perptape_worker(binding)
             stream = worker.build_bound_perptape_stream(binding)
         except DomainRejected as exc:
-            self._failed_perptape_stream_versions[binding.signal_source_id] = version
-            self._record_perptape_stream_health(
+            self._record_perptape_stream_failure(
                 binding,
-                SourceSyncResult("FAILED", error_code=exc.code),
+                version,
+                exc.code,
                 now=now,
             )
             return
@@ -914,7 +1079,6 @@ class RuntimeBindingSupervisor:
             thread=thread,
         )
         self._perptape_streams[binding.signal_source_id] = handle
-        self._failed_perptape_stream_versions.pop(binding.signal_source_id, None)
         thread.start()
         self._record_perptape_stream_health(
             binding,
@@ -936,10 +1100,10 @@ class RuntimeBindingSupervisor:
                 self._perptape_streams.pop(signal_source_id, None)
                 if current_version == handle.version:
                     error_code = handle.stream.fatal_error_code or "PERPTAPE_STREAM_STOPPED"
-                    self._failed_perptape_stream_versions[signal_source_id] = handle.version
-                    self._record_perptape_stream_health(
+                    self._record_perptape_stream_failure(
                         handle.binding,
-                        SourceSyncResult("FAILED", error_code=error_code),
+                        handle.version,
+                        error_code,
                         now=now,
                     )
                 continue
@@ -950,14 +1114,20 @@ class RuntimeBindingSupervisor:
         active_ids = set(current)
         for signal_source_id in tuple(self._failed_perptape_stream_versions):
             if signal_source_id not in active_ids:
-                self._failed_perptape_stream_versions.pop(signal_source_id, None)
+                self._clear_perptape_stream_failure(signal_source_id)
 
         for signal_source_id, binding in current.items():
             if signal_source_id in self._perptape_streams:
                 continue
             version = self._perptape_binding_version(binding)
-            if self._failed_perptape_stream_versions.get(signal_source_id) == version:
-                continue
+            failed_version = self._failed_perptape_stream_versions.get(signal_source_id)
+            if failed_version is not None and failed_version != version:
+                self._clear_perptape_stream_failure(signal_source_id)
+                failed_version = None
+            if failed_version == version:
+                retry_at = self._perptape_stream_retry_at.get(signal_source_id)
+                if retry_at is None or now < retry_at:
+                    continue
             self._start_perptape_stream(binding, now=now)
 
         for handle in tuple(self._perptape_streams.values()):
@@ -974,6 +1144,8 @@ class RuntimeBindingSupervisor:
                     error_code="PERPTAPE_STREAM_STARTING",
                 )
             )
+            if handle.stream.connection_healthy:
+                self._clear_perptape_stream_failure(handle.binding.signal_source_id)
             self._record_perptape_stream_health(handle.binding, result, now=now)
 
     def _shutdown_perptape_streams(self) -> None:
@@ -1015,7 +1187,14 @@ class RuntimeBindingSupervisor:
             signal_bindings = self.service.perptape_runtime_bindings()
         for signal_binding in signal_bindings:
             key = f"{signal_binding.team_id}:PERPTAPE"
-            results[key] = self._perptape_worker(signal_binding).run_bound_perptape_once(
+            stream_handle = self._perptape_streams.get(signal_binding.signal_source_id)
+            worker = (
+                stream_handle.worker
+                if stream_handle is not None
+                and stream_handle.version == self._perptape_binding_version(signal_binding)
+                else self._perptape_worker(signal_binding)
+            )
+            results[key] = worker.run_bound_perptape_once(
                 signal_binding,
                 now=started_at,
             )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from trading_control_plane.adapters.capital import (
     CapitalAdapterFactory,
     build_production_capital_adapter_factory,
@@ -101,7 +103,13 @@ from trading_control_plane.capital_direct_use_cases import CapitalDirectUseCases
 from trading_control_plane.capital_receipt_use_cases import CapitalReceiptUseCases
 from trading_control_plane.capital_transfer_use_cases import CapitalTransferUseCases
 from trading_control_plane.exchange_connection_verification import ExchangeConnectionVerification
-from trading_control_plane.perptape import PerptapeFeedSnapshot
+from trading_control_plane.perptape import (
+    PERPTAPE_SOURCE_EXCHANGES,
+    PERPTAPE_VENUES,
+    PerptapeFeedSnapshot,
+    PerptapeSourceExchange,
+    bound_perptape_feed_snapshot,
+)
 from trading_control_plane.request_context import (
     ApiClientRequestContext,
     bind_api_client_context,
@@ -609,12 +617,16 @@ def create_app(
                 )
             )
 
-    def current_persisted_perptape_feed(
-        *, user_id: UUID, now: datetime
-    ) -> PerptapeFeedSnapshot | None:
-        feed = queries().perptape_feed(user_id)
-        if feed is None:
-            return None
+    def persisted_perptape_venue_snapshots(
+        *,
+        user_id: UUID,
+        now: datetime,
+    ) -> tuple[
+        dict[PerptapeSourceExchange, PerptapeFeedSnapshot],
+        dict[str, dict[str, Any]],
+    ]:
+        feeds = queries().perptape_feeds(user_id)
+        health = queries().perptape_polling_health(user_id)
         grace = timedelta(
             seconds=(
                 resolved_settings.runtime_sync_interval_seconds
@@ -622,23 +634,88 @@ def create_app(
                 + 30
             )
         )
-        if (
-            feed.contract_version == resolved_settings.perptape_contract_version
-            and now <= feed.next_allowed_at + grace
-        ):
-            return feed
-        if resolved_settings.runtime_sync_enabled:
-            raise DomainRejected(
-                "PERPTAPE_CACHE_STALE",
-                "runtime Perptape feed is stale or uses another contract version",
+        states: dict[str, dict[str, Any]] = {}
+        for source_exchange in PERPTAPE_SOURCE_EXCHANGES:
+            venue = PERPTAPE_VENUES[source_exchange]
+            feed = feeds.get(source_exchange)
+            venue_health = health.get(source_exchange, {})
+            data_status = (
+                "UNKNOWN"
+                if feed is None
+                else "CURRENT"
+                if feed.contract_version == resolved_settings.perptape_contract_version
+                and now <= feed.next_allowed_at + grace
+                else "STALE"
             )
-        return None
+            retry_at = venue_health.get("retry_at")
+            rate_limited = (
+                venue_health.get("status") == "FAILED"
+                and "RATE_LIMITED" in str(venue_health.get("error_code") or "")
+                and isinstance(retry_at, datetime)
+                and now < retry_at
+            )
+            states[venue] = {
+                "source_exchange": source_exchange,
+                "status": "RATE_LIMITED" if rate_limited else data_status,
+                "data_status": data_status,
+                "candidate_count": 0 if feed is None else len(feed.candidates),
+                "contract_version": None if feed is None else feed.contract_version,
+                "generated_at": None if feed is None else feed.generated_at.isoformat(),
+                "fetched_at": None if feed is None else feed.fetched_at.isoformat(),
+                "next_allowed_at": None if feed is None else feed.next_allowed_at.isoformat(),
+                "retry_at": None if retry_at is None else retry_at.isoformat(),
+                "error_code": venue_health.get("error_code"),
+            }
+        return feeds, states
+
+    def current_persisted_perptape_feed(
+        *, user_id: UUID, now: datetime
+    ) -> PerptapeFeedSnapshot | None:
+        feeds, states = persisted_perptape_venue_snapshots(user_id=user_id, now=now)
+        current = {
+            source_exchange: feed
+            for source_exchange, feed in feeds.items()
+            if states[PERPTAPE_VENUES[source_exchange]]["data_status"] == "CURRENT"
+        }
+        if not current:
+            return None
+        newest = max(current.values(), key=lambda value: value.fetched_at)
+        return bound_perptape_feed_snapshot(
+            PerptapeFeedSnapshot(
+                contract_version=newest.contract_version,
+                generated_at=max(feed.generated_at for feed in current.values()),
+                fetched_at=max(feed.fetched_at for feed in current.values()),
+                next_allowed_at=max(feed.next_allowed_at for feed in current.values()),
+                candidates=tuple(
+                    candidate
+                    for source_exchange in PERPTAPE_SOURCE_EXCHANGES
+                    if source_exchange in current
+                    for candidate in current[source_exchange].candidates
+                ),
+            )
+        )
 
     def current_perptape_candidates(*, user_id: UUID, now: datetime) -> list[PerptapeCandidate]:
         runtime = service().perptape_source_runtime(user_id)
-        feed = current_persisted_perptape_feed(user_id=user_id, now=now)
-        if feed is not None:
-            return list(feed.candidates)
+        feeds, states = persisted_perptape_venue_snapshots(user_id=user_id, now=now)
+        if feeds:
+            combined = PerptapeFeedSnapshot(
+                contract_version=max(
+                    feeds.values(), key=lambda value: value.fetched_at
+                ).contract_version,
+                generated_at=max(feed.generated_at for feed in feeds.values()),
+                fetched_at=max(feed.fetched_at for feed in feeds.values()),
+                next_allowed_at=max(feed.next_allowed_at for feed in feeds.values()),
+                candidates=tuple(
+                    candidate
+                    if states[PERPTAPE_VENUES[source_exchange]]["data_status"] == "CURRENT"
+                    else replace(candidate, data_health="STALE")
+                    for source_exchange in PERPTAPE_SOURCE_EXCHANGES
+                    if source_exchange in feeds
+                    for candidate in feeds[source_exchange].candidates
+                ),
+            )
+            return list(bound_perptape_feed_snapshot(combined).candidates)
         if resolved_settings.runtime_sync_enabled:
             raise DomainRejected(
                 "PERPTAPE_CACHE_UNAVAILABLE",
@@ -686,6 +763,10 @@ def create_app(
             if perptape_candidate_identity_is_displayable(candidate)
         ]
         feed = current_persisted_perptape_feed(user_id=user_id, now=now)
+        _venue_feeds, venue_states = persisted_perptape_venue_snapshots(
+            user_id=user_id,
+            now=now,
+        )
         active_instrument_keys = queries().active_instrument_keys(
             {
                 (candidate.venue, candidate.symbol)
@@ -759,6 +840,7 @@ def create_app(
             "retry_at": None if feed is None else feed.next_allowed_at.isoformat(),
             "as_of": now.isoformat(),
             "discarded_candidate_count": len(source_candidates) - len(candidates),
+            "venues": venue_states,
             "data": data,
         }
 

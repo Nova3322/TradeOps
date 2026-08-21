@@ -54,14 +54,14 @@ def test_market_scan_url_uses_plain_symbol_query() -> None:
     assert query["q"] == ["PROVEUSDT"]
 
 
-def parsed_feed() -> PerptapeFeedSnapshot:
+def parsed_feed(*, source_exchange: str = "BN") -> PerptapeFeedSnapshot:
     return PerptapeClient(
         base_url="https://perptape.com",
         api_key="key",
         contract_version="breakouts-v1",
         cache_ttl=timedelta(0),
         fetcher=lambda _url, _headers, _timeout: response(),
-    ).refresh(now=NOW)
+    ).refresh(now=NOW, source_exchange=source_exchange)  # type: ignore[arg-type]
 
 
 def test_feed_without_rate_limit_tolerates_sub_millisecond_server_lead() -> None:
@@ -136,21 +136,27 @@ def test_real_breakout_contract_maps_to_narrow_trading_candidates_and_caches() -
 
     first = client.list_candidates(now=NOW)
     second = client.list_candidates(now=NOW + timedelta(seconds=30))
+    third = client.list_candidates(now=NOW + timedelta(seconds=60))
 
     assert first == second
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert calls[0][1] == {
         "authorization": "Bearer test-api-key",
         "x-api-key": "test-api-key",
         "user-agent": "trading-control-plane/1.0",
     }
     assert calls[0][2] == 15
+    assert parse_qs(urlparse(calls[0][0]).query)["ex"] == ["BN"]
+    assert parse_qs(urlparse(calls[1][0]).query)["ex"] == ["HL"]
+    assert all("ex=ALL" not in call[0] for call in calls)
+    assert len(first) == 1
+    assert len(third) == 2
     assert first[0].venue == "BINANCE"
     assert first[0].direction is Direction.LONG
     assert first[0].readiness == "READY"
-    assert first[1].venue == "HYPERLIQUID"
-    assert first[1].direction is Direction.SHORT
-    assert first[1].data_health == "DEGRADED"
+    by_venue = {candidate.venue: candidate for candidate in third}
+    assert by_venue["HYPERLIQUID"].direction is Direction.SHORT
+    assert by_venue["HYPERLIQUID"].data_health == "DEGRADED"
     assert first[0].candidate_id.startswith("pt_")
     assert first[0].quote_volume == 1_000_000
     assert first[0].open_interest == 500_000
@@ -159,6 +165,38 @@ def test_real_breakout_contract_maps_to_narrow_trading_candidates_and_caches() -
     detail_query = parse_qs(urlparse(first[0].detail_url).query)
     assert detail_query["ex"] == ["BN"]
     assert detail_query["q"] == ["BTCUSDT"]
+
+
+def test_shared_perptape_key_honors_next_allowed_before_other_venue_request() -> None:
+    calls: list[str] = []
+    deadline = NOW + timedelta(minutes=2)
+
+    def fetch(url: str, _headers: dict[str, str], _timeout: float) -> dict[str, object]:
+        calls.append(url)
+        payload = response()
+        payload["rateLimit"] = {
+            "nextAllowedAt": int(deadline.timestamp() * 1_000)
+        }
+        return payload
+
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="shared-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(seconds=1),
+        fetcher=fetch,
+    )
+
+    client.refresh(now=NOW, source_exchange="BN")
+    with pytest.raises(PerptapeRateLimited) as exc_info:
+        client.refresh(
+            now=NOW + timedelta(minutes=1),
+            source_exchange="HL",
+        )
+
+    assert exc_info.value.next_allowed_at == deadline
+    assert len(calls) == 1
+    assert parse_qs(urlparse(calls[0]).query)["ex"] == ["BN"]
 
 
 def test_persisted_market_scan_link_keeps_exact_symbol_without_mutating_identity() -> None:
@@ -211,7 +249,7 @@ def test_hyperliquid_hip3_chart_link_preserves_namespace() -> None:
         fetcher=lambda _url, _headers, _timeout: payload,
     )
 
-    candidate = client.refresh(now=NOW).candidates[1]
+    candidate = client.refresh(now=NOW, source_exchange="HL").candidates[0]
 
     assert candidate.symbol == "xyz:IBM"
     assert candidate.canonical_symbol == "IBM"
@@ -219,7 +257,7 @@ def test_hyperliquid_hip3_chart_link_preserves_namespace() -> None:
 
 
 def test_persisted_hyperliquid_hip3_chart_link_is_repaired() -> None:
-    candidate = parsed_feed().candidates[1]
+    candidate = parsed_feed(source_exchange="HL").candidates[0]
     value = candidate.to_dict()
     value.update(
         {
@@ -252,7 +290,7 @@ def test_candidate_identity_distinguishes_contracts_with_same_canonical_symbol()
 
     candidates = client.list_candidates(now=NOW)
 
-    assert [candidate.symbol for candidate in candidates] == ["BTCUSDT", "BTCUSDC"]
+    assert sorted(candidate.symbol for candidate in candidates) == ["BTCUSDC", "BTCUSDT"]
     assert len({candidate.candidate_id for candidate in candidates}) == 2
     assert len({perptape_legacy_candidate_id(candidate) for candidate in candidates}) == 1
 
