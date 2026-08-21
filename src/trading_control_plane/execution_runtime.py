@@ -43,6 +43,7 @@ class AutomaticIntent:
     campaign_id: UUID
     actor_id: UUID
     execution_scope: str
+    query_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +307,7 @@ class AutomaticExecutionWorker:
                     models.Campaign.environment,
                     models.Campaign.account_id,
                     models.Campaign.venue,
+                    models.OrderIntent.status,
                 )
                 .join(
                     models.Campaign,
@@ -350,7 +352,15 @@ class AutomaticExecutionWorker:
                 .limit(self.settings.execution_worker_batch_size)
             ).all()
         results: list[AutomaticIntent] = []
-        for intent_id, campaign_id, actor_id, environment, account_id, venue in rows:
+        for (
+            intent_id,
+            campaign_id,
+            actor_id,
+            environment,
+            account_id,
+            venue,
+            intent_status,
+        ) in rows:
             assert actor_id is not None
             results.append(
                 AutomaticIntent(
@@ -358,6 +368,7 @@ class AutomaticExecutionWorker:
                     campaign_id=campaign_id,
                     actor_id=actor_id,
                     execution_scope=f"{environment}:{account_id}:{venue}",
+                    query_only=intent_status != domain.OrderIntentStatus.READY.value,
                 )
             )
         return tuple(results)
@@ -700,6 +711,14 @@ class AutomaticExecutionWorker:
 
     def _acquire_sender(self, intent: AutomaticIntent) -> int:
         now = self.clock()
+        if intent.query_only:
+            return self.service.acquire_freqtrade_recovery_sender(
+                intent.intent_id,
+                intent.execution_scope,
+                AUTOMATIC_EXECUTION_OWNER,
+                intent.actor_id,
+                now,
+            )
         try:
             return self.service.acquire_sender(
                 intent.execution_scope,
