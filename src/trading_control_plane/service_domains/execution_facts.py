@@ -789,6 +789,27 @@ class FactIngestionExecutionService(ServiceComponent):
             for order in unresolved_orders:
                 if order.venue_order_id in observed_order_ids:
                     continue
+                if (
+                    order.order_intent_id is None
+                    and order.reduce_only
+                    and order.order_type == "STOPLOSS"
+                ):
+                    flat_position = session.scalar(
+                        select(models.Position).where(
+                            models.Position.team_id == team.team_id,
+                            models.Position.environment == environment.value,
+                            models.Position.account_id == account_id,
+                            models.Position.venue == venue,
+                            models.Position.instrument_id == order.instrument_id,
+                            models.Position.fact_status == domain.FactStatus.KNOWN.value,
+                            models.Position.quantity == 0,
+                        )
+                    )
+                    if flat_position is not None:
+                        order.status = domain.VenueOrderStatus.CANCELLED.value
+                        order.observed_at = now
+                        order.updated_at = now
+                        continue
                 fills = session.scalars(
                     select(models.VenueFill).where(
                         models.VenueFill.team_id == team.team_id,

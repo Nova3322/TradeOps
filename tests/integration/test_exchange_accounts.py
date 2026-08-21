@@ -472,6 +472,19 @@ def test_confirmed_external_fill_closes_matching_unbound_order(
                 close_position=False,
                 observed_at=now,
             ),
+            ReadOnlyVenueOrder(
+                order_id="external-protection-order",
+                client_order_id="external-protection-client",
+                status="SENT",
+                side="SELL",
+                order_type="STOPLOSS",
+                ordered_quantity=Decimal("0.130"),
+                filled_quantity=Decimal(0),
+                stop_price=Decimal("80"),
+                reduce_only=True,
+                close_position=False,
+                observed_at=now,
+            ),
         ),
         fills=(),
         position=VenuePosition(
@@ -544,6 +557,14 @@ def test_confirmed_external_fill_closes_matching_unbound_order(
         assert order.status == "FILLED"
         assert order.ordered_quantity == Decimal("0.130")
         assert order.filled_quantity == Decimal("0.130")
+        protection_order = session.scalar(
+            select(VenueOrder).where(
+                VenueOrder.venue_order_id == "external-protection-order"
+            )
+        )
+        assert protection_order is not None
+        assert protection_order.order_intent_id is None
+        assert protection_order.status == "CANCELLED"
         assert session.query(PersistedVenueFill).count() == 1
         assert session.query(OrderIntent).count() == 0
 
