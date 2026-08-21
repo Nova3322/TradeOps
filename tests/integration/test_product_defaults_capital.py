@@ -1836,7 +1836,7 @@ def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_block
                     "account_id": "acct-live",
                     "risk_tier": "LOW",
                     "notional": "100",
-                    "max_risk": "1",
+                    "max_risk": "2",
                     "invalidation_bps": 200,
                     "expires_in_minutes": 480,
                     "rationale": "safe reviewed default",

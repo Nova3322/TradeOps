@@ -124,7 +124,7 @@ def test_telegram_review_confirmation_writes_audit_without_authorization_or_orde
                     "direction": "LONG",
                     "risk_tier": "MEDIUM",
                     "quantity": "0.001",
-                    "max_risk": "1",
+                    "max_risk": "2",
                     "expires_in_minutes": 480,
                     "trigger_price": "100000",
                     "invalidation_price": "98000",
