@@ -6,7 +6,7 @@
   "trading_mode": "futures",
   "margin_mode": "isolated",
   "stake_currency": "USDC",
-  "stake_amount": 12,
+  "stake_amount": 5,
   "max_open_trades": 1,
   "timeframe": "5m",
   "initial_state": "stopped",
@@ -29,7 +29,7 @@
       "enableRateLimit": true
     },
     "pair_whitelist": [
-      "XYZ-TSLA/USDC:USDC"
+      "BTC/USDC:USDC"
     ],
     "pair_blacklist": []
   },
