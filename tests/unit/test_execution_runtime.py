@@ -19,6 +19,7 @@ class _Service:
     def __init__(self) -> None:
         self.acquired: list[tuple[str, str]] = []
         self.reconciled: list[str] = []
+        self.closed: list[object] = []
 
     def acquire_sender(
         self,
@@ -65,6 +66,19 @@ class _Service:
         del intent_id, actor_id, now
         self.acquired.append((execution_scope, f"reduce:{owner_id}"))
         return 10
+
+    def reconciliation_status(self, _reconciliation_id: object) -> ReconciliationStatus:
+        return ReconciliationStatus.MATCH
+
+    def close_campaign(
+        self,
+        campaign_id: object,
+        actor_id: object,
+        *,
+        now: datetime,
+    ) -> None:
+        del actor_id, now
+        self.closed.append(campaign_id)
 
 
 class _SenderTakeoverService(_Service):
@@ -182,6 +196,7 @@ def test_worker_advances_approved_proposal_and_dispatches_ready_intent(
     ]
     assert len(dispatches) == 1
     assert service.reconciled == ["LIVE:acct-1:BINANCE"]
+    assert service.closed == [intent.campaign_id]
     request = dispatches[0]
     assert request.intent_id == intent.intent_id
     assert request.idempotency_key == f"automatic-freqtrade:{intent.intent_id}"
