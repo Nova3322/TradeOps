@@ -395,7 +395,11 @@ def freqtrade_execution_order(
             "Freqtrade did not expose one completed order owned by the durable dispatch",
         )
     order = matches[0]
-    if order.filled > command.max_quantity or order.price <= 0:
+    if (
+        order.amount > command.max_quantity
+        or order.filled > command.max_quantity
+        or order.price <= 0
+    ):
         raise DomainRejected(
             "FREQTRADE_ORDER_IDENTITY_CONFLICT",
             "Freqtrade execution exceeded the frozen quantity or has no confirmed price",

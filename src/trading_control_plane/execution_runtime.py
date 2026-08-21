@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 
 from trading_control_plane import domain, models
 from trading_control_plane import execution_scope as scope_rules
@@ -319,11 +319,20 @@ class AutomaticExecutionWorker:
                     & (models.ExchangeAccount.venue == models.Campaign.venue),
                 )
                 .where(
-                    models.OrderIntent.status.in_(
-                        (
-                            domain.OrderIntentStatus.READY.value,
-                            domain.OrderIntentStatus.DISPATCHING.value,
-                        )
+                    or_(
+                        models.OrderIntent.status == domain.OrderIntentStatus.READY.value,
+                        and_(
+                            models.OrderIntent.status.in_(
+                                (
+                                    domain.OrderIntentStatus.DISPATCHING.value,
+                                    domain.OrderIntentStatus.SENT.value,
+                                    domain.OrderIntentStatus.PARTIALLY_FILLED.value,
+                                    domain.OrderIntentStatus.UNKNOWN.value,
+                                )
+                            ),
+                            models.OrderIntent.dispatch_backend == "FREQTRADE",
+                            models.OrderIntent.dispatch_started_at.is_not(None),
+                        ),
                     ),
                     models.ExchangeAccount.active,
                     models.ExchangeAccount.deleted_at.is_(None),
