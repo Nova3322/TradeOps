@@ -713,7 +713,7 @@ def test_fact_adapter_derives_stable_ids_for_zero_hash_funding_payments() -> Non
 
 
 def test_one_shot_fact_probe_uses_exact_scope_and_always_closes() -> None:
-    exchange = FakeCcxtProExchange()
+    exchange = FakeCcxtCooldownProbeExchange()
     observed: dict[str, object] = {}
 
     def factory(
@@ -741,6 +741,10 @@ def test_one_shot_fact_probe_uses_exact_scope_and_always_closes() -> None:
 
     assert result.success is True
     assert exchange.closed is True
+    assert exchange.load_calls == 0
+    assert exchange.balance_calls == 1
+    assert exchange.position_calls == 0
+    assert exchange.order_calls == 0
     assert observed["scope"] == _scope("BINANCE")
     assert observed["options"] == {
         "defaultType": "swap",
