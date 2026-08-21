@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -130,6 +131,7 @@ class _WorkerFixture:
         self.is_open = False
         self.stop_sequence = 0
         self.writes = 0
+        self.on_order: Callable[[dict[str, Any]], None] | None = None
 
     def _trade(self) -> dict[str, Any]:
         assert self.enter_tag is not None
@@ -249,19 +251,20 @@ class _WorkerFixture:
             self.is_open = self.open_quantity > 0
             self.stop_sequence += 1
             self.writes += 1
-            self.orders.append(
-                {
-                    "ft_order_side": "buy" if self.side == "short" else "sell",
-                    "order_id": f"{self.exchange}-exit-{self.writes}",
-                    "status": "closed",
-                    "is_open": False,
-                    "amount": str(quantity),
-                    "filled": str(quantity),
-                    "average": str(self.mark),
-                    "ft_order_tag": "force_exit",
-                    "order_filled_timestamp": int(datetime.now(UTC).timestamp() * 1_000),
-                }
-            )
+            order = {
+                "ft_order_side": "buy" if self.side == "short" else "sell",
+                "order_id": f"{self.exchange}-exit-{self.writes}",
+                "status": "closed",
+                "is_open": False,
+                "amount": str(quantity),
+                "filled": str(quantity),
+                "average": str(self.mark),
+                "ft_order_tag": "force_exit",
+                "order_filled_timestamp": int(datetime.now(UTC).timestamp() * 1_000),
+            }
+            self.orders.append(order)
+            if self.on_order is not None:
+                self.on_order(order)
             return {"status": "closed"}
         if f"/trade/{self.exchange}-trade-1" in path:
             return self._trade()
@@ -744,6 +747,37 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
                     ),
                     now=fresh,
                 )
+
+                def preobserve_exit(order: dict[str, Any]) -> None:
+                    observed_at = datetime.fromtimestamp(
+                        int(order["order_filled_timestamp"]) / 1_000,
+                        tz=UTC,
+                    )
+                    with database.session_factory.begin() as session:
+                        campaign = session.get(Campaign, opening.campaign_id)
+                        assert campaign is not None
+                        session.add(
+                            VenueOrder(
+                                team_id=campaign.team_id,
+                                order_intent_id=None,
+                                account_id=account_id,
+                                venue=venue,
+                                environment=environment,
+                                instrument_id=fixture.ids["instrument"],
+                                venue_order_id=str(order["order_id"]),
+                                client_order_id="freqtrade-native-exit-client",
+                                side=str(order["ft_order_side"]).upper(),
+                                order_type="MARKET",
+                                reduce_only=True,
+                                status="FILLED",
+                                ordered_quantity=Decimal(str(order["amount"])),
+                                filled_quantity=Decimal(str(order["filled"])),
+                                observed_at=observed_at,
+                                updated_at=observed_at,
+                            )
+                        )
+
+                worker_fixture.on_order = preobserve_exit
                 exit_action = {**action, "idempotency_key": f"{slug}-exit-dispatch"}
                 exit_response = await client.post(
                     f"/api/intents/{exit_id}/execute",
@@ -757,6 +791,12 @@ def test_exact_account_freqtrade_is_the_only_execution_chain(
                 )
                 assert exit_replay.status_code == 200, exit_replay.text
                 assert exit_replay.json()["replayed"] is True
+                with database.session_factory() as session:
+                    adopted = session.scalar(
+                        select(VenueOrder).where(VenueOrder.order_intent_id == exit_id)
+                    )
+                    assert adopted is not None
+                    assert adopted.client_order_id == "freqtrade-native-exit-client"
 
     asyncio.run(scenario())
 
