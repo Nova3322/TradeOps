@@ -202,6 +202,64 @@ def test_worker_advances_approved_proposal_and_dispatches_ready_intent(
     assert request.idempotency_key == f"automatic-freqtrade:{intent.intent_id}"
 
 
+def test_worker_refreshes_stale_safe_capital_before_ready_new_risk_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = object.__new__(AutomaticExecutionWorker)
+    service = _Service()
+    proposal_id = uuid4()
+    intent = AutomaticIntent(
+        intent_id=uuid4(),
+        campaign_id=uuid4(),
+        actor_id=uuid4(),
+        execution_scope="LIVE:acct-1:HYPERLIQUID",
+        proposal_id=proposal_id,
+    )
+    now = datetime(2026, 8, 21, tzinfo=UTC)
+    worker.settings = SimpleNamespace(
+        runtime_sync_service_username="runtime-sync",
+        freqtrade_live_leverage=2,
+        execution_worker_enabled=True,
+        freqtrade_workers_enabled=True,
+    )
+    worker.service = service
+    worker.clock = lambda: now
+    worker.worker_factory = lambda _binding: object()
+    worker._approved_proposal_ids = lambda *, now: ()  # type: ignore[method-assign]
+    worker._automatic_intents = lambda: (intent,)  # type: ignore[method-assign]
+    worker._reconciliation_intents = lambda: ()  # type: ignore[method-assign]
+    refreshes: list[dict[str, object]] = []
+
+    def refresh_safe(**kwargs: object) -> object:
+        refreshes.append(kwargs)
+        return uuid4()
+
+    worker._refresh_safe_capital_fact = refresh_safe  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "trading_control_plane.execution_runtime.execute_intent",
+        lambda *_args, **_kwargs: ExecuteIntentResult(
+            environment="LIVE",
+            worker_name="hyperliquid-live",
+            trade_id="trade-1",
+            replayed=False,
+            venue_order_fact_id=uuid4(),
+        ),
+    )
+
+    report = worker.run_once()
+
+    assert report.capital_facts_refreshed == 1
+    assert report.intents_completed == 1
+    assert report.blocked == {}
+    assert refreshes == [
+        {
+            "proposal_id": proposal_id,
+            "now": now,
+            "require_retryable_denial": False,
+        }
+    ]
+
+
 def test_worker_uses_fenced_query_recovery_for_dispatched_unknown() -> None:
     worker = object.__new__(AutomaticExecutionWorker)
     service = _Service()
