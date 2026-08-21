@@ -124,10 +124,9 @@ async function renderProposalList(status, title, historyMode = false) {
   const scopedItems = status
     ? reviewableItems.filter(item => reviewEnvironment === 'ALL' || item.environment === reviewEnvironment)
     : visibleItems.filter(item => historyMode ? !isCurrentProposal(item) : isCurrentProposal(item));
-  const items = scopedItems
-    .sort((left, right) => status
-      ? new Date(left.expires_at) - new Date(right.expires_at)
-      : new Date(right.created_at) - new Date(left.created_at));
+  const items = scopedItems.sort((left, right) =>
+    new Date(right.created_at) - new Date(left.created_at)
+    || String(right.proposal_id).localeCompare(String(left.proposal_id)));
   const expiring = items.filter(item => { const remaining = new Date(item.expires_at) - Date.now(); return remaining > 0 && remaining < 30 * 60 * 1000; }).length;
   const doubleReview = items.filter(item => item.status === 'PENDING_REVIEW' && item.risk_tier === 'HIGH').length;
   const systemCount = items.filter(item => item.source === 'SYSTEM').length;
@@ -135,7 +134,9 @@ async function renderProposalList(status, title, historyMode = false) {
   const approved = items.filter(item => item.status === 'APPROVED' && !proposalLaunchWindowExpired(item)).length;
   const expired = items.filter(item => item.status === 'EXPIRED' || proposalLaunchWindowExpired(item)).length;
   const rejected = items.filter(item => item.status === 'REJECTED').length;
-  const earliestExpiry = items[0]?.expires_at;
+  const earliestExpiry = items.reduce((earliest, item) =>
+    !earliest || new Date(item.expires_at) < new Date(earliest) ? item.expires_at : earliest,
+  null);
   const reviewCounts = {
     ALL: reviewableItems.length,
     LIVE: reviewableItems.filter(item => item.environment === 'LIVE').length,
@@ -169,40 +170,28 @@ async function renderProposalList(status, title, historyMode = false) {
         : `<div class="stat"><small>当前提案</small><b>${items.length}</b></div><div class="stat"><small>等待审核</small><b>${items.filter(item => item.status === 'PENDING_REVIEW').length}</b></div>`}</div>
     <div class="section-tabs">${hasCapability('proposal.review') ? `<a class="${status ? 'active' : ''}" href="/reviews?view=review" data-link>待我审核</a>` : ''}<a class="${!status && !historyMode ? 'active' : ''}" href="/reviews?view=current" data-link>当前提案</a><a class="${historyMode ? 'active' : ''}" href="/reviews?view=history" data-link>历史记录</a></div>
     ${status && items.length ? `<p class="review-queue-summary">当前筛选：生产 ${items.filter(item => item.environment === 'LIVE').length} 笔 · 测试 ${items.filter(item => item.environment === 'TESTNET').length} 笔；系统机会 ${systemCount} 笔 · 人工判断 ${manualCount} 笔。这里只统计你尚未投票、仍在有效期内的提案。</p>` : ''}
-    ${items.length ? `<details class="proposal-filter-disclosure" ${window.matchMedia('(min-width: 781px)').matches ? 'open' : ''}><summary><span><b>筛选提案</b><small>按标的、方向、风险与${status ? '来源' : '状态'}缩小结果</small></span><strong><span><b data-proposal-count>${items.length}</b> 个结果</span><span class="proposal-filter-when-closed">展开</span><span class="proposal-filter-when-open">收起</span></strong></summary><div class="proposal-list-tools"><label>搜索标的<input id="proposal-search" type="search" placeholder="BTCUSDT / xyz:TSLA"></label><label>方向<select id="proposal-direction"><option value="">全部方向</option><option value="LONG">做多</option><option value="SHORT">做空</option></select></label><label>风险<select id="proposal-risk"><option value="">全部档位</option><option value="LOW">低</option><option value="MEDIUM">中</option><option value="HIGH">高</option></select></label>${status ? '<label>来源<select id="proposal-source"><option value="">全部来源</option><option value="SYSTEM">系统机会</option><option value="MANUAL">人工判断</option></select></label>' : '<label>状态<select id="proposal-status"><option value="">全部状态</option><option value="DRAFT">草稿</option><option value="PENDING_REVIEW">待审核</option><option value="APPROVED">已批准</option><option value="REJECTED">已拒绝</option><option value="EXPIRED">已过期</option></select></label>'}<span role="status" aria-live="polite"><b data-proposal-visible-count>${Math.min(items.length, 12)}</b> / <b data-proposal-count>${items.length}</b> 个结果</span></div></details><div class="table-wrap proposal-table"><table><thead><tr><th>提案</th><th>方向 / 交易规模</th><th>风险边界</th><th>${status ? '审核进度' : '状态'}</th><th>提交时间</th><th>有效期 / 结果</th></tr></thead><tbody id="proposal-list-body">${items.map(item => `<tr data-href="${escapeHtml(proposalDetailHref(item))}" data-proposal-row data-search="${escapeHtml(`${item.symbol || ''} ${item.venue} ${item.proposer_username || ''}`.toLowerCase())}" data-direction="${escapeHtml(item.direction)}" data-risk="${escapeHtml(item.risk_tier)}" data-source="${escapeHtml(item.source)}" data-status="${escapeHtml(item.status)}"><td data-label="提案"><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><span class="subtle">${escapeHtml(fmtVenueLabel(item.venue))} · ${escapeHtml(item.source === 'SYSTEM' ? '系统机会' : '人工判断')}</span>${status ? `<span class="proposal-environment">${escapeHtml(fmtEnvironment(item.environment, true))}</span>` : ''}</td><td data-label="方向 / 交易规模"><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))}</span><br><b>${item.estimated_notional === null ? '名义价值待详情确认' : `名义价值 ${escapeHtml(fmtAmount(item.estimated_notional, item.quote_currency))}`}</b><br><span class="subtle">合约数量 ${fmtNumber(item.quantity)}</span></td><td data-label="风险边界"><b>最多损失 ${escapeHtml(fmtAmount(item.max_risk, item.collateral_currency))}</b><br><span class="subtle">${fmtRisk(item.risk_tier)}</span></td><td data-label="${status ? '审核进度' : '状态'}">${status ? `<b>已 ${Number(item.approval_count || 0)} / ${Number(item.required_approvals || (item.risk_tier === 'HIGH' ? 2 : 1))}</b><br><span class="subtle">仍需你的独立判断</span>` : `<span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span>${proposalStatusSupplement(item) ? `<br><span class="subtle">${escapeHtml(proposalStatusSupplement(item))}</span>` : ''}`}</td><td data-label="提交时间">${fmtDate(item.created_at)}<br><span class="subtle">版本 ${item.version}</span></td><td data-label="有效期 / 结果">${fmtDate(proposalExpiryPresentation(item).at)}<br><span class="subtle">${escapeHtml(proposalExpiryPresentation(item).state)}</span></td></tr>`).join('')}</tbody></table></div><div class="proposal-pagination"><button class="secondary" type="button" data-load-more-proposals aria-controls="proposal-list-body">显示更多</button></div><section id="proposal-filter-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的提案</h2><p>请清除搜索或调整筛选。</p></div></section>` : emptyState}</section>`;
+    ${items.length ? `<details class="proposal-filter-disclosure" ${window.matchMedia('(min-width: 781px)').matches ? 'open' : ''}><summary><span><b>筛选提案</b><small>按标的、方向、风险与${status ? '来源' : '状态'}缩小结果</small></span><strong><span><b data-proposal-count>${items.length}</b> 个结果</span><span class="proposal-filter-when-closed">展开</span><span class="proposal-filter-when-open">收起</span></strong></summary><div class="proposal-list-tools"><label>搜索标的<input id="proposal-search" type="search" placeholder="BTCUSDT / xyz:TSLA"></label><label>方向<select id="proposal-direction"><option value="">全部方向</option><option value="LONG">做多</option><option value="SHORT">做空</option></select></label><label>风险<select id="proposal-risk"><option value="">全部档位</option><option value="LOW">低</option><option value="MEDIUM">中</option><option value="HIGH">高</option></select></label>${status ? '<label>来源<select id="proposal-source"><option value="">全部来源</option><option value="SYSTEM">系统机会</option><option value="MANUAL">人工判断</option></select></label>' : '<label>状态<select id="proposal-status"><option value="">全部状态</option><option value="DRAFT">草稿</option><option value="PENDING_REVIEW">待审核</option><option value="APPROVED">已批准</option><option value="REJECTED">已拒绝</option><option value="EXPIRED">已过期</option></select></label>'}<span role="status" aria-live="polite"><b data-proposal-visible-count>${Math.min(items.length, 50)}</b> / <b data-proposal-count>${items.length}</b> 个结果</span></div></details><div class="table-wrap proposal-table"><table><thead><tr><th>提案</th><th>方向 / 交易规模</th><th>风险边界</th><th>${status ? '审核进度' : '状态'}</th><th>提交时间</th><th>有效期 / 结果</th></tr></thead><tbody id="proposal-list-body">${items.map(item => `<tr data-href="${escapeHtml(proposalDetailHref(item))}" data-proposal-row data-search="${escapeHtml(`${item.symbol || ''} ${item.venue} ${item.proposer_username || ''}`.toLowerCase())}" data-direction="${escapeHtml(item.direction)}" data-risk="${escapeHtml(item.risk_tier)}" data-source="${escapeHtml(item.source)}" data-status="${escapeHtml(item.status)}"><td data-label="提案"><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><span class="subtle">${escapeHtml(fmtVenueLabel(item.venue))} · ${escapeHtml(item.source === 'SYSTEM' ? '系统机会' : '人工判断')}</span>${status ? `<span class="proposal-environment">${escapeHtml(fmtEnvironment(item.environment, true))}</span>` : ''}</td><td data-label="方向 / 交易规模"><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))}</span><br><b>${item.estimated_notional === null ? '名义价值待详情确认' : `名义价值 ${escapeHtml(fmtAmount(item.estimated_notional, item.quote_currency))}`}</b><br><span class="subtle">合约数量 ${fmtNumber(item.quantity)}</span></td><td data-label="风险边界"><b>最多损失 ${escapeHtml(fmtAmount(item.max_risk, item.collateral_currency))}</b><br><span class="subtle">${fmtRisk(item.risk_tier)}</span></td><td data-label="${status ? '审核进度' : '状态'}">${status ? `<b>已 ${Number(item.approval_count || 0)} / ${Number(item.required_approvals || (item.risk_tier === 'HIGH' ? 2 : 1))}</b><br><span class="subtle">仍需你的独立判断</span>` : `<span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span>${proposalStatusSupplement(item) ? `<br><span class="subtle">${escapeHtml(proposalStatusSupplement(item))}</span>` : ''}`}</td><td data-label="提交时间">${fmtDate(item.created_at)}<br><span class="subtle">版本 ${item.version}</span></td><td data-label="有效期 / 结果">${fmtDate(proposalExpiryPresentation(item).at)}<br><span class="subtle">${escapeHtml(proposalExpiryPresentation(item).state)}</span></td></tr>`).join('')}</tbody></table></div>${recordPaginationMarkup(items.length, '提案记录分页')}<section id="proposal-filter-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的提案</h2><p>请清除搜索或调整筛选。</p></div></section>` : emptyState}</section>`;
   bindLinkedRows();
   if (!items.length) return;
-  const pageSize = window.matchMedia('(max-width: 780px)').matches ? 8 : 12;
-  let visibleLimit = pageSize;
-  const filter = ({resetLimit = false} = {}) => {
-    if (resetLimit) visibleLimit = pageSize;
-    const query = document.querySelector('#proposal-search')?.value.toLowerCase().trim() || '';
-    const direction = document.querySelector('#proposal-direction')?.value || '';
-    const risk = document.querySelector('#proposal-risk')?.value || '';
-    const proposalStatus = document.querySelector('#proposal-status')?.value || '';
-    const source = document.querySelector('#proposal-source')?.value || '';
-    let matched = 0;
-    let rendered = 0;
-    document.querySelectorAll('[data-proposal-row]').forEach(row => {
-      const matches = (!query || row.dataset.search.includes(query)) && (!direction || row.dataset.direction === direction) && (!risk || row.dataset.risk === risk) && (!source || row.dataset.source === source) && (!proposalStatus || row.dataset.status === proposalStatus);
-      if (matches) matched += 1;
-      const render = matches && rendered < visibleLimit;
-      row.hidden = !render;
-      if (render) rendered += 1;
-    });
-    document.querySelectorAll('[data-proposal-count]').forEach(node => { node.textContent = matched; });
-    document.querySelector('[data-proposal-visible-count]').textContent = rendered;
-    document.querySelector('#proposal-filter-empty').hidden = matched !== 0;
-    const loadMore = document.querySelector('[data-load-more-proposals]');
-    loadMore.hidden = matched <= rendered;
-    loadMore.textContent = matched > rendered ? `显示更多（剩余 ${matched - rendered}）` : '已显示全部';
-  };
-  ['#proposal-search','#proposal-direction','#proposal-risk','#proposal-source','#proposal-status'].forEach(selector => document.querySelector(selector)?.addEventListener('input', () => filter({resetLimit:true})));
-  document.querySelector('[data-load-more-proposals]')?.addEventListener('click', () => {
-    visibleLimit += pageSize;
-    filter();
+  bindRecordList({
+    rowSelector:'[data-proposal-row]',
+    filterSelectors:['#proposal-search','#proposal-direction','#proposal-risk','#proposal-source','#proposal-status'],
+    matches:row => {
+      const query = document.querySelector('#proposal-search')?.value.toLowerCase().trim() || '';
+      const direction = document.querySelector('#proposal-direction')?.value || '';
+      const risk = document.querySelector('#proposal-risk')?.value || '';
+      const proposalStatus = document.querySelector('#proposal-status')?.value || '';
+      const source = document.querySelector('#proposal-source')?.value || '';
+      return (!query || row.dataset.search.includes(query))
+        && (!direction || row.dataset.direction === direction)
+        && (!risk || row.dataset.risk === risk)
+        && (!source || row.dataset.source === source)
+        && (!proposalStatus || row.dataset.status === proposalStatus);
+    },
+    emptySelector:'#proposal-filter-empty',
+    visibleCountSelector:'[data-proposal-visible-count]',
+    totalCountSelector:'[data-proposal-count]',
   });
-  filter();
 }
 
 function proposalResonanceTimeframes(details, candidate) {

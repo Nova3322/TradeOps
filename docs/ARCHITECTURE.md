@@ -16,7 +16,7 @@ frozen proposal -> deterministic policy -> approve / review / reject
           |                                  |
           | rejected / expired               | authorized
           v                                  v
-audit trail                         idempotent execution adapter
+  audit trail                  lease/fencing + Freqtrade worker
                                                |
                                                v
                                   venue / treasury provider
@@ -46,6 +46,10 @@ audit trail                         idempotent execution adapter
 - Deterministic services make policy decisions. Humans, bots, strategy programs,
   and AI agents submit intent, but none decides whether server policy or required
   approval can be skipped.
+- TradeOps owns proposals, review, RBAC, risk, authorization, execution intent,
+  reconciliation, and audit. Freqtrade is the sole strategy/bot lifecycle engine;
+  `ControlPlaneOnlyStrategy` does not originate orders outside authorized TradeOps
+  intent. The Facts Adapter remains authoritative for observed exchange state.
 
 ## Deployment boundary
 
@@ -58,9 +62,10 @@ audit trail                         idempotent execution adapter
 
 ## Mode and account boundary
 
-- **Mode Settings** is the only console page that changes the Team execution
-  mode. Switching requires `team.manage`, an interactive session, confirmation,
-  `expected_version`, idempotency, readiness checks, and audit evidence.
+- The header **Current mode** control is the only console control that changes
+  the Team execution mode. Switching requires `team.manage`, an interactive
+  session, confirmation, `expected_version`, idempotency, readiness checks, and
+  audit evidence.
 - **Account Management** can configure TESTNET and LIVE accounts ahead of time,
   but its environment selector is only a configuration filter. Execution always
   derives the environment from the Team's persisted current mode.

@@ -18,7 +18,7 @@ That is a narrower problem than building a complete trading platform:
 
 | Project/platform | Primary focus | Relationship to TradeOps |
 | --- | --- | --- |
-| [Freqtrade](https://docs.freqtrade.io/en/latest/) | Open-source crypto bot, strategy, backtesting, optimization, and exchange connectivity | A possible strategy/execution source. A formal turnkey contract remains roadmap work. |
+| [Freqtrade](https://docs.freqtrade.io/en/latest/) | Open-source crypto bot, strategy, backtesting, optimization, and exchange connectivity | The current sole strategy/bot lifecycle engine. TradeOps governs proposals, review, risk, authorization, exact-account dispatch, reconciliation, and audit around it. |
 | [Hummingbot](https://hummingbot.org/docs/) | Automated market-making framework and exchange/blockchain connectors | A possible strategy and connectivity source. A formal turnkey contract remains roadmap work. |
 | [NautilusTrader](https://nautilustrader.io/docs/latest/) | Event-driven research, simulation, portfolio/risk modeling, and live execution engine | A possible engine integration. TradeOps does not replace its research or execution model. |
 | [QuantConnect LEAN](https://www.quantconnect.com/docs/v2/writing-algorithms/key-concepts/algorithm-engine) | Research, backtesting, portfolio/data management, brokerage integration, and live trading | A possible engine integration. TradeOps remains the proposal, approval, authorization, and audit boundary. |

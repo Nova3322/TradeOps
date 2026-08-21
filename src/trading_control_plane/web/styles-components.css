@@ -918,16 +918,17 @@ p, li, dd, td { font-size: 14px; }
 .capital-handoff-card dd { min-width: 0; margin: 0; color: var(--ink); font-size: 11px; overflow-wrap: anywhere; }
 .capital-handoff-card dd.is-mono { font-family: var(--font-mono); font-size: 10px; }
 .capital-handoff-card p { margin: 9px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
-.capital-operation-pagination { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
-.capital-operation-pagination > div, .capital-operation-pagination label { display: flex; align-items: center; gap: 8px; }
-.capital-operation-pagination select { width: auto; min-width: 68px; min-height: 36px; padding: 6px 26px 6px 9px; }
-.capital-operation-pagination button { min-height: 36px; padding: 6px 11px; }
+.capital-operation-pagination, .record-pagination { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.capital-operation-pagination > div, .capital-operation-pagination label,
+.record-pagination > div, .record-pagination label { display: flex; align-items: center; gap: 8px; }
+.capital-operation-pagination select, .record-pagination select { width: auto; min-width: 68px; min-height: 36px; padding: 6px 26px 6px 9px; }
+.capital-operation-pagination button, .record-pagination button { min-height: 36px; padding: 6px 11px; }
 .capital-testnet-empty { border: 1px solid var(--line); border-radius: 3px; }
 
 @media (max-width: 780px) {
   .capital-handoff-grid { grid-template-columns: 1fr; }
-  .capital-operation-pagination { align-items: flex-start; flex-direction: column; }
-  .capital-operation-pagination > div { width: 100%; flex-wrap: wrap; }
+  .capital-operation-pagination, .record-pagination { align-items: flex-start; flex-direction: column; }
+  .capital-operation-pagination > div, .record-pagination > div { width: 100%; flex-wrap: wrap; }
 }
 
 @media (max-width: 420px) {
@@ -943,8 +944,8 @@ p, li, dd, td { font-size: 14px; }
   .capital-assurance-dialog-content { padding: 14px 16px; }
   .capital-assurance-dialog-shell > footer { padding: 12px 16px 16px; }
   .capital-handoff-card dl > div { grid-template-columns: 64px minmax(0, 1fr); }
-  .capital-operation-pagination > div { display: grid; grid-template-columns: 1fr 1fr; }
-  .capital-operation-pagination label { grid-column: 1 / -1; }
+  .capital-operation-pagination > div, .record-pagination > div { display: grid; grid-template-columns: 1fr 1fr; }
+  .capital-operation-pagination label, .record-pagination label { grid-column: 1 / -1; }
 }
 
 /* Dense signal surfaces keep directional color useful without turning the page into a heatmap. */
