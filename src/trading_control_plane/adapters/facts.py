@@ -730,6 +730,16 @@ class CcxtProFactAdapter:
             )
             return None, capability
 
+    async def verify_connection(self) -> None:
+        """Verify credentials with one account read, without building a fact snapshot."""
+
+        if self._closed:
+            raise DomainRejected("FACT_ADAPTER_CLOSED", "the fact adapter is closed")
+        self._ensure_binance_request_allowed()
+        self.validate_capabilities()
+        balance = await self._rest("fetchBalance")
+        self._balances(balance, _utc(self._clock()))
+
     def _market_id(self, markets: Mapping[str, Any], symbol: str) -> str:
         market = markets.get(symbol)
         if not isinstance(market, Mapping):
@@ -1411,13 +1421,7 @@ class FactAdapterConnectionProbe:
                 binance_request_state=self._binance_request_state,
             )
             adapter.validate_exchange_mapping()
-            adapter.validate_capabilities()
-            snapshot = await adapter.snapshot(reason="INITIAL")
-            if snapshot.scope != scope or snapshot.data_status != "CURRENT":
-                raise DomainRejected(
-                    "FACT_ADAPTER_PROBE_SCOPE_MISMATCH",
-                    "the read-only snapshot did not confirm the exact account scope",
-                )
+            await adapter.verify_connection()
             return ConnectionProbeResult(success=True, error_code=None)
         except DomainRejected as exc:
             current: BaseException | None = exc
