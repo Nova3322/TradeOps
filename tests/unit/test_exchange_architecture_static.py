@@ -95,6 +95,10 @@ def test_retired_exchange_modules_and_direct_backend_markers_stay_absent() -> No
 def test_all_freqtrade_configs_use_built_in_sync_and_async_rate_limiting() -> None:
     configs = tuple((ROOT / "freqtrade").glob("config*.json"))
     assert configs
+    live_canary_pairs = {
+        "config-binance-live-smoke.json": "SOL/USDT:USDT",
+        "config-hyperliquid-live-smoke.json": "BTC/USDC:USDC",
+    }
     for path in configs:
         payload = json.loads(path.read_text())
         exchange = payload["exchange"]
@@ -106,8 +110,15 @@ def test_all_freqtrade_configs_use_built_in_sync_and_async_rate_limiting() -> No
         assert len(exchange["pair_whitelist"]) == 1, path
         pattern = exchange["pair_whitelist"][0]
         quote = payload["stake_currency"]
-        assert re.fullmatch(pattern, f"MIRA/{quote}:{quote}"), path
-        assert not re.fullmatch(pattern, f"MIRA/{'USDC' if quote == 'USDT' else 'USDT'}"), path
+        if path.name in live_canary_pairs:
+            assert pattern == live_canary_pairs[path.name], path
+            assert not re.search(r"[.*+?{}\[\]|()]", pattern), path
+        else:
+            assert re.fullmatch(pattern, f"MIRA/{quote}:{quote}"), path
+            assert not re.fullmatch(
+                pattern,
+                f"MIRA/{'USDC' if quote == 'USDT' else 'USDT'}",
+            ), path
         assert payload["pairlists"] == [
             {"method": "StaticPairList"},
             {"method": "PrecisionFilter"},
