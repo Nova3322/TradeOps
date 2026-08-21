@@ -173,6 +173,20 @@ def _app(
         api_secret=settings.binance_capital_api_secret,
     )
     hyperliquid_gateway = hyperliquid_capital_gateway or HyperliquidCapitalGateway()
+
+    def credential_resolver(scope):
+        binding = TradingService(
+            database,
+            credential_encryption_key=settings.credential_encryption_key,
+        ).verified_capital_account_binding(
+            workspace_id=UUID(scope.workspace_id),
+            team_id=UUID(scope.team_id),
+            account_id=scope.account_id,
+            venue=scope.venue,
+            environment=scope.environment,
+        )
+        return binding.credentials
+
     return create_app(
         settings,
         database,
@@ -185,8 +199,82 @@ def _app(
             binance_api_secret=settings.binance_capital_api_secret,
             binance_gateway=binance_gateway,
             hyperliquid_gateway=hyperliquid_gateway,
+            credential_resolver=credential_resolver,
         ),
     )
+
+
+def test_direct_hyperliquid_uses_verified_database_main_address_over_environment(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=TEST_CREDENTIAL_KEY)
+    admin = service.bootstrap_admin("database-hyperliquid-address-admin", now=now)
+    _add_live_accounts(database, admin)
+    with database.session_factory() as session:
+        account = session.scalar(
+            select(ExchangeAccount).where(
+                ExchangeAccount.account_id == "hyperliquid-main",
+                ExchangeAccount.venue == "HYPERLIQUID",
+            )
+        )
+        assert account is not None
+        exchange_account_id = account.exchange_account_id
+        account_version = account.version
+    database_main = "0x9999999999999999999999999999999999999999"
+    service.rotate_exchange_account_credentials(
+        exchange_account_id,
+        actor_id=admin,
+        credentials={
+            "account_address": database_main,
+            "api_wallet_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "api_wallet_private_key": "0x" + "22" * 32,
+        },
+        expected_version=account_version,
+        idempotency_key="rotate-database-hyperliquid-address",
+        now=now + timedelta(seconds=1),
+    )
+    with database.session_factory.begin() as session:
+        account = session.get(ExchangeAccount, exchange_account_id)
+        assert account is not None
+        account.connection_status = "VERIFIED"
+        account.last_connection_check_at = now + timedelta(seconds=2)
+        account.last_verified_at = now + timedelta(seconds=2)
+
+    operation_ids: list[UUID] = []
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=_app(database)),
+            base_url="http://test",
+        ) as client:
+            await _login(client, "database-hyperliquid-address-admin")
+            for index, path in enumerate(
+                ("VAULT_TO_HYPERLIQUID", "HYPERLIQUID_TO_VAULT")
+            ):
+                created = await client.post(
+                    "/api/capital/direct-operations",
+                    json={
+                        "path": path,
+                        "amount": "5",
+                        "final_confirmed": True,
+                        "idempotency_key": f"database-hyperliquid-address-{index}",
+                    },
+                )
+                assert created.status_code == 200, created.text
+                operation_ids.append(UUID(created.json()["operation_id"]))
+
+    asyncio.run(scenario())
+    with database.session_factory() as session:
+        outbound = session.get(DirectCapitalOperation, operation_ids[0])
+        inbound = session.get(DirectCapitalOperation, operation_ids[1])
+        assert outbound is not None and inbound is not None
+        assert outbound.destination_reference == database_main
+        assert inbound.source_reference == database_main
+        assert "0x2222222222222222222222222222222222222222" not in {
+            outbound.destination_reference,
+            inbound.source_reference,
+        }
 
 
 def test_capital_configuration_requires_canonical_runtime_account_ids_not_display_names(
@@ -1545,7 +1633,7 @@ def test_binance_capital_uses_live_fee_with_dedicated_exact_account_credential(
                         transport=transport,
                     ),
                     binance_capital_withdraw_enabled=True,
-                    binance_capital_environment_credentials=True,
+                    binance_capital_environment_credentials=False,
                     credential_encryption_key=credential_key,
                 )
             ),
@@ -1556,7 +1644,10 @@ def test_binance_capital_uses_live_fee_with_dedicated_exact_account_credential(
             assert center.status_code == 200, center.text
             configuration = center.json()["data"]["direct_configuration"]
             assert configuration["binance_capital_credentials_configured"] is True
-            assert configuration["binance_capital_credentials_source"] == "DEDICATED_ENVIRONMENT"
+            assert (
+                configuration["binance_capital_credentials_source"]
+                == "VERIFIED_ACCOUNT_DATABASE"
+            )
             assert configuration["binance_capital_submission_enabled"] is True
 
             small_withdrawal = await client.post(

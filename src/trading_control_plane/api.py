@@ -245,6 +245,25 @@ def create_app(
     resolved_safe_spending = safe_spending_gateway or SafeSpendingGateway(
         timeout_seconds=resolved_settings.safe_spending_gateway_timeout_seconds
     )
+
+    def database_capital_credentials(scope: Any) -> dict[str, str]:
+        if not isinstance(resolved_database, Database):
+            raise DomainRejected(
+                "CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY",
+                "database-backed capital credentials require the durable Trading database",
+            )
+        binding = TradingService(
+            resolved_database,
+            credential_encryption_key=resolved_settings.credential_encryption_key,
+        ).verified_capital_account_binding(
+            workspace_id=UUID(scope.workspace_id),
+            team_id=UUID(scope.team_id),
+            account_id=scope.account_id,
+            venue=scope.venue,
+            environment=scope.environment,
+        )
+        return binding.credentials
+
     resolved_capital_adapter_factory = (
         capital_adapter_factory
         or build_production_capital_adapter_factory(
@@ -255,6 +274,7 @@ def create_app(
             binance_recv_window_ms=resolved_settings.binance_recv_window_ms,
             binance_timeout_seconds=resolved_settings.binance_capital_timeout_seconds,
             binance_request_state=binance_request_state,
+            credential_resolver=database_capital_credentials,
         )
     )
     resolved_exchange_connection_verifier = (
