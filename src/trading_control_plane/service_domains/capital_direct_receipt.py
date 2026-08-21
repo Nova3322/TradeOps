@@ -1,14 +1,476 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
+
+from sqlalchemy import select
 
 from trading_control_plane import domain, models, rejections
 from trading_control_plane.service_component import ServiceComponent
 
 
 class DirectCapitalReceiptService(ServiceComponent):
+    def claim_due_direct_capital_binance_deposit(
+        self,
+        *,
+        now: datetime,
+    ) -> dict[str, Any] | None:
+        """Lease one durable, system-originated Binance deposit continuation."""
+
+        with self.database.session_factory.begin() as session:
+            candidates = session.scalars(
+                select(models.DirectCapitalOperation)
+                .where(
+                    models.DirectCapitalOperation.path
+                    == domain.DirectCapitalPath.VAULT_TO_BINANCE.value,
+                    models.DirectCapitalOperation.status == "AWAITING_RECEIPT",
+                    models.DirectCapitalOperation.receipt_status == "PENDING",
+                    models.DirectCapitalOperation.receipt_next_due_at.is_not(None),
+                    models.DirectCapitalOperation.receipt_next_due_at <= now,
+                    models.DirectCapitalOperation.receipt_attempt_count < 10,
+                )
+                .order_by(
+                    models.DirectCapitalOperation.receipt_next_due_at,
+                    models.DirectCapitalOperation.created_at,
+                )
+                .limit(20)
+                .with_for_update(skip_locked=True)
+            ).all()
+            for item in candidates:
+                lease_until = (
+                    None
+                    if item.receipt_poll_started_at is None
+                    else item.receipt_poll_started_at + timedelta(seconds=90)
+                )
+                if lease_until is not None and lease_until > now:
+                    continue
+                expected_submission_code = (
+                    "NOTILT_DESTINATION_TRANSFER_SUBMITTED_BY_HUMAN_WALLET"
+                    if item.treasury_provider == "NOTILT_VAULT"
+                    else "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
+                )
+                submission = next(
+                    (
+                        stage
+                        for stage in reversed(item.stages)
+                        if stage.get("code") == expected_submission_code
+                    ),
+                    None,
+                )
+                preflight = next(
+                    (
+                        stage.get("artifact")
+                        for stage in reversed(item.stages)
+                        if stage.get("code") == "BINANCE_DEPOSIT_PREFLIGHT_READY"
+                    ),
+                    None,
+                )
+                transaction_hash = (
+                    None if submission is None else submission.get("transaction_hash")
+                )
+                account = session.scalar(
+                    select(models.ExchangeAccount).where(
+                        models.ExchangeAccount.team_id == item.team_id,
+                        models.ExchangeAccount.environment == "LIVE",
+                        models.ExchangeAccount.account_id == item.account_id,
+                        models.ExchangeAccount.venue == "BINANCE",
+                        models.ExchangeAccount.active.is_(True),
+                        models.ExchangeAccount.deleted_at.is_(None),
+                    )
+                )
+                team = session.get(models.Team, item.team_id)
+                if (
+                    not isinstance(transaction_hash, str)
+                    or not transaction_hash.startswith("0x")
+                    or len(transaction_hash) != 66
+                    or not isinstance(preflight, dict)
+                    or account is None
+                    or team is None
+                    or item.account_id is None
+                ):
+                    item.status = "UNKNOWN"
+                    item.receipt_status = "UNKNOWN"
+                    item.receipt_next_due_at = None
+                    item.receipt_last_error_code = "BINANCE_DEPOSIT_CONTINUATION_SCOPE_INVALID"
+                    item.blockers = list(
+                        dict.fromkeys(
+                            [*item.blockers, "BINANCE_DEPOSIT_CONTINUATION_SCOPE_INVALID"]
+                        )
+                    )
+                    item.version += 1
+                    item.updated_at = now
+                    continue
+                destination = str(preflight.get("destination", ""))
+                if (
+                    destination.lower() != str(item.destination_reference or "").lower()
+                    or preflight.get("asset") != "USDC"
+                    or preflight.get("network") != "ARBITRUM"
+                ):
+                    item.status = "UNKNOWN"
+                    item.receipt_status = "UNKNOWN"
+                    item.receipt_next_due_at = None
+                    item.receipt_last_error_code = "BINANCE_DEPOSIT_CONTINUATION_SCOPE_INVALID"
+                    item.blockers = list(
+                        dict.fromkeys(
+                            [*item.blockers, "BINANCE_DEPOSIT_CONTINUATION_SCOPE_INVALID"]
+                        )
+                    )
+                    item.version += 1
+                    item.updated_at = now
+                    continue
+                token = str(uuid4())
+                item.receipt_poll_stage = "BINANCE_DEPOSIT_AUTO"
+                item.receipt_poll_started_at = now
+                item.receipt_poll_token = token
+                item.receipt_attempt_count += 1
+                item.receipt_next_due_at = now + timedelta(minutes=5)
+                item.receipt_last_error_code = None
+                item.version += 1
+                item.updated_at = now
+                self.transactions.audit(
+                    session,
+                    actor_id=str(item.actor_id),
+                    event_type="CAPITAL_BINANCE_DEPOSIT_CONTINUATION_CHECK_STARTED",
+                    object_type="DirectCapitalOperation",
+                    object_id=item.operation_id,
+                    reason=(
+                        f"attempt={item.receipt_attempt_count}/10; exact-system-tx-hash; "
+                        "read-only-deposit-history"
+                    ),
+                    correlation_id=item.correlation_id,
+                    object_version=item.version,
+                    idempotency_key=(
+                        f"binance-deposit-auto:{item.operation_id}:"
+                        f"{item.receipt_attempt_count}"
+                    ),
+                    workspace_id=team.workspace_id,
+                    team_id=item.team_id,
+                    account_id=item.account_id,
+                    environment="LIVE",
+                    now=now,
+                )
+                return {
+                    "operation_id": str(item.operation_id),
+                    "workspace_id": str(team.workspace_id),
+                    "team_id": str(item.team_id),
+                    "actor_id": str(item.actor_id),
+                    "account_id": item.account_id,
+                    "account_mode": str(
+                        (account.credential_metadata or {}).get("account_mode", "STANDARD")
+                    ),
+                    "transaction_hash": transaction_hash.lower(),
+                    "destination": destination.lower(),
+                    "minimum_amount": str(item.min_received or item.amount),
+                    "poll_token": token,
+                    "attempt_count": item.receipt_attempt_count,
+                }
+        return None
+
+    def finish_direct_capital_binance_deposit_check(
+        self,
+        operation_id: UUID,
+        *,
+        poll_token: str,
+        error_code: str,
+        now: datetime,
+    ) -> None:
+        with self.database.session_factory.begin() as session:
+            item = session.get(models.DirectCapitalOperation, operation_id, with_for_update=True)
+            if (
+                item is None
+                or item.receipt_poll_stage != "BINANCE_DEPOSIT_AUTO"
+                or item.receipt_poll_token != poll_token
+            ):
+                return
+            item.receipt_poll_stage = None
+            item.receipt_poll_started_at = None
+            item.receipt_poll_token = None
+            item.receipt_last_error_code = error_code
+            if item.receipt_attempt_count >= 10:
+                item.status = "UNKNOWN"
+                item.receipt_status = "UNKNOWN"
+                item.receipt_next_due_at = None
+                item.blockers = list(
+                    dict.fromkeys(
+                        [
+                            *item.blockers,
+                            "BINANCE_DEPOSIT_CONTINUATION_EXHAUSTED",
+                            error_code,
+                        ]
+                    )
+                )
+                item.stages = [
+                    *item.stages,
+                    {
+                        "code": "BINANCE_DEPOSIT_CONTINUATION_EXHAUSTED",
+                        "status": "UNKNOWN",
+                        "attempt_count": item.receipt_attempt_count,
+                        "last_error_code": error_code,
+                        "recorded_at": now.isoformat(),
+                    },
+                ]
+            item.version += 1
+            item.updated_at = now
+            self.transactions.audit(
+                session,
+                actor_id=str(item.actor_id),
+                event_type=(
+                    "CAPITAL_BINANCE_DEPOSIT_CONTINUATION_EXHAUSTED"
+                    if item.receipt_attempt_count >= 10
+                    else "CAPITAL_BINANCE_DEPOSIT_CONTINUATION_RETRY_SCHEDULED"
+                ),
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason=f"attempt={item.receipt_attempt_count}/10; error={error_code}",
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=(
+                    f"binance-deposit-auto-finish:{operation_id}:"
+                    f"{item.receipt_attempt_count}"
+                ),
+                team_id=item.team_id,
+                account_id=item.account_id,
+                environment="LIVE",
+                now=now,
+            )
+
+    def claim_direct_capital_binance_deposit_internal_transfer(
+        self,
+        operation_id: UUID,
+        *,
+        poll_token: str,
+        deposit_evidence: dict[str, Any],
+        now: datetime,
+    ) -> dict[str, Any]:
+        with self.database.session_factory.begin() as session:
+            item = session.get(models.DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                rejections.reject(
+                    "CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing"
+                )
+            if (
+                item.receipt_poll_stage != "BINANCE_DEPOSIT_AUTO"
+                or item.receipt_poll_token != poll_token
+            ):
+                rejections.reject(
+                    "BINANCE_RECEIPT_CHECK_LEASE_LOST",
+                    "the Binance continuation lease is no longer owned by this worker",
+                )
+            gate = session.get(models.CapabilityGate, "CAPITAL_TRANSFER")
+            if gate is None or gate.status != "ENABLED":
+                rejections.reject(
+                    "CAPITAL_TRANSFER_GATE_DISABLED",
+                    "CAPITAL_TRANSFER must remain enabled for the automatic internal transfer",
+                )
+            expected_hash = next(
+                (
+                    str(stage.get("transaction_hash", "")).lower()
+                    for stage in reversed(item.stages)
+                    if stage.get("code")
+                    in {
+                        "NOTILT_DESTINATION_TRANSFER_SUBMITTED_BY_HUMAN_WALLET",
+                        "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET",
+                    }
+                    and stage.get("transaction_hash")
+                ),
+                "",
+            )
+            try:
+                amount = Decimal(str(deposit_evidence["amount"]))
+            except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+                raise domain.DomainRejected(
+                    "BINANCE_CAPITAL_RECEIPT_MISMATCH",
+                    "Binance deposit receipt amount is invalid",
+                ) from exc
+            if (
+                deposit_evidence.get("status") != "CONFIRMED"
+                or str(deposit_evidence.get("transactionHash", "")).lower() != expected_hash
+                or amount <= 0
+            ):
+                rejections.reject(
+                    "BINANCE_CAPITAL_RECEIPT_MISMATCH",
+                    "Binance deposit evidence does not match the system-originated transfer",
+                )
+            amount_text = format(amount.normalize(), "f")
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    {
+                        "operation_id": str(operation_id),
+                        "transaction_hash": expected_hash,
+                        "asset": "USDC",
+                        "amount": amount_text,
+                        "direction": "MAIN_UMFUTURE",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            outbox = session.scalar(
+                select(models.BinanceCapitalOutbox)
+                .where(
+                    models.BinanceCapitalOutbox.operation_id == operation_id,
+                    models.BinanceCapitalOutbox.stage == "DEPOSIT_SPOT_TO_USDM",
+                )
+                .with_for_update()
+            )
+            if outbox is None:
+                outbox = models.BinanceCapitalOutbox(
+                    operation_id=operation_id,
+                    team_id=item.team_id,
+                    stage="DEPOSIT_SPOT_TO_USDM",
+                    status="NEVER_ATTEMPTED",
+                    attempt_count=0,
+                    request_fingerprint=fingerprint,
+                    external_reference=None,
+                    last_error_code=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(outbox)
+                session.flush()
+            elif outbox.request_fingerprint != fingerprint:
+                rejections.reject(
+                    "BINANCE_CAPITAL_OUTBOX_CONFLICT",
+                    "the durable Binance internal-transfer scope changed",
+                )
+            if outbox.status == "CONFIRMED":
+                return {
+                    "mode": "CONFIRMED",
+                    "amount": amount_text,
+                    "prepared_at": outbox.created_at,
+                    "external_reference": outbox.external_reference,
+                }
+            if outbox.status == "NEVER_ATTEMPTED":
+                outbox.status = "ATTEMPTING"
+                outbox.attempt_count += 1
+                mode = "SUBMIT"
+            else:
+                if outbox.status == "ATTEMPTING":
+                    outbox.status = "UNKNOWN"
+                mode = "RECONCILE"
+            outbox.updated_at = now
+            return {
+                "mode": mode,
+                "amount": amount_text,
+                "prepared_at": outbox.created_at,
+                "external_reference": outbox.external_reference,
+            }
+
+    def mark_direct_capital_binance_deposit_transfer_unknown(
+        self,
+        operation_id: UUID,
+        *,
+        error_code: str,
+        now: datetime,
+    ) -> None:
+        with self.database.session_factory.begin() as session:
+            outbox = session.scalar(
+                select(models.BinanceCapitalOutbox)
+                .where(
+                    models.BinanceCapitalOutbox.operation_id == operation_id,
+                    models.BinanceCapitalOutbox.stage == "DEPOSIT_SPOT_TO_USDM",
+                )
+                .with_for_update()
+            )
+            if outbox is None or outbox.status == "CONFIRMED":
+                return
+            outbox.status = "UNKNOWN"
+            outbox.last_error_code = error_code
+            outbox.updated_at = now
+
+    def confirm_direct_capital_binance_deposit_continuation(
+        self,
+        operation_id: UUID,
+        *,
+        poll_token: str,
+        deposit_evidence: dict[str, Any],
+        internal_transfer: dict[str, Any],
+        now: datetime,
+    ) -> None:
+        with self.database.session_factory.begin() as session:
+            item = session.get(models.DirectCapitalOperation, operation_id, with_for_update=True)
+            outbox = session.scalar(
+                select(models.BinanceCapitalOutbox)
+                .where(
+                    models.BinanceCapitalOutbox.operation_id == operation_id,
+                    models.BinanceCapitalOutbox.stage == "DEPOSIT_SPOT_TO_USDM",
+                )
+                .with_for_update()
+            )
+            if item is None or outbox is None:
+                rejections.reject(
+                    "BINANCE_CAPITAL_OUTBOX_MISSING",
+                    "the durable Binance internal-transfer fence is missing",
+                )
+            if (
+                item.receipt_poll_stage != "BINANCE_DEPOSIT_AUTO"
+                or item.receipt_poll_token != poll_token
+            ):
+                rejections.reject(
+                    "BINANCE_RECEIPT_CHECK_LEASE_LOST",
+                    "the Binance continuation lease is no longer owned by this worker",
+                )
+            reference = internal_transfer.get("tranId")
+            if internal_transfer.get("status") != "CONFIRMED" or reference is None:
+                rejections.reject(
+                    "BINANCE_INTERNAL_TRANSFER_PENDING",
+                    "the exact Binance Spot-to-USD-M transfer is not confirmed",
+                )
+            outbox.status = "CONFIRMED"
+            outbox.external_reference = str(reference)
+            outbox.last_error_code = None
+            outbox.updated_at = now
+            if not any(
+                stage.get("code") == "BINANCE_DEPOSIT_RECEIPT_CONFIRMED"
+                for stage in item.stages
+            ):
+                item.stages = [
+                    *item.stages,
+                    {
+                        "code": "BINANCE_DEPOSIT_RECEIPT_CONFIRMED",
+                        "status": "CONFIRMED",
+                        "evidence": {
+                            "deposit": deposit_evidence,
+                            "internalTransfer": internal_transfer,
+                        },
+                        "verified_at": now.isoformat(),
+                        "automatic_continuation": True,
+                    },
+                ]
+            item.status = "SETTLED"
+            item.receipt_status = "CONFIRMED"
+            item.blockers = []
+            item.receipt_poll_stage = None
+            item.receipt_poll_started_at = None
+            item.receipt_poll_token = None
+            item.receipt_next_due_at = None
+            item.receipt_last_error_code = None
+            item.version += 1
+            item.updated_at = now
+            self.transactions.audit(
+                session,
+                actor_id=str(item.actor_id),
+                event_type="CAPITAL_BINANCE_DEPOSIT_CONTINUATION_CONFIRMED",
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason=(
+                    f"attempt={item.receipt_attempt_count}/10; exact-deposit-tx; "
+                    f"exact-credited-amount={deposit_evidence['amount']}; "
+                    "spot-to-usdm-confirmed"
+                ),
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=f"binance-deposit-auto-confirm:{operation_id}",
+                team_id=item.team_id,
+                account_id=item.account_id,
+                environment="LIVE",
+                now=now,
+            )
+
     def record_direct_capital_treasury_withdrawal_receipt(
         self,
         operation_id: UUID,
@@ -103,8 +565,11 @@ class DirectCapitalReceiptService(ServiceComponent):
                 ]
                 item.version += 1
             if item.path == domain.DirectCapitalPath.VAULT_TO_BINANCE.value:
-                item.status = "SETTLED"
-                item.receipt_status = "CONFIRMED"
+                # A chain receipt proves only the Safe sent to the frozen Binance
+                # address. Settlement also requires the exact Binance deposit and
+                # confirmed Spot-to-USD-M continuation.
+                item.status = "AWAITING_RECEIPT"
+                item.receipt_status = "PENDING"
                 item.blockers = [
                     blocker
                     for blocker in item.blockers
@@ -666,6 +1131,11 @@ class DirectCapitalReceiptService(ServiceComponent):
                 rejections.reject(
                     "BINANCE_CAPITAL_RECEIPT_STAGE_INVALID", "receipt does not match path"
                 )
+            if stage == "BINANCE_DEPOSIT" and item.receipt_next_due_at is not None:
+                rejections.reject(
+                    "BINANCE_DEPOSIT_CONTINUATION_WORKER_OWNED",
+                    "scheduled Binance deposits are reconciled only by the durable worker",
+                )
             required_previous_stage = (
                 "BINANCE_DEPOSIT_PREFLIGHT_READY"
                 if stage == "BINANCE_DEPOSIT"
@@ -708,6 +1178,8 @@ class DirectCapitalReceiptService(ServiceComponent):
             item.status = "SETTLED"
             item.receipt_status = "CONFIRMED"
             item.blockers = []
+            item.receipt_next_due_at = None
+            item.receipt_last_error_code = None
             item.updated_at = now
             result = {"operation_id": str(operation_id), "version": item.version}
             self.transactions.save_receipt(
@@ -774,6 +1246,11 @@ class DirectCapitalReceiptService(ServiceComponent):
             if item.path != expected_path:
                 rejections.reject(
                     "BINANCE_CAPITAL_RECEIPT_STAGE_INVALID", "receipt does not match path"
+                )
+            if stage == "BINANCE_DEPOSIT" and item.receipt_next_due_at is not None:
+                rejections.reject(
+                    "BINANCE_DEPOSIT_CONTINUATION_WORKER_OWNED",
+                    "scheduled Binance deposits are reconciled only by the durable worker",
                 )
             lease_until = (
                 None

@@ -1,14 +1,218 @@
 from __future__ import annotations
 
-from datetime import datetime
+import hashlib
+import json
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
+
+from sqlalchemy import select
 
 from trading_control_plane import domain, models, rejections
 from trading_control_plane.service_component import ServiceComponent
 
 
 class DirectCapitalSubmissionService(ServiceComponent):
+    def claim_direct_capital_binance_withdrawal_submission(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        expected_version: int,
+        artifact: dict[str, Any],
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        """Commit a one-way write fence before the first Binance withdrawal side effect."""
+
+        fingerprint = hashlib.sha256(
+            json.dumps(artifact, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        with self.database.session_factory.begin() as session:
+            item = session.get(models.DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                rejections.reject(
+                    "CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing"
+                )
+            self.transactions.require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
+            if item.version != expected_version:
+                rejections.reject(
+                    "VERSION_CONFLICT", "direct capital operation changed; refresh first"
+                )
+            if item.path != domain.DirectCapitalPath.BINANCE_TO_VAULT.value:
+                rejections.reject(
+                    "BINANCE_CAPITAL_DIRECTION_INVALID",
+                    "submission is not a Binance withdrawal",
+                )
+            frozen = next(
+                (
+                    stage.get("artifact")
+                    for stage in reversed(item.stages)
+                    if stage.get("code") == "BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_READY"
+                ),
+                None,
+            )
+            if not isinstance(frozen, dict) or frozen != artifact:
+                rejections.reject(
+                    "BINANCE_CAPITAL_PREFLIGHT_REQUIRED", "current frozen preflight is required"
+                )
+            gate = session.get(models.CapabilityGate, "CAPITAL_TRANSFER")
+            if gate is None or gate.status != "ENABLED":
+                rejections.reject(
+                    "CAPITAL_TRANSFER_GATE_DISABLED",
+                    "CAPITAL_TRANSFER must remain enabled for withdrawal submission",
+                )
+            outbox = session.scalar(
+                select(models.BinanceCapitalOutbox)
+                .where(
+                    models.BinanceCapitalOutbox.operation_id == operation_id,
+                    models.BinanceCapitalOutbox.stage == "WITHDRAWAL",
+                )
+                .with_for_update()
+            )
+            if outbox is not None:
+                if outbox.request_fingerprint != fingerprint:
+                    rejections.reject(
+                        "BINANCE_CAPITAL_OUTBOX_CONFLICT",
+                        "the durable Binance withdrawal scope changed",
+                    )
+                rejections.reject(
+                    "BINANCE_CAPITAL_SUBMISSION_UNKNOWN",
+                    "a Binance withdrawal attempt already exists; reconcile the fixed order id",
+                )
+            outbox = models.BinanceCapitalOutbox(
+                operation_id=operation_id,
+                team_id=item.team_id,
+                stage="WITHDRAWAL",
+                status="ATTEMPTING",
+                attempt_count=1,
+                request_fingerprint=fingerprint,
+                external_reference=None,
+                last_error_code=None,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(outbox)
+            item.stages = [
+                *item.stages,
+                {
+                    "code": "BINANCE_RESTRICTED_WITHDRAWAL_ATTEMPTING",
+                    "status": "UNKNOWN_UNTIL_EXCHANGE_REFERENCE",
+                    "recorded_at": now.isoformat(),
+                },
+            ]
+            item.status = "UNKNOWN"
+            item.receipt_status = "UNKNOWN"
+            item.blockers = list(
+                dict.fromkeys([*item.blockers, "BINANCE_WITHDRAWAL_SUBMISSION_IN_PROGRESS"])
+            )
+            item.version += 1
+            item.updated_at = now
+            self.transactions.audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPITAL_BINANCE_WITHDRAWAL_ATTEMPTING",
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason="durable-write-fence-committed-before-binance-call",
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=idempotency_key,
+                team_id=item.team_id,
+                account_id=item.account_id,
+                environment="LIVE",
+                now=now,
+            )
+            return item.version
+
+    def record_direct_capital_binance_submission_failure(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        claimed_version: int,
+        error_code: str,
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        with self.database.session_factory.begin() as session:
+            item = session.get(models.DirectCapitalOperation, operation_id, with_for_update=True)
+            outbox = session.scalar(
+                select(models.BinanceCapitalOutbox)
+                .where(
+                    models.BinanceCapitalOutbox.operation_id == operation_id,
+                    models.BinanceCapitalOutbox.stage == "WITHDRAWAL",
+                )
+                .with_for_update()
+            )
+            if item is None or outbox is None:
+                rejections.reject(
+                    "BINANCE_CAPITAL_OUTBOX_MISSING",
+                    "the durable Binance withdrawal write fence is missing",
+                )
+            self.transactions.require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
+            if item.version != claimed_version or outbox.status != "ATTEMPTING":
+                rejections.reject(
+                    "BINANCE_CAPITAL_SUBMISSION_UNKNOWN",
+                    "Binance withdrawal state changed; reconcile before any retry",
+                )
+            outbox.status = "UNKNOWN"
+            outbox.last_error_code = error_code
+            outbox.updated_at = now
+            item.stages = [
+                *item.stages,
+                {
+                    "code": "BINANCE_RESTRICTED_WITHDRAWAL_SUBMISSION_UNKNOWN",
+                    "status": "UNKNOWN",
+                    "error_code": error_code,
+                    "recorded_at": now.isoformat(),
+                },
+            ]
+            item.status = "UNKNOWN"
+            item.receipt_status = "UNKNOWN"
+            item.blockers = list(
+                dict.fromkeys(
+                    [
+                        blocker
+                        for blocker in item.blockers
+                        if blocker != "BINANCE_WITHDRAWAL_SUBMISSION_IN_PROGRESS"
+                    ]
+                    + [error_code]
+                )
+            )
+            item.version += 1
+            item.updated_at = now
+            self.transactions.audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPITAL_BINANCE_WITHDRAWAL_UNKNOWN",
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason=f"fail-closed; error={error_code}; no-blind-retry",
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=idempotency_key,
+                team_id=item.team_id,
+                account_id=item.account_id,
+                environment="LIVE",
+                now=now,
+            )
+            return item.version
+
     def record_direct_capital_wallet_submission(
         self,
         operation_id: UUID,
@@ -234,6 +438,23 @@ class DirectCapitalSubmissionService(ServiceComponent):
                     for blocker in item.blockers
                     if blocker not in resolved_submission_blockers
                 ]
+                schedules_binance_deposit = (
+                    item.path == domain.DirectCapitalPath.VAULT_TO_BINANCE.value
+                    and (
+                        (
+                            item.treasury_provider == "SAFE_SPENDING_LIMIT"
+                            and stage == "TREASURY_WITHDRAWAL"
+                        )
+                        or (
+                            item.treasury_provider == "NOTILT_VAULT"
+                            and stage == "NOTILT_DESTINATION_TRANSFER"
+                        )
+                    )
+                )
+                if schedules_binance_deposit:
+                    item.receipt_next_due_at = now + timedelta(minutes=5)
+                    item.receipt_attempt_count = 0
+                    item.receipt_last_error_code = None
                 event_type = "CAPITAL_HUMAN_WALLET_SUBMISSION_RECORDED"
             item.version += 1
             item.updated_at = now
@@ -316,6 +537,36 @@ class DirectCapitalSubmissionService(ServiceComponent):
                 rejections.reject(
                     "BINANCE_CAPITAL_PREFLIGHT_REQUIRED", "current preflight is required"
                 )
+            outbox = session.scalar(
+                select(models.BinanceCapitalOutbox)
+                .where(
+                    models.BinanceCapitalOutbox.operation_id == operation_id,
+                    models.BinanceCapitalOutbox.stage == "WITHDRAWAL",
+                )
+                .with_for_update()
+            )
+            if outbox is None or outbox.status != "ATTEMPTING":
+                rejections.reject(
+                    "BINANCE_CAPITAL_OUTBOX_MISSING",
+                    "the durable Binance withdrawal write fence is not active",
+                )
+            external_reference = next(
+                (
+                    submission.get(key)
+                    for key in ("id", "withdrawalId", "txid", "transactionId")
+                    if submission.get(key)
+                ),
+                None,
+            )
+            if external_reference is None:
+                rejections.reject(
+                    "CAPITAL_RESULT_UNKNOWN",
+                    "Binance withdrawal returned no durable operation identity",
+                )
+            outbox.status = "CONFIRMED"
+            outbox.external_reference = str(external_reference)
+            outbox.last_error_code = None
+            outbox.updated_at = now
             item.stages = [
                 *item.stages,
                 {
@@ -328,7 +579,13 @@ class DirectCapitalSubmissionService(ServiceComponent):
             item.status = "AWAITING_RECEIPT"
             item.receipt_status = "PENDING"
             item.blockers = [
-                blocker for blocker in item.blockers if blocker != "CAPITAL_TRANSFER_GATE_DISABLED"
+                blocker
+                for blocker in item.blockers
+                if blocker
+                not in {
+                    "CAPITAL_TRANSFER_GATE_DISABLED",
+                    "BINANCE_WITHDRAWAL_SUBMISSION_IN_PROGRESS",
+                }
             ]
             item.version += 1
             item.updated_at = now

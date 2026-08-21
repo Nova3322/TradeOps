@@ -397,6 +397,30 @@ def test_notification_worker_is_off_by_default_and_requires_the_encryption_key()
         )
 
 
+def test_capital_continuation_worker_is_off_by_default_and_requires_encryption() -> None:
+    database_url = "postgresql+psycopg://user:pass@localhost/trading"
+    defaults = Settings(database_url=database_url, _env_file=None)
+    assert defaults.capital_continuation_worker_enabled is False
+    assert defaults.capital_continuation_worker_scan_seconds == 30
+    assert defaults.capital_continuation_worker_batch_size == 20
+
+    missing_key = Settings(
+        database_url=database_url,
+        capital_continuation_worker_enabled=True,
+        _env_file=None,
+    )
+    with pytest.raises(ValueError, match="capital continuation worker"):
+        missing_key.validate_runtime_security()
+
+    configured = Settings(
+        database_url=database_url,
+        capital_continuation_worker_enabled=True,
+        credential_encryption_key="G4dAqHdhSHI_KptQdXKVIgF_eVXWYFW3viBTPWLSBEs",
+        _env_file=None,
+    )
+    configured.validate_runtime_security()
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

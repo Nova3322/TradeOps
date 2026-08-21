@@ -172,24 +172,59 @@ class CapitalDirectUseCases:
             raise DomainRejected(
                 "BINANCE_CAPITAL_PREFLIGHT_REQUIRED", "current live preflight is required"
             )
-        submission = self.runtime.execute_mapping(
-            actor_id=actor_id,
-            account_id=(None if context["account_id"] is None else str(context["account_id"])),
-            venue="BINANCE",
-            operation=CapitalOperation.BINANCE_SUBMIT_WITHDRAWAL,
-            parameters={
-                "artifact": preflight,
-                "now": now,
-                "operation_id": str(operation_id),
-            },
-        )
-        version = self.runtime.service().record_direct_capital_binance_submission(
+        service = self.runtime.service()
+        claimed_version = service.claim_direct_capital_binance_withdrawal_submission(
             operation_id,
             actor_id,
             expected_version=request.expected_version,
-            submission=submission,
+            artifact=preflight,
             idempotency_key=request.idempotency_key,
             now=now,
+        )
+        try:
+            submission = self.runtime.execute_mapping(
+                actor_id=actor_id,
+                account_id=(
+                    None if context["account_id"] is None else str(context["account_id"])
+                ),
+                venue="BINANCE",
+                operation=CapitalOperation.BINANCE_SUBMIT_WITHDRAWAL,
+                parameters={
+                    "artifact": preflight,
+                    "now": now,
+                    "operation_id": str(operation_id),
+                },
+            )
+        except DomainRejected as exc:
+            service.record_direct_capital_binance_submission_failure(
+                operation_id,
+                actor_id,
+                claimed_version=claimed_version,
+                error_code=exc.code,
+                idempotency_key=request.idempotency_key,
+                now=self.runtime.clock(),
+            )
+            raise
+        except Exception as exc:
+            service.record_direct_capital_binance_submission_failure(
+                operation_id,
+                actor_id,
+                claimed_version=claimed_version,
+                error_code="CAPITAL_RESULT_UNKNOWN",
+                idempotency_key=request.idempotency_key,
+                now=self.runtime.clock(),
+            )
+            raise DomainRejected(
+                "CAPITAL_RESULT_UNKNOWN",
+                "Binance withdrawal did not return a confirmed result",
+            ) from exc
+        version = service.record_direct_capital_binance_submission(
+            operation_id,
+            actor_id,
+            expected_version=claimed_version,
+            submission=submission,
+            idempotency_key=request.idempotency_key,
+            now=self.runtime.clock(),
         )
         return {
             "operation_id": str(operation_id),

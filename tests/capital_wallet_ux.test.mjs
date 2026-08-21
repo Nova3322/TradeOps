@@ -10,6 +10,10 @@ const router = fs.readFileSync(
   new URL("../src/trading_control_plane/web/router.js", import.meta.url),
   "utf8",
 );
+const shared = fs.readFileSync(
+  new URL("../src/trading_control_plane/web/shared.js", import.meta.url),
+  "utf8",
+);
 
 test("capital operations open the connected wallet and record public evidence automatically", () => {
   for (const marker of [
@@ -89,6 +93,7 @@ test("exchange receipts and Binance wallet-class transfers complete automaticall
     "verifyHyperliquidWithdrawalReceipts",
     "verifyBinanceReceipt",
     "BINANCE_INTERNAL_TRANSFER_PENDING",
+    "后台自动续接中",
     "BINANCE_INTERNAL_TRANSFER_PERMISSION_DISABLED",
     "TRANSFER_BINANCE_USDM_TO_SPOT",
     "TRANSFER_BINANCE_SPOT_TO_USDM",
@@ -96,6 +101,14 @@ test("exchange receipts and Binance wallet-class transfers complete automaticall
     "链上已确认",
   ]) {
     assert.equal(source.includes(marker), true, marker);
+  }
+  for (const marker of [
+    "BINANCE_CAPITAL_SUBMISSION_UNKNOWN",
+    "BINANCE_WITHDRAWAL_SUBMISSION_IN_PROGRESS",
+    "BINANCE_DEPOSIT_CONTINUATION_EXHAUSTED",
+    "系统已记录阻断并禁止盲目重试",
+  ]) {
+    assert.equal(shared.includes(marker), true, marker);
   }
 });
 
@@ -138,7 +151,7 @@ test("expired unsubmitted capital plans are passive and require a fresh operatio
     "!operationExpired && treasuryPreview",
     "!operationExpired && hyperliquidPreview",
     "!operationExpired && !treasuryActionKey",
-    "!operationExpired && operation.path === 'BINANCE_TO_VAULT'",
+    "!operationExpired && operation.status === 'UNSIGNED_PLAN_READY' && operation.path === 'BINANCE_TO_VAULT'",
     "!operationExpired && nextAction",
     "资金保持原位，请新建操作并重新读取实时状态",
   ]) {

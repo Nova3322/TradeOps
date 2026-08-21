@@ -553,6 +553,7 @@ class BinanceCapitalGateway:
         amount: Decimal,
         prepared_at: datetime,
         now: datetime,
+        allow_accepted_before_history: bool = False,
     ) -> dict[str, Any]:
         value = _decimal(amount, code="BINANCE_CAPITAL_AMOUNT_INVALID", field="amount")
         if value <= 0:
@@ -597,6 +598,15 @@ class BinanceCapitalGateway:
             now=now,
         )
         if confirmed is None or confirmed["status"] != "CONFIRMED":
+            if allow_accepted_before_history:
+                return {
+                    "type": transfer_type,
+                    "asset": SUPPORTED_ASSET,
+                    "amount": str(value),
+                    "status": "SUBMITTED",
+                    "tranId": raw["tranId"],
+                    "timestamp": int(now.timestamp() * 1000),
+                }
             raise DomainRejected(
                 "BINANCE_INTERNAL_TRANSFER_PENDING",
                 "Binance accepted the internal transfer but its confirmed history is not "
@@ -614,6 +624,30 @@ class BinanceCapitalGateway:
             prepared_at=prepared_at,
             now=now,
         )
+
+    def verify_deposit_to_usdm_transfer(
+        self, *, amount: Decimal, prepared_at: datetime, now: datetime
+    ) -> dict[str, Any]:
+        """Reconcile the exact Spot-to-USD-M transfer without ever issuing a POST."""
+
+        value = _decimal(amount, code="BINANCE_CAPITAL_AMOUNT_INVALID", field="amount")
+        result = self._find_universal_transfer(
+            transfer_type=SPOT_TO_USDM,
+            amount=value,
+            prepared_at=prepared_at,
+            now=now,
+        )
+        if result is None:
+            _reject(
+                "BINANCE_INTERNAL_TRANSFER_NOT_FOUND",
+                "the exact Binance Spot-to-USD-M transfer is not visible in read-only history",
+            )
+        if result["status"] != "CONFIRMED" or result.get("tranId") is None:
+            _reject(
+                "BINANCE_INTERNAL_TRANSFER_PENDING",
+                "the exact Binance Spot-to-USD-M transfer is not confirmed yet",
+            )
+        return result
 
     def _network(self) -> tuple[dict[str, Any], dict[str, Any]]:
         raw = self._request("GET", "/sapi/v1/capital/config/getall")
@@ -846,6 +880,7 @@ class BinanceCapitalGateway:
                 amount=transfer_amount,
                 prepared_at=prepared_at,
                 now=now,
+                allow_accepted_before_history=True,
             )
             expected_spot = Decimal(str(artifact.get("spotAvailableObserved", "0"))) + Decimal(
                 str(artifact["amount"])
@@ -956,16 +991,25 @@ class BinanceCapitalGateway:
             or item.get("network") != SUPPORTED_NETWORK
             or str(item.get("address", "")).lower() != target
             or str(item.get("txId", "")).lower() != transaction_hash.lower()
-            or Decimal(str(item.get("amount"))) != Decimal(amount)
         ):
             _reject("BINANCE_CAPITAL_RECEIPT_MISMATCH", "Binance deposit receipt does not match")
+        actual_amount = _decimal(
+            item.get("amount"),
+            code="BINANCE_CAPITAL_RECEIPT_MISMATCH",
+            field="deposit amount",
+        )
+        if actual_amount < Decimal(amount):
+            _reject(
+                "BINANCE_CAPITAL_RECEIPT_MISMATCH",
+                "Binance deposit amount is below the frozen minimum received amount",
+            )
         if int(item.get("status", -1)) != SUCCESSFUL_DEPOSIT_STATUS:
             _reject("BINANCE_CAPITAL_DEPOSIT_PENDING", "Binance deposit is not credited")
         return {
             "depositId": item.get("id"),
             "status": "CONFIRMED",
             "transactionHash": transaction_hash.lower(),
-            "amount": str(amount),
+            "amount": str(actual_amount),
             "destination": target,
             "network": SUPPORTED_NETWORK,
             "asset": SUPPORTED_ASSET,

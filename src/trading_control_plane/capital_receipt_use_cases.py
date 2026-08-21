@@ -141,7 +141,7 @@ class CapitalReceiptUseCases:
                     venue="BINANCE",
                     operation=CapitalOperation.BINANCE_COMPLETE_DEPOSIT,
                     parameters={
-                        "amount": Decimal(str(context["min_received"])),
+                        "amount": Decimal(str(deposit_evidence["amount"])),
                         "prepared_at": prepared_at,
                         "now": now,
                         "operation_id": str(operation_id),
