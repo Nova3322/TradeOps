@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from pathlib import Path
+
+from bs4 import BeautifulSoup
+from soupsieve import SelectorSyntaxError
 
 WEB_ROOT = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web"
 STYLESHEETS = tuple(sorted(WEB_ROOT.glob("styles-*.css")))
@@ -25,6 +29,127 @@ def _luminance(color: str) -> float:
 def _contrast(left: str, right: str) -> float:
     brighter, darker = sorted((_luminance(left), _luminance(right)), reverse=True)
     return (brighter + 0.05) / (darker + 0.05)
+
+
+def _css_blocks(source: str) -> list[tuple[str, str]]:
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    blocks: list[tuple[str, str]] = []
+    cursor = 0
+    while cursor < len(source):
+        opening = source.find("{", cursor)
+        if opening < 0:
+            break
+        prelude = source[cursor:opening].strip()
+        depth = 1
+        closing = opening + 1
+        while closing < len(source) and depth:
+            depth += (source[closing] == "{") - (source[closing] == "}")
+            closing += 1
+        assert depth == 0
+        blocks.append((prelude, source[opening + 1 : closing - 1]))
+        cursor = closing
+    return blocks
+
+
+def _media_applies(prelude: str, viewport_width: int) -> bool:
+    max_widths = [int(value) for value in re.findall(r"max-width:\s*(\d+)px", prelude)]
+    min_widths = [int(value) for value in re.findall(r"min-width:\s*(\d+)px", prelude)]
+    return all(viewport_width <= value for value in max_widths) and all(
+        viewport_width >= value for value in min_widths
+    )
+
+
+def _selector_parts(selector_list: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    for index, character in enumerate(selector_list):
+        depth += character == "("
+        depth -= character == ")"
+        if character == "," and depth == 0:
+            parts.append(selector_list[start:index].strip())
+            start = index + 1
+    parts.append(selector_list[start:].strip())
+    return [part for part in parts if part]
+
+
+def _specificity(selector: str) -> tuple[int, int, int]:
+    selector = re.sub(r":where\([^)]*\)", "", selector)
+    ids = len(re.findall(r"#[\w-]+", selector))
+    classes = len(re.findall(r"\.[\w-]+|\[[^]]+\]|:(?!:)[\w-]+", selector))
+    stripped = re.sub(r"#[\w-]+|\.[\w-]+|\[[^]]+\]|::?[\w-]+(?:\([^)]*\))?", " ", selector)
+    elements = len(re.findall(r"(?<![-\w])[A-Za-z][\w-]*", stripped))
+    return ids, classes, elements
+
+
+def _box_value(value: str, side: str) -> str | None:
+    values = re.findall(r"(?:[\w-]+\([^)]*\)|[^\s]+)", value)
+    if not 1 <= len(values) <= 4:
+        return None
+    if len(values) == 1:
+        top = right = bottom = left = values[0]
+    elif len(values) == 2:
+        top = bottom = values[0]
+        right = left = values[1]
+    elif len(values) == 3:
+        top, right, bottom = values
+        left = right
+    else:
+        top, right, bottom, left = values
+    return {"top": top, "right": right, "bottom": bottom, "left": left}[side]
+
+
+@lru_cache(maxsize=4)
+def _active_declarations(viewport_width: int) -> tuple[tuple[str, str, str, bool, int], ...]:
+    index = (WEB_ROOT / "index.html").read_text()
+    stylesheet_names = re.findall(r'href="/assets/(styles-[^?\"]+)', index)
+    declarations: list[tuple[str, str, str, bool, int]] = []
+    order = 0
+
+    def visit(source: str, active: bool = True) -> None:
+        nonlocal order
+        for prelude, body in _css_blocks(source):
+            if prelude.startswith("@media"):
+                visit(body, active and _media_applies(prelude, viewport_width))
+                continue
+            if prelude.startswith("@") or not active:
+                continue
+            for match in re.finditer(r"([\w-]+)\s*:\s*([^;{}]+);", body):
+                name, value = match.groups()
+                important = value.rstrip().endswith("!important")
+                value = re.sub(r"\s*!important\s*$", "", value).strip()
+                declarations.append((prelude, name, value, important, order))
+                order += 1
+
+    for name in stylesheet_names:
+        visit((WEB_ROOT / name).read_text())
+    return tuple(declarations)
+
+
+def _effective_css_value(html: str, target: str, property_name: str, width: int) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    element = soup.select_one(target)
+    assert element is not None
+    winner: tuple[bool, tuple[int, int, int], int, str] | None = None
+    box_prefix, _, box_side = property_name.partition("-")
+    for selector_list, name, value, important, order in _active_declarations(width):
+        candidate = value if name == property_name else None
+        if candidate is None and name == box_prefix and box_prefix in {"margin", "padding"}:
+            candidate = _box_value(value, box_side)
+        if candidate is None:
+            continue
+        for selector in _selector_parts(selector_list):
+            try:
+                matches = any(node is element for node in soup.select(selector))
+            except (NotImplementedError, SelectorSyntaxError):
+                continue
+            if not matches:
+                continue
+            resolved = (important, _specificity(selector), order, candidate)
+            if winner is None or resolved[:3] >= winner[:3]:
+                winner = resolved
+    assert winner is not None, f"no {property_name} declaration matched {target}"
+    return winner[3]
 
 
 def test_web_design_tokens_are_complete_and_wcag_aa_in_both_themes() -> None:
@@ -83,3 +208,75 @@ def test_compact_density_contract_covers_shell_content_and_mobile() -> None:
         "/assets/styles-shell.css?v=14",
     ):
         assert href in index
+
+
+def test_spacing_regression_contract_uses_the_final_stylesheet_cascade() -> None:
+    root = '<html id="target"><body></body></html>'
+    performance = """
+        <html><body>
+          <section class="performance-capital-panel">
+            <div class="capital-overview"></div>
+            <div id="target-panel" class="capital-chart-panel">
+              <canvas id="capital-chart"></canvas>
+            </div>
+          </section>
+        </body></html>
+    """
+    expanded_performance = performance.replace(
+        'class="capital-chart-panel"', 'class="capital-chart-panel is-expanded"'
+    )
+    home = """
+        <html><body><div class="home-layout"><section></section><aside id="target"></aside></div>
+        </body></html>
+    """
+    system = """
+        <html><body>
+          <details id="target" class="card create-member-panel system-monitoring-disclosure">
+            <article class="system-health-card"><p id="health-copy">Short status.</p></article>
+          </details>
+        </body></html>
+    """
+    ordinary_empty = '<html><body><section id="target" class="empty-state"></section></body></html>'
+    compact_empty = ordinary_empty.replace("empty-state", "empty-state compact-empty")
+    error_state = ordinary_empty.replace("empty-state", "error-state")
+    api_empty = ordinary_empty.replace("empty-state", "empty-state api-client-empty")
+
+    assert _effective_css_value(root, "#target", "--section-gap", 1440) == "20px"
+    assert _effective_css_value(root, "#target", "--section-gap", 390) == "16px"
+    assert _effective_css_value(root, "#target", "--space-5", 1440) == "20px"
+
+    assert _effective_css_value(performance, "#capital-chart", "height", 1440) == (
+        "clamp(380px, 28vw, 400px)"
+    )
+    assert _effective_css_value(performance, "#capital-chart", "height", 1024) == (
+        "clamp(380px, 28vw, 400px)"
+    )
+    assert _effective_css_value(performance, "#capital-chart", "height", 390) == "300px"
+    assert _effective_css_value(expanded_performance, "#capital-chart", "height", 1440) == (
+        "100%"
+    )
+    assert _effective_css_value(expanded_performance, "#capital-chart", "height", 390) == "100%"
+    assert _effective_css_value(performance, "#target-panel", "margin-bottom", 1440) == "0"
+    assert _effective_css_value(
+        performance, ".performance-capital-panel", "margin-bottom", 1440
+    ) == "var(--section-gap)"
+
+    for width in (1440, 390):
+        assert _effective_css_value(home, "#target", "margin-top", width) == "var(--space-5)"
+        assert _effective_css_value(home, "#target", "padding-top", width) == "0"
+    assert _effective_css_value(system, "#target", "margin-bottom", 1440) == (
+        "var(--section-gap)"
+    )
+    assert _effective_css_value(system, "#target", "margin-bottom", 390) == (
+        "var(--section-gap)"
+    )
+    assert _effective_css_value(system, "#health-copy", "min-height", 1440) == "38px"
+
+    assert _effective_css_value(ordinary_empty, "#target", "min-height", 1440) == "160px"
+    assert _effective_css_value(ordinary_empty, "#target", "min-height", 390) == "150px"
+    assert _effective_css_value(compact_empty, "#target", "min-height", 1440) == "120px"
+    assert _effective_css_value(compact_empty, "#target", "min-height", 390) == "120px"
+    assert _effective_css_value(api_empty, "#target", "min-height", 1440) == "120px"
+    assert _effective_css_value(api_empty, "#target", "min-height", 390) == "120px"
+    assert _effective_css_value(error_state, "#target", "min-height", 1440) == "240px"
+    assert _effective_css_value(error_state, "#target", "min-height", 390) == "190px"

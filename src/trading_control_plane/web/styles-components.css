@@ -806,9 +806,11 @@ p, li, dd, td { font-size: 14px; }
 .capital-account-tag { display: inline-flex; align-items: center; gap: 7px; min-height: 30px; max-width: 240px; padding: 4px 8px 4px 10px; border: 1px solid var(--account-color); border-radius: 999px; color: var(--ink); background: transparent; cursor: pointer; }
 .capital-account-tag span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .capital-account-tag b { color: var(--muted); }
-.performance-capital-panel { margin: 16px 0 24px; padding: 12px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); }
+.performance-capital-panel { margin: 16px 0 var(--section-gap); padding: 12px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); }
 .performance-capital-panel .capital-overview { margin-top: 10px; }
 .performance-capital-panel .capital-chart-panel { margin-top: 8px; border: 1px solid var(--line); }
+.performance-capital-panel > .capital-chart-panel:last-child { margin-bottom: 0; }
+.performance-capital-panel #capital-chart { height: clamp(380px, 28vw, 400px); }
 
 @media (max-width: 760px) {
   .performance-capital-panel { padding: 8px; }
@@ -1180,7 +1182,7 @@ td { font-size: var(--font-size-control); }
 .home-stats .stat { padding-block: 2px; }
 .home-priority { grid-template-columns: 36px minmax(0, 1fr) 144px; gap: var(--space-4); min-height: 0; padding: var(--space-4) 4px; }
 .home-priority p { margin-top: 4px; line-height: var(--line-height-body); }
-.home-layout > aside { gap: var(--space-6); margin-top: var(--space-6); padding-top: var(--space-5); }
+.home-layout > aside { gap: var(--space-6); margin-top: var(--space-5); padding-top: 0; }
 .home-quick-start h2, .home-boundary h2 { margin-bottom: var(--space-2); font-size: var(--font-size-section); }
 
 .account-sync-note { margin-bottom: var(--space-4); padding: var(--dense-card-padding); }
@@ -1196,6 +1198,8 @@ td { font-size: var(--font-size-control); }
 .signal-events-section { margin-top: var(--section-gap); }
 .system-health-grid { gap: var(--grid-gap); margin: var(--space-4) 0 var(--section-gap); }
 .system-health-card { padding: var(--card-padding); }
+.system-health-card > p { min-height: 38px; }
+.system-monitoring-disclosure { margin-bottom: var(--section-gap); }
 .notification-route-grid, .signal-source-grid, .account-detail-config-grid { gap: var(--grid-gap); }
 .notification-route-create { margin: var(--space-4) 0 var(--section-gap); }
 .notification-route-create > summary { min-height: 58px; padding: 12px 16px; }
@@ -1215,8 +1219,11 @@ td { font-size: var(--font-size-control); }
 .webhook-signal-main { gap: var(--space-4); padding: var(--dense-card-padding) var(--card-padding); }
 .webhook-signal-meta { padding: 7px var(--card-padding); }
 
-.empty-state, .error-state { min-height: 240px; }
-.empty-state.compact-empty-state, .compact-empty { min-height: 150px; padding: var(--space-5); }
+.empty-state { min-height: 160px; padding: var(--space-4); }
+.error-state { min-height: 240px; }
+.empty-state.compact-empty-state,
+.empty-state.compact-empty,
+.compact-empty { min-height: 120px; padding: var(--space-4); }
 .access-boundary-state { min-height: 280px; padding: var(--space-4); }
 .access-boundary-state > div, .error-state > div { padding: var(--space-5); }
 .error-state-guidance { margin: var(--space-4) 0; }
@@ -1257,7 +1264,7 @@ dialog { padding: var(--space-5); }
   .proposal-stats .stat, .exceptions-page .exception-stats .stat { min-height: 0; padding: 10px 12px; }
   .stats.home-stats { gap: 14px 12px; margin-bottom: var(--space-5); }
   .home-priority { grid-template-columns: 24px minmax(0, 1fr); gap: var(--space-3); padding: var(--space-3) 2px; }
-  .home-layout > aside { gap: var(--space-5); margin-top: var(--space-5); padding-top: var(--space-4); }
+  .home-layout > aside { gap: var(--space-5); margin-top: var(--space-5); padding-top: 0; }
   .home-layout > aside > .card, .home-layout > aside > .card + .card { padding-block: var(--space-4); }
   .primary, .secondary, .danger, .text-button,
   .page :is(.primary, .secondary, .danger, .text-button),
@@ -1296,7 +1303,8 @@ dialog { padding: var(--space-5); }
   .notification-table td:first-child > :is(.subtle, .status-pill, .proposal-environment, .row-link) { margin: 2px 0 0 6px; }
   .proposal-table td:first-child > .row-link, .position-table td:first-child > .row-link, .campaign-list-table td:first-child > .row-link, .result-table td:first-child > .row-link, .notification-table td:first-child > .row-link { display: inline-flex; }
   .row-link { padding-block: 6px; }
-  .empty-state, .error-state { min-height: 190px; }
+  .empty-state { min-height: 150px; }
+  .error-state { min-height: 190px; }
   .access-boundary-state { min-height: 220px; padding: var(--space-3) 0; }
   .loading-state { min-height: 260px; }
   .signal-source-card > summary { min-height: 68px; padding: var(--dense-card-padding); }
