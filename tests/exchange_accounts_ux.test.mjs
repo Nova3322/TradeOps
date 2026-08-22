@@ -38,7 +38,7 @@ test('production account cards expose the exact-account detail workflow', () => 
   assert.match(indexSource, /execution\.js\?v=197/);
   assert.match(indexSource, /shared\.js\?v=19/);
   assert.match(indexSource, /accounts\.js\?v=184/);
-  assert.match(serviceWorkerSource, /trading-shell-v233/);
+  assert.match(serviceWorkerSource, /trading-shell-v234/);
 });
 
 test('connection verification reports the unchanged current trading eligibility', () => {
