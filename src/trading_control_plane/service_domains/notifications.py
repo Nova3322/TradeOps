@@ -4,10 +4,12 @@ from datetime import datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
+from trading_control_plane import execution_scope as scope_rules
 from trading_control_plane import idempotency, models, notification, rejections
+from trading_control_plane.query_domains.execution import proposal_summary
 from trading_control_plane.service_component import ServiceComponent
 from trading_control_plane.service_transactions import TransactionService
 
@@ -79,8 +81,37 @@ def enqueue_notification_event(
             "notification test route is missing or disabled",
         )
     delivery_ids: list[str] = []
+    queued_delivery_count = 0
+    deduplicated_delivery_count = 0
     for route in routes:
         if target_route_id is None and template.event_type not in route.event_types:
+            continue
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"),
+            {
+                "key": scope_rules.advisory_lock_key(
+                    f"notification-route:{route.notification_route_id}",
+                    f"notification-delivery:{template.event_type}",
+                    f"v{route.version}:{object_type}:{object_id}:v{object_version}",
+                )
+            },
+        )
+        existing_delivery_id = session.scalar(
+            select(models.NotificationDelivery.notification_delivery_id)
+            .where(
+                models.NotificationDelivery.notification_route_id
+                == route.notification_route_id,
+                models.NotificationDelivery.route_version == route.version,
+                models.NotificationDelivery.event_type == template.event_type,
+                models.NotificationDelivery.object_type == object_type,
+                models.NotificationDelivery.object_id == str(object_id),
+                models.NotificationDelivery.object_version == object_version,
+            )
+            .limit(1)
+        )
+        if existing_delivery_id is not None:
+            delivery_ids.append(str(existing_delivery_id))
+            deduplicated_delivery_count += 1
             continue
         delivery = models.NotificationDelivery(
             notification_event_id=event_id,
@@ -115,6 +146,7 @@ def enqueue_notification_event(
         session.add(delivery)
         session.flush()
         delivery_ids.append(str(delivery.notification_delivery_id))
+        queued_delivery_count += 1
     response = {
         "notification_event_id": str(event_id),
         "notification_delivery_ids": delivery_ids,
@@ -132,12 +164,19 @@ def enqueue_notification_event(
     transactions.audit(
         session,
         actor_id=actor_id,
-        event_type=("NOTIFICATION_EVENT_QUEUED" if delivery_ids else "NOTIFICATION_EVENT_UNROUTED"),
+        event_type=(
+            "NOTIFICATION_EVENT_QUEUED"
+            if queued_delivery_count
+            else "NOTIFICATION_EVENT_DEDUPLICATED"
+            if deduplicated_delivery_count
+            else "NOTIFICATION_EVENT_UNROUTED"
+        ),
         object_type="NotificationEvent",
         object_id=event_id,
         reason=(
             f"event_type={template.event_type};template={template.key}:v{template.version};"
-            f"source={object_type}:{object_id}:v{object_version};routes={len(delivery_ids)}"
+            f"source={object_type}:{object_id}:v{object_version};routes={len(delivery_ids)};"
+            f"queued={queued_delivery_count};deduplicated={deduplicated_delivery_count}"
         ),
         correlation_id=correlation_id,
         object_version=template.version,
@@ -160,6 +199,8 @@ def enqueue_proposal_review_notification(
     idempotency_key: str,
     now: datetime,
 ) -> None:
+    instrument = session.get(models.Instrument, proposal.instrument_id)
+    summary = proposal_summary(proposal, instrument)
     enqueue_notification_event(
         transactions,
         session,
@@ -168,12 +209,19 @@ def enqueue_proposal_review_notification(
         event_type="PROPOSAL_REVIEW_REQUIRED",
         payload={
             "summary": "冻结提案已提交, 等待团队成员独立审核。",
+            "proposal_id": str(proposal.proposal_id),
+            "proposal_version": proposal.version,
+            "status": proposal.status,
             "environment": proposal.environment,
             "account_id": proposal.account_id,
             "venue": proposal.venue,
+            "symbol": summary["symbol"],
             "direction": proposal.direction,
             "risk_tier": proposal.risk_tier,
             "quantity": str(proposal.quantity),
+            "estimated_notional": summary["estimated_notional"],
+            "quote_currency": summary["quote_currency"],
+            "collateral_currency": summary["collateral_currency"],
             "leverage": None if proposal.leverage is None else str(proposal.leverage),
             "max_risk": str(proposal.max_risk),
             "expires_at": proposal.expires_at.isoformat(),

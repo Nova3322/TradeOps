@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import html
 import json
 import math
 import re
@@ -13,6 +14,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from email.message import EmailMessage
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -116,7 +118,7 @@ NOTIFICATION_TEMPLATES = {
         NotificationTemplate(
             "PROPOSAL_REVIEW_REQUIRED",
             "proposal.review-required",
-            1,
+            2,
             "提案等待独立审核",
         ),
         NotificationTemplate(
@@ -347,14 +349,26 @@ def render_notification_message(
     template_version: int,
     payload: dict[str, Any],
     event_id: str,
+    public_base_url: str = "http://127.0.0.1:8000",
 ) -> NotificationMessage:
     template = notification_template(event_type)
-    if template.key != template_key or template.version != template_version:
+    supported_version = template_version == template.version or (
+        event_type == "PROPOSAL_REVIEW_REQUIRED"
+        and template_key == "proposal.review-required"
+        and template_version == 1
+    )
+    if template.key != template_key or not supported_version:
         raise DomainRejected(
             "NOTIFICATION_TEMPLATE_UNAVAILABLE",
             "frozen notification template is unavailable",
         )
     normalized = validate_notification_payload(payload)
+    if event_type == "PROPOSAL_REVIEW_REQUIRED" and template_version == 2:
+        return _render_proposal_review_message(
+            normalized,
+            event_id=event_id,
+            public_base_url=public_base_url,
+        )
     summary = str(normalized.get("summary") or "团队事件已记录, 请打开 Trading 控制台查看。")
     facts = [
         (str(key), str(value))
@@ -372,6 +386,92 @@ def render_notification_message(
         subject=f"[TradingOPS] {template.title}",
         text=text,
         html=f"<pre>{escaped}</pre>",
+    )
+
+
+def _render_proposal_review_message(
+    payload: dict[str, Any],
+    *,
+    event_id: str,
+    public_base_url: str,
+) -> NotificationMessage:
+    try:
+        proposal_id = str(UUID(str(payload["proposal_id"])))
+    except (KeyError, TypeError, ValueError):
+        raise DomainRejected(
+            "NOTIFICATION_PAYLOAD_INVALID",
+            "proposal review notification requires a valid proposal identity",
+        ) from None
+
+    def value(key: str, *, fallback: str = "未提供") -> str:
+        item = payload.get(key)
+        return fallback if item is None or not str(item).strip() else str(item).strip()
+
+    def number(key: str) -> str:
+        raw = value(key)
+        if raw == "未提供":
+            return raw
+        try:
+            compact = format(Decimal(raw).normalize(), "f")
+        except InvalidOperation:
+            return raw
+        return compact or "0"
+
+    direction = {"LONG": "做多 · LONG", "SHORT": "做空 · SHORT"}.get(
+        value("direction"), value("direction")
+    )
+    risk_tier = {"LOW": "低 · LOW", "MEDIUM": "中 · MEDIUM", "HIGH": "高 · HIGH"}.get(
+        value("risk_tier"), value("risk_tier")
+    )
+    quantity = number("quantity")
+    estimated_notional = number("estimated_notional")
+    quote_currency = value("quote_currency", fallback="")
+    notional_copy = (
+        "未提供"
+        if estimated_notional == "未提供"
+        else f"{estimated_notional}{f' {quote_currency}' if quote_currency else ''}"
+    )
+    leverage = number("leverage")
+    leverage_copy = "未提供" if leverage == "未提供" else f"{leverage}x"
+    review_url = f"{public_base_url.rstrip('/')}/proposals/{proposal_id}"
+    facts = [
+        ("标的 / 方向", f"{value('symbol')} / {direction}"),
+        ("账户 / 交易所", f"{value('account_id')} / {value('venue')}"),
+        ("环境", value("environment")),
+        ("风险等级", risk_tier),
+        ("数量 / 预计名义价值", f"{quantity} / {notional_copy}"),
+        ("杠杆", leverage_copy),
+        ("到期时间", value("expires_at")),
+        ("提案 ID", proposal_id),
+    ]
+    summary = value("summary", fallback="冻结提案等待团队成员独立审核。")
+    text = "\n".join(
+        [
+            "🟠 待审核提案",
+            *(f"{label}: {item}" for label, item in facts),
+            "",
+            f"说明: {summary}",
+            f"审核入口: {review_url}",
+            f"通知事件: {event_id}",
+            "",
+            "批准或拒绝仍会重新校验身份、权限、独立审核、版本和到期时间。",
+        ]
+    )
+    html_facts = "\n".join(
+        f"<b>{html.escape(label)}</b>　{html.escape(item)}" for label, item in facts
+    )
+    html_message = (
+        "🟠 <b>待审核提案</b>\n"
+        f"{html_facts}\n\n"
+        f"<b>说明</b>\n{html.escape(summary)}\n\n"
+        f'<a href="{html.escape(review_url, quote=True)}"><b>打开 Web 安全审核</b></a>\n'
+        f"<b>通知事件</b>　<code>{html.escape(event_id)}</code>\n\n"
+        "⚠️ 批准或拒绝仍会重新校验身份、权限、独立审核、版本和到期时间。"
+    )
+    return NotificationMessage(
+        subject="[TradingOPS] 提案等待独立审核",
+        text=text,
+        html=html_message,
     )
 
 
@@ -554,10 +654,12 @@ class NotificationDispatcher:
         *,
         credential_encryption_key: str | None,
         sender: NotificationSender | None = None,
+        public_base_url: str = "http://127.0.0.1:8000",
     ) -> None:
         self.database = database
         self.cipher = CredentialCipher(credential_encryption_key)
         self.sender = sender or StdlibNotificationSender()
+        self.public_base_url = public_base_url
 
     @staticmethod
     def _audit_delivery(
@@ -664,6 +766,11 @@ class NotificationDispatcher:
                 cancellation_code = "NOTIFICATION_ROUTE_DISABLED"
             elif route.version != delivery.route_version or route.channel != delivery.channel:
                 cancellation_code = "NOTIFICATION_ROUTE_CHANGED"
+            elif (
+                delivery.event_type != "TEST_NOTIFICATION"
+                and delivery.event_type not in route.event_types
+            ):
+                cancellation_code = "NOTIFICATION_EVENT_NOT_SUBSCRIBED"
             if cancellation_code is not None:
                 delivery.status = "CANCELLED"
                 delivery.last_error_code = cancellation_code
@@ -834,6 +941,7 @@ class NotificationDispatcher:
                 template_version=prepared.template_version,
                 payload=prepared.payload,
                 event_id=str(prepared.event_id),
+                public_base_url=self.public_base_url,
             )
             result = self.sender.send(
                 prepared.channel,

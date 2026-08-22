@@ -703,7 +703,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '环境不可跨越':'Environment locked', '账户净值':'Account net worth', '资金保管':'Capital custody',
   // Home.
   '无告警':'No alerts', '真实下单已关闭 · 自动加仓已关闭':'Live order sending disabled · Automatic scaling disabled',
-  '独立审核队列':'Independent review queue', '打开审核队列 →':'Open review queue →', '查看 Perptape 机会':'View Perptape opportunities', '创建人工提案 →':'Create manual proposal →',
+  '独立审核队列':'Independent review queue', '打开审核队列 →':'Open review queue →', '查看 Perptape 机会':'View Perptape opportunities', '查看 Webhook 机会':'View Webhook opportunities', '创建人工提案 →':'Create manual proposal →',
   '页面只展示当前事实；任何真实发送仍需通过交易任务、短期授权、交易所配置和服务端安全开关的逐项检查。':'This page shows current facts only. Any live send must still pass trade, short-lived authorization, exchange configuration, and server safety-gate checks.',
   // Perptape and Webhook signal pages.
   'Perptape · 上游 WebSocket 实时流':'Perptape · Upstream live WebSocket stream',

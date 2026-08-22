@@ -203,7 +203,7 @@ def test_compact_density_contract_covers_shell_content_and_mobile() -> None:
     assert ".api-access-page { max-width: none; }" in api_access
     for href in (
         "/assets/styles-base.css?v=22",
-        "/assets/styles-components.css?v=25",
+        "/assets/styles-components.css?v=26",
         "/assets/styles-api-access.css?v=4",
         "/assets/styles-shell.css?v=15",
     ):
@@ -231,9 +231,12 @@ def test_spacing_regression_contract_uses_the_final_stylesheet_cascade() -> None
     """
     system = """
         <html><body>
-          <details id="target" class="card create-member-panel system-monitoring-disclosure">
-            <article class="system-health-card"><p id="health-copy">Short status.</p></article>
-          </details>
+          <section class="page system-status-page">
+            <section><div class="table-wrap"><table></table></div></section>
+            <details id="target" class="card create-member-panel system-monitoring-disclosure">
+              <article class="system-health-card"><p id="health-copy">Short status.</p></article>
+            </details>
+          </section>
         </body></html>
     """
     ordinary_empty = '<html><body><section id="target" class="empty-state"></section></body></html>'
@@ -289,6 +292,12 @@ def test_spacing_regression_contract_uses_the_final_stylesheet_cascade() -> None
     assert _effective_css_value(system, "#target", "margin-bottom", 390) == (
         "var(--section-gap)"
     )
+    for width in (1440, 1024, 390):
+        assert _effective_css_value(system, "#target", "margin-top", width) == (
+            "var(--space-3)"
+        )
+        assert _effective_css_value(system, "#target", "padding-top", width) == "0"
+        assert _effective_css_value(system, "#target", "padding-bottom", width) == "0"
     assert _effective_css_value(system, "#health-copy", "min-height", 1440) == "38px"
 
     assert _effective_css_value(ordinary_empty, "#target", "min-height", 1440) == "160px"

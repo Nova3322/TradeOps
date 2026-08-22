@@ -516,6 +516,8 @@ def create_app(
     def notify_reviewers(
         proposal_id: UUID, proposal_version: int, environment: str = "TESTNET"
     ) -> None:
+        if queries().proposal_uses_notification_routes(proposal_id):
+            return
         for reviewer in queries().reviewers_for_proposal(proposal_id):
             detail = queries().proposal_detail(reviewer.user_id, proposal_id)
             code = token_service.issue_review_reference(
