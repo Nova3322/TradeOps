@@ -786,6 +786,14 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .instrument-match { min-height: 16px; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .instrument-match[data-state="matched"] { color: var(--success); font-weight: 600; }
 .instrument-match[data-state="unmatched"] { color: var(--warning); }
+@media (min-width: 781px) {
+  .proposal-compose .proposal-intent-grid { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+  .proposal-intent-grid .field-help { min-height: 36px; }
+  .proposal-account-field { grid-column: span 5; }
+  .proposal-venue-field { grid-column: span 3; }
+  .proposal-symbol-field { grid-column: span 4; }
+  .proposal-direction-field, .proposal-trigger-field { grid-column: span 6; }
+}
 .advanced-form { padding: 20px 28px; border-bottom: 1px solid var(--line); }
 .advanced-form summary { display: flex; justify-content: space-between; gap: 12px; color: var(--ink); cursor: pointer; font-weight: 600; }
 .advanced-form summary small { color: var(--muted); font-weight: 400; }

@@ -207,12 +207,12 @@ def test_proposal_review_template_is_a_formal_card_with_required_facts_and_entry
         "杠杆: 2x",
         "2026-08-22T12:00:00+00:00",
         proposal_id,
-        f"https://tradeops.example/proposals/{proposal_id}",
     ):
         assert required in message.text
     assert "<b>待审核提案</b>" in message.html
-    assert "打开 Web 安全审核" in message.html
-    assert f'href="https://tradeops.example/proposals/{proposal_id}"' in message.html
+    assert "打开 Web 安全审核" not in message.html
+    assert "审核入口:" not in message.text
+    assert f"https://tradeops.example/proposals/{proposal_id}" not in message.html
 
     legacy = render_notification_message(
         event_type="PROPOSAL_REVIEW_REQUIRED",
