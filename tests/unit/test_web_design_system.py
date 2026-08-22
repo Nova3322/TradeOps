@@ -267,9 +267,20 @@ def test_spacing_regression_contract_uses_the_final_stylesheet_cascade() -> None
         </tbody></table></div></body></html>
     """
     proposal_compose = """
-        <html><body><form class="proposal-compose"><div class="field-grid">
-          <label id="account-field">Account<select><option>acct-1</option></select></label>
-          <label><span>Instrument</span><input></label>
+        <html><body><form class="proposal-compose">
+        <div id="intent-grid" class="field-grid proposal-intent-grid">
+          <label id="account-field" class="proposal-account-field">Account
+            <span id="account-help" class="field-help">Authorized exact accounts only</span>
+            <select><option>acct-1</option></select>
+          </label>
+          <label id="venue-field" class="proposal-venue-field">Exchange
+            <select><option>Binance</option></select>
+          </label>
+          <label id="symbol-field" class="proposal-symbol-field">Symbol<input></label>
+          <label id="direction-field" class="proposal-direction-field">
+            Direction<select></select>
+          </label>
+          <label id="trigger-field" class="proposal-trigger-field">Trigger<input></label>
         </div></form></body></html>
     """
     capital_tag = """
@@ -359,3 +370,24 @@ def test_spacing_regression_contract_uses_the_final_stylesheet_cascade() -> None
         assert _effective_css_value(capital_tag, "#remove-copy", "white-space", width) == (
             "nowrap"
         )
+    for width in (1440, 1024):
+        assert _effective_css_value(
+            proposal_compose, "#intent-grid", "grid-template-columns", width
+        ) == "repeat(12, minmax(0, 1fr))"
+        for selector, expected in (
+            ("#account-field", "span 5"),
+            ("#venue-field", "span 3"),
+            ("#symbol-field", "span 4"),
+            ("#direction-field", "span 6"),
+            ("#trigger-field", "span 6"),
+        ):
+            assert _effective_css_value(
+                proposal_compose, selector, "grid-column", width
+            ) == expected
+        assert _effective_css_value(
+            proposal_compose, "#account-help", "min-height", width
+        ) == "36px"
+    assert _effective_css_value(
+        proposal_compose, "#intent-grid", "grid-template-columns", 390
+    ) == "1fr"
+    assert _effective_css_value(proposal_compose, "#account-help", "min-height", 390) == "14px"

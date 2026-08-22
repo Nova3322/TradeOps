@@ -415,6 +415,7 @@ def _render_proposal_review_message(
     event_id: str,
     public_base_url: str,
 ) -> NotificationMessage:
+    del public_base_url
     try:
         proposal_id = str(UUID(str(payload["proposal_id"])))
     except (KeyError, TypeError, ValueError):
@@ -453,7 +454,6 @@ def _render_proposal_review_message(
     )
     leverage = number("leverage")
     leverage_copy = "未提供" if leverage == "未提供" else f"{leverage}x"
-    review_url = f"{public_base_url.rstrip('/')}/proposals/{proposal_id}"
     facts = [
         ("标的 / 方向", f"{value('symbol')} / {direction}"),
         ("账户 / 交易所", f"{value('account_id')} / {value('venue')}"),
@@ -471,7 +471,6 @@ def _render_proposal_review_message(
             *(f"{label}: {item}" for label, item in facts),
             "",
             f"说明: {summary}",
-            f"审核入口: {review_url}",
             f"通知事件: {event_id}",
             "",
             "批准或拒绝仍会重新校验身份、权限、独立审核、版本和到期时间。",
@@ -484,7 +483,6 @@ def _render_proposal_review_message(
         "🟠 <b>待审核提案</b>\n"
         f"{html_facts}\n\n"
         f"<b>说明</b>\n{html.escape(summary)}\n\n"
-        f'<a href="{html.escape(review_url, quote=True)}"><b>打开 Web 安全审核</b></a>\n'
         f"<b>通知事件</b>　<code>{html.escape(event_id)}</code>\n\n"
         "⚠️ 批准或拒绝仍会重新校验身份、权限、独立审核、版本和到期时间。"
     )

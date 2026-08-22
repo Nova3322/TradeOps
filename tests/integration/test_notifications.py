@@ -165,6 +165,70 @@ def enqueue_signal(
     )
 
 
+def test_notification_route_only_queues_and_sends_checked_event_types(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("notification-subscription-admin", now=now)
+    team_id = UUID(TradingQueries(database).user_context(admin)["active_team"]["team_id"])
+    route_id = configure_telegram_review_route(service, admin, now=now)
+
+    unchecked = enqueue_signal(
+        service,
+        team_id=team_id,
+        object_id="unchecked-signal",
+        idempotency_key="unchecked-signal-event",
+        now=now,
+    )
+    assert unchecked["route_count"] == 0
+    assert unchecked["notification_delivery_ids"] == []
+
+    proposal_id = uuid4()
+    checked = service.enqueue_notification_event(
+        actor_id=str(admin),
+        team_id=team_id,
+        event_type="PROPOSAL_REVIEW_REQUIRED",
+        payload={
+            "proposal_id": str(proposal_id),
+            "proposal_version": 2,
+            "status": "PENDING_REVIEW",
+            "environment": "LIVE",
+            "symbol": "BTCUSDT",
+            "direction": "LONG",
+        },
+        object_type="Proposal",
+        object_id=proposal_id,
+        object_version=2,
+        idempotency_key="checked-proposal-review-event",
+        correlation_id=uuid4(),
+        environment="LIVE",
+        account_id="acct-1",
+        venue="BINANCE",
+        now=now,
+    )
+    assert checked["route_count"] == 1
+    assert len(checked["notification_delivery_ids"]) == 1
+
+    sender = RecordingSender()
+    dispatcher = NotificationDispatcher(
+        database,
+        credential_encryption_key=encryption_key(),
+        sender=sender,
+        public_base_url="https://tradeops.example",
+    )
+    dispatch_report = dispatcher.dispatch_due(now=now, limit=50)
+    assert dispatch_report["selected"] == 1
+    assert dispatch_report["results"] == {"SENT": 1}
+    assert [call[0] for call in sender.calls] == ["TELEGRAM"]
+    with database.session_factory() as session:
+        assert session.scalar(
+            select(func.count())
+            .select_from(NotificationDelivery)
+            .where(NotificationDelivery.notification_route_id == route_id)
+        ) == 1
+
+
 def test_notification_outbox_encrypts_routes_retries_known_failures_and_fences_versions(
     database: Database,
 ) -> None:
@@ -840,12 +904,15 @@ def test_proposal_review_route_is_authoritative_deduplicated_and_retryable(
         "风险等级: 高 · HIGH",
         "0.001 / 100 USDT",
         str(proposal_id),
-        f"https://tradeops.example/proposals/{proposal_id}",
     ):
         assert required in card.text
     expected_leverage = format(Decimal(str(frozen_payload["leverage"])).normalize(), "f")
     assert f"杠杆: {expected_leverage}x" in card.text
-    assert "打开 Web 安全审核" in card.html
+    assert "打开 Web 安全审核" not in card.html
+    assert "审核入口:" not in card.text
+    assert card.telegram_reply_markup["inline_keyboard"][2][0]["url"] == (
+        f"https://tradeops.example/proposals/{proposal_id}"
+    )
 
     with database.session_factory() as session:
         sent = session.get(NotificationDelivery, delivery_id)

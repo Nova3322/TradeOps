@@ -65,3 +65,16 @@ test("home keeps its permission boundary and adds the localized Webhook opportun
   assert.match(i18n, /'查看 Webhook 机会':'View Webhook opportunities'/);
   assert.match(i18n, /'移除':'Remove'/);
 });
+
+test("manual proposal intent fields use one aligned responsive grid", () => {
+  const intent = proposals.slice(
+    proposals.indexOf('class="field-grid proposal-intent-grid"'),
+    proposals.indexOf('</div></section>', proposals.indexOf('class="field-grid proposal-intent-grid"')),
+  );
+  assert.match(intent, /class="proposal-account-field"/);
+  assert.match(intent, /class="proposal-venue-field"/);
+  assert.match(intent, /class="proposal-symbol-field"/);
+  assert.match(intent, /class="proposal-direction-field"/);
+  assert.match(intent, /class="proposal-trigger-field"/);
+  assert.doesNotMatch(intent, /class="instrument-field"|class="instrument-picker"/);
+});
