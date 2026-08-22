@@ -77,9 +77,38 @@ def test_compact_density_contract_covers_shell_content_and_mobile() -> None:
     assert ".sidebar { top: 56px; height: calc(100dvh - 56px); }" in shell
     assert ".api-access-page { max-width: none; }" in api_access
     for href in (
-        "/assets/styles-base.css?v=22",
-        "/assets/styles-components.css?v=24",
-        "/assets/styles-api-access.css?v=4",
-        "/assets/styles-shell.css?v=14",
+        "/assets/styles-base.css?v=23",
+        "/assets/styles-components.css?v=25",
+        "/assets/styles-api-access.css?v=5",
+        "/assets/styles-shell.css?v=15",
     ):
         assert href in index
+
+
+def test_elegant_compact_finish_has_visual_hierarchy_in_both_themes() -> None:
+    base = (WEB_ROOT / "styles-base.css").read_text()
+    components = (WEB_ROOT / "styles-components.css").read_text()
+    shell = (WEB_ROOT / "styles-shell.css").read_text()
+    api_access = (WEB_ROOT / "styles-api-access.css").read_text()
+
+    for token in (
+        "--accent: #245f4d",
+        "--radius-md: 10px",
+        "--radius-lg: 14px",
+        "--testnet-quiet: 0 1px 2px",
+        "--accent: #8bd3b5",
+    ):
+        assert token in base
+
+    for rule in (
+        "/* Elegant compact finish",
+        ".stats.home-stats",
+        ".home-priority-list { gap: var(--grid-gap); border-top: 0; }",
+        "tbody tr:nth-child(even)",
+        ".review-environment-switcher",
+    ):
+        assert rule in components
+
+    assert "/* Elegant shell finish" in shell
+    assert "--nav-active-ink: #245f4d" in shell
+    assert "/* Match the compact console's refined surface hierarchy. */" in api_access

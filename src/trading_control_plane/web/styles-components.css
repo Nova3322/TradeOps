@@ -1306,3 +1306,272 @@ dialog { padding: var(--space-5); }
 @media (min-width: 560px) and (max-width: 780px) {
   .proposal-table tr, .position-table tr, .campaign-list-table tr, .result-table tr, .notification-table tr { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
+
+/* Elegant compact finish — density stays fixed; hierarchy and material improve. */
+.main-content {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 48%, var(--bg)) 0, var(--bg) 220px);
+}
+.page-head h1,
+.home-status h1 { color: var(--ink); letter-spacing: -.032em; }
+.eyebrow { color: var(--accent); font-weight: 600; letter-spacing: .025em; }
+.lede,
+.subtle { color: var(--muted); }
+.section-heading { border-bottom-color: color-mix(in srgb, var(--line) 84%, transparent); }
+
+.primary,
+.secondary,
+.danger {
+  border-radius: var(--radius-sm);
+  box-shadow: 0 1px 2px rgba(25, 51, 42, .08);
+}
+.primary:hover:not(:disabled),
+.secondary:hover:not(:disabled),
+.danger:hover:not(:disabled) { transform: translateY(-1px); }
+.secondary { border-color: var(--line); background: var(--panel-strong); }
+.secondary:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); background: var(--accent-2); }
+.text-button,
+.row-link { color: var(--accent); text-underline-offset: 3px; }
+.text-button:hover,
+.row-link:hover { color: color-mix(in srgb, var(--accent) 78%, var(--ink)); }
+input,
+select,
+textarea {
+  border-radius: var(--radius-sm);
+  border-color: var(--line);
+  background: var(--panel-strong);
+  transition: border-color .14s ease, box-shadow .14s ease, background-color .14s ease;
+}
+input:hover,
+select:hover,
+textarea:hover { border-color: color-mix(in srgb, var(--accent) 25%, var(--line)); }
+input:focus,
+select:focus,
+textarea:focus {
+  outline: 0;
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--line));
+  box-shadow: var(--focus-ring);
+}
+
+.card,
+.form-panel,
+.position-filter-panel,
+.notification-route-create,
+.notification-form-section,
+.signal-source-catalog,
+.signal-source-card,
+.capital-provider-card,
+.capital-provider-config-grid .capital-config-section,
+.capital-activity-disclosure,
+.mode-choice,
+.account-sync-note,
+.system-health-card {
+  border-color: color-mix(in srgb, var(--line) 90%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--panel-strong);
+  box-shadow: var(--testnet-quiet);
+}
+.card:hover,
+.opportunity-card:hover,
+.signal-source-card:hover { border-color: color-mix(in srgb, var(--accent) 25%, var(--line)); }
+.form-panel,
+.filter-panel { background: var(--panel-strong); }
+.filter-panel {
+  border: 1px solid color-mix(in srgb, var(--line) 90%, transparent);
+  border-radius: var(--radius-md);
+  box-shadow: var(--testnet-quiet);
+}
+
+.stats {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 90%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--panel-strong);
+  box-shadow: var(--testnet-quiet);
+}
+.stat { background: transparent; }
+.stat b { letter-spacing: -.02em; }
+.stats.home-stats {
+  gap: var(--grid-gap);
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.home-stats .stat,
+.home-stats .stat:first-child {
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--line) 90%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--panel-strong);
+  box-shadow: var(--testnet-quiet);
+}
+.home-stats .stat:nth-child(2) { background: color-mix(in srgb, var(--warning) 5%, var(--panel-strong)); }
+.home-stats .stat:last-child { background: color-mix(in srgb, var(--success) 5%, var(--panel-strong)); }
+
+.home-status {
+  padding: 18px 20px;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line));
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(120deg, color-mix(in srgb, var(--accent-2) 72%, var(--panel-strong)), var(--panel-strong) 62%);
+  box-shadow: var(--testnet-quiet);
+}
+.home-status.tone-attention { border-left-color: var(--warning); }
+.home-status.tone-danger { border-left-color: var(--danger); }
+.home-priority-list { gap: var(--grid-gap); border-top: 0; }
+.home-priority,
+.home-priority.danger,
+.home-priority.attention,
+.home-priority.clear {
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--line) 90%, transparent);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  background: var(--panel-strong);
+  box-shadow: var(--testnet-quiet);
+}
+.home-priority.attention { border-left-color: var(--warning); background: color-mix(in srgb, var(--warning) 3%, var(--panel-strong)); }
+.home-priority.danger { border-left-color: var(--danger); background: color-mix(in srgb, var(--danger) 3%, var(--panel-strong)); }
+.home-priority.clear { border-left-color: var(--success); }
+.home-priority:hover,
+.home-priority.danger:hover,
+.home-priority.attention:hover,
+.home-priority.clear:hover {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+  background: color-mix(in srgb, var(--accent-2) 42%, var(--panel-strong));
+  transform: translateY(-1px);
+}
+.priority-number,
+.home-priority.danger .priority-number,
+.home-priority.attention .priority-number { color: var(--accent); }
+.home-layout > aside {
+  gap: var(--grid-gap);
+  padding-top: 0;
+  border: 0;
+}
+.home-layout > aside > .card,
+.home-layout > aside > .card + .card {
+  padding: var(--card-padding);
+  border: 1px solid color-mix(in srgb, var(--line) 90%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--panel-strong);
+  box-shadow: var(--testnet-quiet);
+}
+
+.review-environment-switcher {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--line) 90%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--panel-soft) 48%, var(--panel-strong));
+}
+.review-environment-tabs a.active,
+.section-tabs a.active { border-bottom-color: var(--accent); color: var(--accent); }
+.review-environment-tabs a.active b { background: var(--accent-2); color: var(--accent); }
+.proposal-list-tools {
+  margin-top: var(--space-2);
+  padding: var(--dense-card-padding);
+  border: 1px solid color-mix(in srgb, var(--line) 90%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--panel-strong);
+  box-shadow: var(--testnet-quiet);
+}
+
+.table-wrap {
+  border-color: color-mix(in srgb, var(--line) 90%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--panel-strong);
+  box-shadow: var(--testnet-quiet);
+}
+th {
+  border-bottom-color: color-mix(in srgb, var(--line) 88%, transparent);
+  background: color-mix(in srgb, var(--panel-soft) 58%, var(--panel-strong));
+  color: color-mix(in srgb, var(--muted) 88%, var(--ink));
+}
+td { border-bottom-color: color-mix(in srgb, var(--line) 76%, transparent); }
+tbody tr:nth-child(even) { background: color-mix(in srgb, var(--surface) 35%, transparent); }
+tbody tr:hover { background: color-mix(in srgb, var(--accent-2) 48%, transparent); }
+.direction-pill,
+.status-pill,
+.risk-badge,
+.proposal-environment,
+.signal-chip,
+.env-badge,
+.tag { border-radius: 999px; }
+
+.capital-network-scope,
+.capital-overview,
+.capital-route-grid,
+.capital-account-picker,
+.performance-capital-panel,
+.capital-chart-panel,
+.capital-trust-panel,
+.capital-testnet-empty {
+  border-color: color-mix(in srgb, var(--line) 90%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--panel-strong);
+  box-shadow: var(--testnet-quiet);
+}
+.capital-provider-card.is-selected,
+.capital-provider-config-grid .capital-config-section.is-selected-provider {
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--line));
+  box-shadow: inset 3px 0 0 var(--accent), var(--testnet-quiet);
+}
+.capital-gate-summary,
+.callout,
+.danger-note,
+.safety-note {
+  border-radius: var(--radius-md);
+  background: var(--panel-strong);
+  box-shadow: var(--testnet-quiet);
+}
+.callout.tone-attention,
+.safety-note { background: color-mix(in srgb, var(--warning) 5%, var(--panel-strong)); }
+.danger-note { background: color-mix(in srgb, var(--danger) 5%, var(--panel-strong)); }
+.empty-state > div,
+.error-state > div,
+.access-boundary-state > div {
+  border-radius: var(--radius-lg);
+  background: var(--panel-strong);
+  box-shadow: var(--testnet-quiet);
+}
+dialog {
+  border-color: color-mix(in srgb, var(--line) 88%, transparent);
+  border-radius: var(--radius-lg);
+  background: var(--panel-strong);
+  box-shadow: var(--testnet);
+}
+
+@media (max-width: 780px) {
+  .main-content { background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 52%, var(--bg)) 0, var(--bg) 150px); }
+  .home-status { gap: var(--space-3); padding: 12px; }
+  .home-status h1 { font-size: clamp(28px, 7.4vw, 30px); line-height: 1.12; }
+  .home-status p:not(.eyebrow) { font-size: 13px; line-height: 1.45; }
+  .stats.home-stats { gap: var(--space-2); }
+  .home-stats .stat,
+  .home-stats .stat:first-child,
+  .home-stats .stat:nth-child(even),
+  .home-stats .stat:nth-child(n + 3),
+  .home-stats .stat + .stat { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--line) 90%, transparent); }
+  .home-stats .stat span { margin-top: 4px; line-height: 1.35; }
+  .home-priority,
+  .home-priority.danger,
+  .home-priority.attention,
+  .home-priority.clear { padding: var(--dense-card-padding); }
+  .review-environment-switcher { padding: 10px; }
+  .proposal-list-tools { margin-top: 0; padding: 10px; }
+  :is(.proposal-table, .position-table, .campaign-list-table, .result-table, .notification-table) {
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+  :is(.proposal-table, .position-table, .campaign-list-table, .result-table, .notification-table) tr {
+    border-color: color-mix(in srgb, var(--line) 90%, transparent);
+    border-radius: var(--radius-md);
+    background: var(--panel-strong);
+    box-shadow: var(--testnet-quiet);
+  }
+  :is(.proposal-table, .position-table, .campaign-list-table, .result-table, .notification-table) tr:hover {
+    background: color-mix(in srgb, var(--accent-2) 34%, var(--panel-strong));
+  }
+}
