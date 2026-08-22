@@ -15,6 +15,14 @@ const shared = fs.readFileSync(
   "utf8",
 );
 
+test("selected performance accounts expose a compact remove label and a complete accessible name", () => {
+  assert.match(
+    source,
+    /aria-label="移除 \$\{escapeHtml\(option\.label\)\}"><span>\$\{escapeHtml\(option\.label\)\}<\/span><span class="capital-account-remove" aria-hidden="true">移除<\/span>/,
+  );
+  assert.doesNotMatch(source, />移除 \$\{escapeHtml\(option\.label\)\}<\/b>/);
+});
+
 test("capital operations open the connected wallet and record public evidence automatically", () => {
   for (const marker of [
     "eip6963:requestProvider",

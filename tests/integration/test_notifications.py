@@ -19,12 +19,20 @@ from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, Role, SignalSourceMode
-from trading_control_plane.models import AuditEvent, NotificationDelivery, NotificationRoute
+from trading_control_plane.models import (
+    AuditEvent,
+    NotificationDelivery,
+    NotificationRoute,
+    Proposal,
+    RoleAssignment,
+    User,
+)
 from trading_control_plane.notification import (
     NotificationDispatcher,
     NotificationMessage,
     NotificationSendResult,
     NotificationTransportError,
+    resolve_telegram_review_prompt,
 )
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
@@ -108,6 +116,7 @@ def configure_telegram_review_route(
     admin: UUID,
     *,
     now: datetime,
+    chat_id: str = "-100123456789",
 ) -> UUID:
     result = service.configure_notification_route(
         actor_id=admin,
@@ -118,7 +127,7 @@ def configure_telegram_review_route(
         enabled=True,
         configuration={
             "bot_token": "1234567890:abcdefghijklmnopqrstuvwxyz",
-            "chat_id": "-100123456789",
+            "chat_id": chat_id,
         },
         expected_version=0,
         idempotency_key="telegram-review-route-create",
@@ -495,6 +504,12 @@ def test_proposal_review_route_is_authoritative_deduplicated_and_retryable(
     )
     service.assign_role(reviewer, Role.REVIEWER, admin, "acct-1", "BINANCE", now=now)
     service.assign_role(second_reviewer, Role.REVIEWER, admin, "acct-1", "BINANCE", now=now)
+    service.bind_telegram_private_chat(
+        internal_username="notification-proposal-second-reviewer",
+        telegram_username="notification-proposal-second-reviewer",
+        telegram_chat_id="789",
+        now=now,
+    )
     add_exchange_account_fixture(
         database,
         admin,
@@ -515,7 +530,7 @@ def test_proposal_review_route_is_authoritative_deduplicated_and_retryable(
         protection_supported=True,
         now=now,
     )
-    route_id = configure_telegram_review_route(service, admin, now=now)
+    route_id = configure_telegram_review_route(service, admin, now=now, chat_id="789")
     configure_slack_route(
         service,
         admin,
@@ -590,6 +605,7 @@ def test_proposal_review_route_is_authoritative_deduplicated_and_retryable(
         assert delivery.template_version == 2
         assert delivery.object_version == 2
         assert delivery.route_version == 1
+        assert delivery.recipient_user_id == second_reviewer
         assert frozen_payload["proposal_id"] == str(proposal_id)
         assert frozen_payload["symbol"] == "BTCUSDT"
         assert frozen_payload["estimated_notional"] == "100.000000000000000000"
@@ -616,20 +632,7 @@ def test_proposal_review_route_is_authoritative_deduplicated_and_retryable(
             assert reviewed.status_code == 200, reviewed.text
             assert reviewed.json()["status"] == "PENDING_REVIEW"
 
-    asyncio.run(record_first_review())
     assert legacy_telegram.notifications() == []
-    with database.session_factory() as session:
-        assert (
-            session.scalar(
-                select(func.count())
-                .select_from(NotificationDelivery)
-                .where(
-                    NotificationDelivery.object_type == "Proposal",
-                    NotificationDelivery.object_id == str(proposal_id),
-                )
-            )
-            == 1
-        )
 
     team_id = UUID(TradingQueries(database).user_context(admin)["active_team"]["team_id"])
     duplicate = service.enqueue_notification_event(
@@ -677,6 +680,159 @@ def test_proposal_review_route_is_authoritative_deduplicated_and_retryable(
     assert len(retry_sender.calls) == 2
     channel, _configuration, card = retry_sender.calls[-1]
     assert channel == "TELEGRAM"
+    assert card.telegram_chat_id == "789"
+    assert card.telegram_reply_markup is not None
+    assert [row[0]["text"] for row in card.telegram_reply_markup["inline_keyboard"]] == [
+        "需确认 · 批准",
+        "需确认 · 拒绝",
+        "打开 Web 安全审核",
+    ]
+    approve_callback = card.telegram_reply_markup["inline_keyboard"][0][0]["callback_data"]
+    prompt = resolve_telegram_review_prompt(
+        database,
+        approve_callback,
+        public_base_url="https://tradeops.example",
+        now=delivery_created_at + timedelta(seconds=61),
+    )
+    assert prompt is not None
+    assert prompt.action.recipient_id == second_reviewer
+    assert prompt.action.delivery_id == delivery_id
+    assert prompt.action.route_version == 1
+
+    # Every callback is resolved from current durable facts. Losing the subscription,
+    # binding, scope, independence, freshness, or exact version invalidates the button.
+    with database.session_factory.begin() as session:
+        route = session.get(NotificationRoute, route_id)
+        assert route is not None
+        route.enabled = False
+    assert (
+        resolve_telegram_review_prompt(
+            database,
+            approve_callback,
+            public_base_url="https://tradeops.example",
+            now=delivery_created_at + timedelta(seconds=61),
+        )
+        is None
+    )
+    with database.session_factory.begin() as session:
+        route = session.get(NotificationRoute, route_id)
+        assert route is not None
+        route.enabled = True
+
+    with database.session_factory.begin() as session:
+        user = session.get(User, second_reviewer)
+        assert user is not None
+        user.telegram_chat_id = None
+    assert (
+        resolve_telegram_review_prompt(
+            database,
+            approve_callback,
+            public_base_url="https://tradeops.example",
+            now=delivery_created_at + timedelta(seconds=61),
+        )
+        is None
+    )
+    with database.session_factory.begin() as session:
+        user = session.get(User, second_reviewer)
+        assert user is not None
+        user.telegram_chat_id = "789"
+
+    with database.session_factory.begin() as session:
+        assignment = session.scalar(
+            select(RoleAssignment).where(
+                RoleAssignment.team_id == team_id,
+                RoleAssignment.user_id == second_reviewer,
+                RoleAssignment.role == "REVIEWER",
+            )
+        )
+        assert assignment is not None
+        assignment.account_scope = "other-account"
+    assert (
+        resolve_telegram_review_prompt(
+            database,
+            approve_callback,
+            public_base_url="https://tradeops.example",
+            now=delivery_created_at + timedelta(seconds=61),
+        )
+        is None
+    )
+    with database.session_factory.begin() as session:
+        assignment = session.scalar(
+            select(RoleAssignment).where(
+                RoleAssignment.team_id == team_id,
+                RoleAssignment.user_id == second_reviewer,
+                RoleAssignment.role == "REVIEWER",
+            )
+        )
+        assert assignment is not None
+        assignment.account_scope = "acct-1"
+
+    with database.session_factory.begin() as session:
+        proposal = session.get(Proposal, proposal_id)
+        assert proposal is not None
+        original_proposer_id = proposal.proposer_id
+        proposal.proposer_id = second_reviewer
+    assert (
+        resolve_telegram_review_prompt(
+            database,
+            approve_callback,
+            public_base_url="https://tradeops.example",
+            now=delivery_created_at + timedelta(seconds=61),
+        )
+        is None
+    )
+    with database.session_factory.begin() as session:
+        proposal = session.get(Proposal, proposal_id)
+        assert proposal is not None
+        proposal.proposer_id = original_proposer_id
+
+    callback_now = delivery_created_at + timedelta(seconds=61)
+    with database.session_factory.begin() as session:
+        proposal = session.get(Proposal, proposal_id)
+        assert proposal is not None
+        original_expires_at = proposal.expires_at
+        proposal.expires_at = callback_now - timedelta(seconds=1)
+    assert (
+        resolve_telegram_review_prompt(
+            database,
+            approve_callback,
+            public_base_url="https://tradeops.example",
+            now=callback_now,
+        )
+        is None
+    )
+    with database.session_factory.begin() as session:
+        proposal = session.get(Proposal, proposal_id)
+        assert proposal is not None
+        proposal.expires_at = original_expires_at
+
+    with database.session_factory.begin() as session:
+        sent = session.get(NotificationDelivery, delivery_id)
+        assert sent is not None
+        sent.object_version = 999
+    assert (
+        resolve_telegram_review_prompt(
+            database,
+            approve_callback,
+            public_base_url="https://tradeops.example",
+            now=callback_now,
+        )
+        is None
+    )
+    with database.session_factory.begin() as session:
+        sent = session.get(NotificationDelivery, delivery_id)
+        assert sent is not None
+        sent.object_version = 2
+
+    assert (
+        resolve_telegram_review_prompt(
+            database,
+            approve_callback,
+            public_base_url="https://tradeops.example",
+            now=callback_now,
+        )
+        is not None
+    )
     for required in (
         "BTCUSDT / 做多 · LONG",
         "acct-1 / BINANCE",
@@ -702,6 +858,21 @@ def test_proposal_review_route_is_authoritative_deduplicated_and_retryable(
     assert "NOTIFICATION_EVENT_DEDUPLICATED" in audit_types
     assert "NOTIFICATION_RETRY_SCHEDULED" in audit_types
     assert "NOTIFICATION_SENT" in audit_types
+
+    asyncio.run(record_first_review())
+    assert legacy_telegram.notifications() == []
+    with database.session_factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(NotificationDelivery)
+                .where(
+                    NotificationDelivery.object_type == "Proposal",
+                    NotificationDelivery.object_id == str(proposal_id),
+                )
+            )
+            == 1
+        )
 
     restarted = service.enqueue_notification_event(
         actor_id=str(admin),

@@ -256,11 +256,26 @@ def test_spacing_regression_contract_uses_the_final_stylesheet_cascade() -> None
         <html><body><div class="campaign-list-table"><table><tbody>
           <tr id="campaign-row">
             <td id="instrument" class="campaign-instrument-cell">
-              <div class="campaign-instrument"><b>BTC</b><a id="campaign-link" class="row-link campaign-id-link">abc123…</a></div>
+              <div class="campaign-instrument"><b>BTC</b>
+                <a id="campaign-link" class="row-link campaign-id-link">abc123…</a>
+              </div>
             </td>
-            <td id="direction" class="campaign-direction-cell"><span class="direction-pill">Long</span></td>
+            <td id="direction" class="campaign-direction-cell">
+              <span class="direction-pill">Long</span>
+            </td>
           </tr>
         </tbody></table></div></body></html>
+    """
+    proposal_compose = """
+        <html><body><form class="proposal-compose"><div class="field-grid">
+          <label id="account-field">Account<select><option>acct-1</option></select></label>
+          <label><span>Instrument</span><input></label>
+        </div></form></body></html>
+    """
+    capital_tag = """
+        <html><body><button class="capital-account-tag">
+          <span>acct-1</span><span id="remove-copy" class="capital-account-remove">Remove</span>
+        </button></body></html>
     """
 
     assert _effective_css_value(root, "#target", "--section-gap", 1440) == "20px"
@@ -326,6 +341,21 @@ def test_spacing_regression_contract_uses_the_final_stylesheet_cascade() -> None
     assert _effective_css_value(campaign, "#campaign-row", "grid-template-columns", 390) == (
         "repeat(2, minmax(0, 1fr))"
     )
+    assert _effective_css_value(campaign, ".campaign-instrument", "display", 1440) == "flex"
+    assert _effective_css_value(campaign, ".campaign-instrument", "white-space", 1440) == (
+        "nowrap"
+    )
+    assert _effective_css_value(campaign, ".campaign-instrument", "display", 390) == "grid"
+    assert _effective_css_value(campaign, ".campaign-instrument", "white-space", 390) == (
+        "normal"
+    )
     assert _effective_css_value(campaign, "#instrument", "grid-column", 390) == "auto"
     assert _effective_css_value(campaign, "#direction", "justify-self", 390) == "end"
     assert _effective_css_value(campaign, "#campaign-link", "min-height", 390) == "40px"
+    for width in (1440, 1024, 390):
+        assert _effective_css_value(
+            proposal_compose, "#account-field", "align-content", width
+        ) == "start"
+        assert _effective_css_value(capital_tag, "#remove-copy", "white-space", width) == (
+            "nowrap"
+        )

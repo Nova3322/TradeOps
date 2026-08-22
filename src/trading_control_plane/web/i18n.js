@@ -717,7 +717,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '这里展示草稿、等待审核，以及仍在启动窗口内的已批准提案；批准后仍须完成实时风险检查与短期授权。':'Drafts, pending reviews, and approved proposals still inside their launch window appear here. Approval still requires real-time risk checks and short-lived authorization.', '草稿':'Draft', '已拒绝':'Rejected',
   // Performance reports.
   'QuantStats 与 Pyfolio Reloaded 使用同一份可信净值、收益率、成交、持仓、手续费及基准数据；订单仅用于执行与审计。':'QuantStats and Pyfolio Reloaded use the same trusted net worth, return, fill, position, fee, and benchmark data. Orders are used only for execution and audit.',
-  '尚无可采信的资金数据':'No trusted capital data is available', '所选账户汇总':'Selected-account total', '全部历史':'All history', '较短':'Shorter', '生产历史':'Production history', '全部有权限账户':'All authorized accounts',
+  '尚无可采信的资金数据':'No trusted capital data is available', '所选账户汇总':'Selected-account total', '移除':'Remove', '全部历史':'All history', '较短':'Shorter', '生产历史':'Production history', '全部有权限账户':'All authorized accounts',
   '生成 QuantStats 报表':'Generate QuantStats report', '系统没有补零、推测净值或使用成交盈亏伪造收益率。':'The system never zero-fills, estimates net worth, or fabricates returns from fill P&L.', '完整绩效报表':'Full performance report', '新窗口查看':'Open in new window', '下载 HTML':'Download HTML',
   // Account management.
   '当前空间 · Default Team':'Current space · Default Team', '添加测试模式账户':'Add Testnet account', '添加生产模式账户':'Add Production account', '添加测试账户':'Add Testnet account', '添加生产账户':'Add Production account', '凭据将绑定团队、环境、交易所和账户':'Credentials are bound to the Team, environment, venue, and account',

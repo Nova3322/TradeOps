@@ -92,7 +92,8 @@ def enqueue_notification_event(
                 "key": scope_rules.advisory_lock_key(
                     f"notification-route:{route.notification_route_id}",
                     f"notification-delivery:{template.event_type}",
-                    f"v{route.version}:{object_type}:{object_id}:v{object_version}",
+                    f"v{route.version}:{object_type}:{object_id}:v{object_version}:"
+                    f"reviewer={route.recipient_user_id or 'none'}",
                 )
             },
         )
@@ -106,6 +107,7 @@ def enqueue_notification_event(
                 models.NotificationDelivery.object_type == object_type,
                 models.NotificationDelivery.object_id == str(object_id),
                 models.NotificationDelivery.object_version == object_version,
+                models.NotificationDelivery.recipient_user_id == route.recipient_user_id,
             )
             .limit(1)
         )
@@ -130,6 +132,7 @@ def enqueue_notification_event(
             environment=environment,
             account_id=account_id,
             venue=venue,
+            recipient_user_id=route.recipient_user_id,
             status="PENDING",
             attempt_count=0,
             max_attempts=5,
@@ -351,6 +354,7 @@ class NotificationService(ServiceComponent):
                     )
                 normalized_configuration = None
                 configuration_metadata = route.configuration_metadata
+                recipient_user_id = route.recipient_user_id
                 configuration_semantics = f"unchanged:{route.credential_version}"
             else:
                 normalized_configuration, configuration_metadata = (
@@ -364,6 +368,16 @@ class NotificationService(ServiceComponent):
                         f"notification-route:{team.team_id}:{route_id}:{normalized_channel.lower()}"
                     ),
                 )
+                recipient_user_id = None
+                if normalized_channel == "TELEGRAM":
+                    recipient_user_id = session.scalar(
+                        select(models.User.user_id).where(
+                            models.User.telegram_chat_id
+                            == normalized_configuration["chat_id"],
+                            models.User.active,
+                            models.User.principal_type == "HUMAN",
+                        )
+                    )
             payload = {
                 "notification_route_id": str(route_id),
                 "environment": normalized_environment,
@@ -436,6 +450,7 @@ class NotificationService(ServiceComponent):
                     enabled=enabled,
                     configuration_ciphertext=ciphertext,
                     configuration_metadata=configuration_metadata,
+                    recipient_user_id=recipient_user_id,
                     credential_version=credential_version,
                     version=1,
                     created_by=actor_id,
@@ -451,6 +466,7 @@ class NotificationService(ServiceComponent):
                 route.enabled = enabled
                 route.configuration_ciphertext = ciphertext
                 route.configuration_metadata = configuration_metadata
+                route.recipient_user_id = recipient_user_id
                 route.credential_version = credential_version
                 route.version += 1
                 route.updated_by = actor_id
