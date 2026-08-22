@@ -1,26 +1,26 @@
 /* Navigation and header preferences — neutral, legible, and role-preserving. */
 :root {
-  --sidebar-bg: #efeee8;
-  --nav-section-ink: #242424;
-  --nav-item-ink: #676765;
-  --nav-secondary-ink: #7a7a77;
-  --nav-divider: #d2d1cb;
-  --nav-hover-bg: #e5e4de;
-  --nav-active-bg: #fbfaf5;
-  --nav-active-ink: #242424;
-  --nav-focus: #242424;
+  --sidebar-bg: #edf2ee;
+  --nav-section-ink: #1d2a25;
+  --nav-item-ink: #5e6b65;
+  --nav-secondary-ink: #77827d;
+  --nav-divider: #d4ddd7;
+  --nav-hover-bg: #e2eae5;
+  --nav-active-bg: #ffffff;
+  --nav-active-ink: #245f4d;
+  --nav-focus: #245f4d;
 }
 
 :root[data-theme="dark"] {
-  --sidebar-bg: #191919;
-  --nav-section-ink: #f5f5f2;
-  --nav-item-ink: #adadaa;
-  --nav-secondary-ink: #8e8e8a;
-  --nav-divider: #363634;
-  --nav-hover-bg: #252525;
-  --nav-active-bg: #f5f1e8;
-  --nav-active-ink: #252525;
-  --nav-focus: #f5f5f2;
+  --sidebar-bg: #111a16;
+  --nav-section-ink: #edf4f0;
+  --nav-item-ink: #a9b6b0;
+  --nav-secondary-ink: #829189;
+  --nav-divider: #2b3a34;
+  --nav-hover-bg: #1d2924;
+  --nav-active-bg: #21352c;
+  --nav-active-ink: #9edcc3;
+  --nav-focus: #8bd3b5;
 }
 
 .topbar { grid-template-columns: 248px minmax(190px, 250px) minmax(0, 1fr); }
@@ -318,4 +318,72 @@
 @media (max-width: 420px) {
   .header-preferences .preference-select { width: 54px; }
   .header-preferences .preference-select:last-child { width: 62px; }
+}
+
+/* Elegant shell finish: soft separation, restrained brand color, clear focus. */
+.topbar {
+  border-bottom-color: color-mix(in srgb, var(--line) 82%, transparent);
+  background: color-mix(in srgb, var(--panel-strong) 94%, transparent);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--line) 64%, transparent), 0 8px 24px rgba(25, 51, 42, .035);
+  backdrop-filter: blur(16px) saturate(125%);
+}
+.brand { border-right-color: color-mix(in srgb, var(--line) 82%, transparent); }
+.brand-mark { box-shadow: 0 1px 2px rgba(0, 0, 0, .18); }
+.topbar .workspace-switcher-trigger { border-right: 1px solid color-mix(in srgb, var(--line) 82%, transparent); }
+.topbar .workspace-switcher-trigger:hover,
+.topbar .workspace-switcher-trigger[aria-expanded="true"] { background: color-mix(in srgb, var(--accent-2) 62%, var(--panel-strong)); }
+.header-preferences {
+  overflow: hidden;
+  border-color: color-mix(in srgb, var(--line) 88%, transparent);
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+  background: color-mix(in srgb, var(--panel-soft) 45%, var(--panel-strong));
+  box-shadow: var(--testnet-quiet);
+}
+.header-preferences:has(+ .header-mode-select) { border-radius: var(--radius-md) 0 0 var(--radius-md); }
+.header-preferences .preference-trigger:hover,
+.header-preferences .preference-trigger[aria-expanded="true"] { background: var(--accent-2); }
+.header-mode-select .preference-trigger {
+  border-color: color-mix(in srgb, var(--line) 88%, transparent);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: color-mix(in srgb, var(--panel-soft) 45%, var(--panel-strong));
+  box-shadow: var(--testnet-quiet);
+}
+.mode-switch-trigger:hover:not(:disabled),
+.mode-switch-trigger[aria-expanded="true"] { background: var(--accent-2); }
+.identity-chip { border-left-color: color-mix(in srgb, var(--line) 82%, transparent); }
+.identity-chip:hover,
+.identity-chip[aria-expanded="true"] { background: color-mix(in srgb, var(--accent-2) 58%, var(--panel-strong)); }
+.desktop-nav-toggle {
+  border-color: color-mix(in srgb, var(--line) 88%, transparent);
+  background: var(--panel-strong);
+  color: var(--accent);
+  box-shadow: var(--testnet-quiet);
+}
+.desktop-nav-toggle:hover { border-color: color-mix(in srgb, var(--accent) 24%, var(--line)); background: var(--accent-2); }
+.sidebar {
+  border-right-color: color-mix(in srgb, var(--nav-divider) 88%, transparent);
+  background: var(--sidebar-bg);
+}
+.sidebar nav a { position: relative; border-radius: var(--radius-sm); }
+.sidebar nav a.active,
+.sidebar nav a[aria-current="page"] {
+  color: var(--nav-active-ink);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(25, 51, 42, .055);
+}
+.sidebar nav a.active::before,
+.sidebar nav a[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  inset: 8px auto 8px 0;
+  width: 3px;
+  border-radius: 0 999px 999px 0;
+  background: var(--accent);
+}
+
+@media (max-width: 780px) {
+  .topbar { box-shadow: 0 1px 0 var(--line), 0 6px 18px rgba(25, 51, 42, .04); }
+  .topbar .workspace-switcher-trigger { border-right: 0; }
+  .header-mode-select .preference-trigger { border-radius: 0; background: transparent; box-shadow: none; }
+  .sidebar { box-shadow: var(--testnet); }
 }

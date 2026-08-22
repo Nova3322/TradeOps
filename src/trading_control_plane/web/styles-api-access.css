@@ -159,3 +159,40 @@
   .api-code-block > header { align-items: flex-start; }
   .api-code-block .api-example { padding: 15px; }
 }
+
+/* Match the compact console's refined surface hierarchy. */
+.api-guide-nav a {
+  border-radius: var(--radius-sm);
+  background: var(--panel-strong);
+  box-shadow: 0 1px 2px rgba(25, 51, 42, .04);
+}
+.api-guide-nav a:hover,
+.api-guide-nav a:focus-visible { border-color: color-mix(in srgb, var(--accent) 36%, var(--line)); color: var(--accent); background: var(--accent-2); }
+.api-credential-workspace {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  border-radius: var(--radius-lg);
+  background: var(--panel-strong);
+  box-shadow: var(--testnet-quiet);
+}
+.api-current-scope,
+.api-code-block {
+  border-radius: var(--radius-md);
+  background: var(--panel-strong);
+  box-shadow: var(--testnet-quiet);
+}
+.api-code-block { overflow: hidden; }
+.api-code-block > header { background: color-mix(in srgb, var(--panel-soft) 58%, var(--panel-strong)); }
+.api-code-block .api-example { background: color-mix(in srgb, var(--surface) 74%, var(--panel-strong)); }
+.api-guide-index { color: var(--accent); }
+.api-quickstart-facts {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-strong);
+  box-shadow: var(--testnet-quiet);
+}
+.api-quickstart-facts > span { padding-left: 14px; }
+
+@media (max-width: 780px) {
+  .api-quickstart-facts > span { padding-inline: 12px; }
+}
