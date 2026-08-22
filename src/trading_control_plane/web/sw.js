@@ -1,4 +1,4 @@
-const CACHE = 'trading-shell-v234';
+const CACHE = 'trading-shell-v236';
 const SHELL = [
   '/assets/styles-base.css',
   '/assets/styles-components.css',

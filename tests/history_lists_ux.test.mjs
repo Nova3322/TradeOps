@@ -66,6 +66,52 @@ test("the campaigns destination is trade history with filters and 50-or-100 pagi
   ]) assert.equal(execution.includes(marker), true, marker);
 });
 
+test("campaign history renders separate instrument and direction columns with an accessible compact id link", async () => {
+  const context = {
+    api:async () => ({data:[{
+      campaign_id:"de7d9c51-cf96-40f7-a33f-2e96add6a8a2",
+      environment:"LIVE",
+      symbol:"BTC",
+      account_id:"acct-1",
+      venue:"HYPERLIQUID",
+      direction:"LONG",
+      status:"CLOSED",
+      current_target_quantity:0,
+      final_pnl:"1.25",
+      updated_at:"2026-08-22T12:00:00Z",
+    }]}),
+    currentWorkflowEnvironment:() => "LIVE",
+    currentLanguage:"zh-CN",
+    localizedText:(value) => value,
+    fmtCompactEnvironment:() => "生产",
+    fmtEnvironment:() => "生产模式 · 实盘",
+    fmtDirection:() => "做多",
+    fmtDefaultAccountLabel:() => "默认账户",
+    fmtVenueLabel:() => "Hyperliquid",
+    campaignTargetLabel:() => "已平仓",
+    campaignPnlLabel:() => "1.25 USDC",
+    fmtStatus:() => "已结束",
+    fmtDate:() => "8月22日 20:00",
+    shortId:(value) => `${value.slice(0, 8)}…`,
+    escapeHtml:(value) => String(value),
+    recordPaginationMarkup:() => "",
+    bindLinkedRows:() => {},
+    bindRecordList:() => {},
+    main:{innerHTML:""},
+    window:{matchMedia:() => ({matches:true})},
+  };
+  vm.runInNewContext(`${execution}; renderPromise = renderCampaignList();`, context);
+  await context.renderPromise;
+  const html = context.main.innerHTML;
+
+  assert.match(html, /<th>标的<\/th><th>方向<\/th>/);
+  assert.match(html, /class="campaign-instrument-cell" data-label="标的"/);
+  assert.match(html, /class="campaign-direction-cell" data-label="方向"/);
+  assert.match(html, /class="row-link campaign-id-link"[^>]+aria-label="查看 BTC 交易详情"/);
+  assert.match(html, />de7d9c51…<\/a>/);
+  assert.doesNotMatch(html, /标的 \/ 方向|查看详情/);
+});
+
 test("recent notification deliveries support bounded history filters and pagination", () => {
   assert.equal(reporting.includes("api('/api/notifications?limit=200')"), true);
   for (const marker of [
@@ -77,5 +123,5 @@ test("recent notification deliveries support bounded history filters and paginat
     "recordPaginationMarkup(deliveries.length, '通知投递记录分页')",
     "data-notification-row",
   ]) assert.equal(reporting.includes(marker), true, marker);
-  assert.equal(serviceWorker.includes("trading-shell-v234"), true);
+  assert.equal(serviceWorker.includes("trading-shell-v236"), true);
 });

@@ -35,10 +35,10 @@ test('production account cards expose the exact-account detail workflow', () => 
   );
   assert.match(routerSource, /venueAccountMatch = path\.match\(\/\^\\\/venues\\\/\(\[\^\/\]\+\)\$\/\)/);
   assert.match(routerSource, /renderVenueAccountDetail\(venueAccountMatch\[1\]\)/);
-  assert.match(indexSource, /execution\.js\?v=197/);
-  assert.match(indexSource, /shared\.js\?v=19/);
+  assert.match(indexSource, /execution\.js\?v=199/);
+  assert.match(indexSource, /shared\.js\?v=20/);
   assert.match(indexSource, /accounts\.js\?v=184/);
-  assert.match(serviceWorkerSource, /trading-shell-v234/);
+  assert.match(serviceWorkerSource, /trading-shell-v236/);
 });
 
 test('connection verification reports the unchanged current trading eligibility', () => {

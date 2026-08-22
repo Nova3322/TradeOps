@@ -1094,10 +1094,10 @@ p, li, dd, td { font-size: 14px; }
 }
 
 /* Compact density system — shared geometry, typography, and responsive rhythm. */
-.app-shell { grid-template: 60px 1fr / 248px minmax(0, 1fr); }
+.app-shell { grid-template: 60px 1fr / 216px minmax(0, 1fr); }
 .topbar {
   min-height: 60px;
-  grid-template-columns: 248px minmax(0, 1fr);
+  grid-template-columns: 216px minmax(0, 1fr);
 }
 .brand { padding-inline: var(--space-5); }
 .brand-mark { width: 32px; height: 32px; flex-basis: 32px; border-radius: var(--radius-md); }
@@ -1160,6 +1160,9 @@ input, select, textarea { min-height: var(--control-height); padding: 7px 10px; 
 th, td { padding: 8px 10px; line-height: var(--line-height-meta); }
 th { font-size: var(--font-size-meta); }
 td { font-size: var(--font-size-control); }
+.campaign-instrument { min-width: 0; display: grid; justify-items: start; gap: 2px; }
+.campaign-id-link { min-height: 24px; margin: 0; padding: 0; color: var(--muted); font-weight: 400; text-decoration: none; }
+.campaign-id-link:hover, .campaign-id-link:focus-visible { color: var(--accent); text-decoration: underline; }
 .status-pill, .risk-badge, .direction-pill, .proposal-environment, .signal-chip, .env-badge, .tag {
   min-height: 24px;
   padding: 3px 7px;
@@ -1181,6 +1184,7 @@ td { font-size: var(--font-size-control); }
 .stats.home-stats { gap: var(--space-5); margin-bottom: var(--space-6); }
 .home-stats .stat { padding-block: 2px; }
 .home-priority { grid-template-columns: 36px minmax(0, 1fr) 144px; gap: var(--space-4); min-height: 0; padding: var(--space-4) 4px; }
+.home-priority.no-action { grid-template-columns: 36px minmax(0, 1fr); }
 .home-priority p { margin-top: 4px; line-height: var(--line-height-body); }
 .home-layout > aside { gap: var(--space-6); margin-top: var(--space-5); padding-top: 0; }
 .home-quick-start h2, .home-boundary h2 { margin-bottom: var(--space-2); font-size: var(--font-size-section); }
@@ -1302,6 +1306,10 @@ dialog { padding: var(--space-5); }
   .result-table td:first-child > :is(.subtle, .status-pill, .proposal-environment, .row-link),
   .notification-table td:first-child > :is(.subtle, .status-pill, .proposal-environment, .row-link) { margin: 2px 0 0 6px; }
   .proposal-table td:first-child > .row-link, .position-table td:first-child > .row-link, .campaign-list-table td:first-child > .row-link, .result-table td:first-child > .row-link, .notification-table td:first-child > .row-link { display: inline-flex; }
+  .campaign-list-table td.campaign-instrument-cell::before,
+  .campaign-list-table td.campaign-direction-cell::before { display: none; }
+  .campaign-list-table td.campaign-direction-cell { align-self: start; justify-self: end; }
+  .campaign-list-table .campaign-id-link { min-height: 40px; padding-block: 4px; }
   .row-link { padding-block: 6px; }
   .empty-state { min-height: 150px; }
   .error-state { min-height: 190px; }

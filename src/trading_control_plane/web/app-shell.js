@@ -6,6 +6,39 @@ function workspaceDefaultTeamId(workspace) {
     || null;
 }
 
+function setSidebarDatabaseStatus(state) {
+  if (!sidebarDatabaseStatus) return;
+  const labels = {
+    checking:'数据库检查中',
+    connected:'数据库已连接',
+    disconnected:'数据库未连接',
+    unknown:'数据库状态未知',
+  };
+  sidebarDatabaseStatus.dataset.state = state;
+  sidebarDatabaseStatus.textContent = localizedText(labels[state] || labels.unknown);
+}
+
+async function refreshSidebarDatabaseStatus() {
+  const requestToken = ++sidebarDatabaseRequestToken;
+  setSidebarDatabaseStatus('checking');
+  try {
+    const readiness = await api('/health/ready');
+    if (requestToken !== sidebarDatabaseRequestToken) return;
+    setSidebarDatabaseStatus(
+      readiness?.status === 'ready' && readiness?.durable_store === 'postgresql'
+        ? 'connected'
+        : 'unknown',
+    );
+  } catch (error) {
+    if (requestToken !== sidebarDatabaseRequestToken) return;
+    setSidebarDatabaseStatus(
+      error?.status === 503 && error?.code === 'DATABASE_UNAVAILABLE'
+        ? 'disconnected'
+        : 'unknown',
+    );
+  }
+}
+
 function renderWorkspaceSwitcher() {
   if (!session) return;
   const activeWorkspaceId = session.active_workspace?.workspace_id;
@@ -35,6 +68,11 @@ function setShell(loggedIn, {workspaceGate = false} = {}) {
   scopeControl.hidden = !loggedIn || workspaceGate;
   mobileNavToggle.hidden = !loggedIn || workspaceGate;
   updateEnvironmentIndicators();
+  if (loggedIn && !workspaceGate) refreshSidebarDatabaseStatus();
+  else {
+    sidebarDatabaseRequestToken += 1;
+    setSidebarDatabaseStatus('checking');
+  }
   if (loggedIn) {
     renderWorkspaceSwitcher();
     const rolePriority = ['SYSTEM_ADMIN','TREASURY_ADMIN','OPERATOR','REVIEWER','PROPOSER','OBSERVER'];

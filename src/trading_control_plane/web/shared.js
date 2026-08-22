@@ -154,6 +154,8 @@ const deploymentEnvironmentEnglishLabels = {
   LOCAL:'Local runtime', TEST:'Test runtime', PRODUCTION:'Production runtime',
   LIVE:'Production mode', TESTNET:'Test mode',
 };
+const compactEnvironmentLabels = {LIVE:'生产', TESTNET:'测试'};
+const compactEnvironmentEnglishLabels = {LIVE:'Production', TESTNET:'Test'};
 const fmtEnvironment = (value, withCode = false) => {
   const code = String(value || '').trim().toUpperCase();
   const labels = currentLanguage === 'en'
@@ -162,18 +164,26 @@ const fmtEnvironment = (value, withCode = false) => {
   const label = labels[code] || (currentLanguage === 'en' ? 'Unknown environment' : '环境未确认');
   return withCode && code ? `${label} · ${code}` : label;
 };
+const fmtCompactEnvironment = value => {
+  const code = String(value || '').trim().toUpperCase();
+  const labels = currentLanguage === 'en'
+    ? compactEnvironmentEnglishLabels
+    : compactEnvironmentLabels;
+  return labels[code] || (currentLanguage === 'en' ? 'Not set' : '待配置');
+};
 const fmtExecutionMode = mode => mode === 'LIVE' ? '生产模式' : mode === 'TESTNET' ? '测试模式' : '待配置';
 function updateEnvironmentIndicators() {
   const deploymentLabel = fmtEnvironment(authStatus?.environment);
   const teamMode = session?.active_team?.execution_mode;
   const modeLabel = ['LIVE','TESTNET'].includes(teamMode)
-    ? fmtEnvironment(teamMode)
+    ? fmtCompactEnvironment(teamMode)
     : localizedText('待配置');
+  const modeMeaning = ['LIVE','TESTNET'].includes(teamMode) ? fmtEnvironment(teamMode, true) : modeLabel;
   const labelSeparator = currentLanguage === 'en' ? ': ' : '：';
   environmentModeValue.textContent = modeLabel;
   environmentBadge.dataset.environment = String(teamMode || 'setup').toLowerCase();
-  environmentBadge.setAttribute('aria-label', `${localizedText('当前模式')}${labelSeparator}${modeLabel}`);
-  environmentBadge.title = `${localizedText('当前模式')}${labelSeparator}${modeLabel} · ${localizedText('当前环境')}${labelSeparator}${deploymentLabel}`;
+  environmentBadge.setAttribute('aria-label', `${localizedText('当前模式')}${labelSeparator}${modeMeaning}`);
+  environmentBadge.title = `${localizedText('当前模式')}${labelSeparator}${modeMeaning} · ${localizedText('当前环境')}${labelSeparator}${deploymentLabel}`;
   const canOpenModeSwitcher = Boolean(session && hasCapability('venue.view'));
   environmentBadge.disabled = !canOpenModeSwitcher;
   if (!canOpenModeSwitcher) environmentBadge.setAttribute('aria-expanded', 'false');

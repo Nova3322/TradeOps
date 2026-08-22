@@ -33,7 +33,7 @@ async function renderCurrentPositions() {
   const rows = positions.map(item => {
     const pnl = item.unrealized_pnl;
     return `<tr data-position-row data-venue="${escapeHtml(item.venue)}" data-account="${escapeHtml(positionAccountScope(item))}" data-direction="${escapeHtml(item.direction)}" data-pnl="${positionPnlBucket(item)}">
-      <td data-label="交易所"><b>${escapeHtml(fmtVenueLabel(item.venue))}</b><br><span class="subtle">${escapeHtml(fmtEnvironment(item.environment, true))}</span></td>
+      <td data-label="交易所"><b>${escapeHtml(fmtVenueLabel(item.venue))}</b></td>
       <td data-label="账户"><a class="text-link" href="/venues/${escapeHtml(item.exchange_account_id)}" data-link>${escapeHtml(item.account_label)}</a><br><span class="subtle">${escapeHtml(item.account_id)}${item.account_active ? '' : ' · 已停用'}</span></td>
       <td data-label="标的"><b>${escapeHtml(item.symbol)}</b></td>
       <td data-label="方向 / 数量"><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))}</span><br><span class="subtle">${fmtNumber(item.quantity)}</span></td>
@@ -53,7 +53,9 @@ async function renderCurrentPositions() {
       </div>
     </details>` : '';
 
-  main.innerHTML = `<section class="page current-positions-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(fmtEnvironment(environment, true))} · 多账户只读事实</p><h1>当前持仓</h1><p class="lede">统一展示当前团队内有权限账户的非零持仓；可按交易所、账户、方向和未实现盈亏筛选。本页只读，不提供手动平仓或订单操作。</p></div><div class="toolbar"><button class="secondary" type="button" data-refresh>刷新持仓</button></div></header>
+  const environmentMeaning = fmtEnvironment(environment, true);
+  const positionScopeLabel = localizedText('多账户只读事实');
+  main.innerHTML = `<section class="page current-positions-page"><header class="page-head"><div><p class="eyebrow" title="${escapeHtml(environmentMeaning)}" aria-label="${escapeHtml(environmentMeaning)} · ${escapeHtml(positionScopeLabel)}">${escapeHtml(fmtCompactEnvironment(environment))} · ${escapeHtml(positionScopeLabel)}</p><h1>当前持仓</h1><p class="lede">统一展示当前团队内有权限账户的非零持仓；可按交易所、账户、方向和未实现盈亏筛选。本页只读，不提供手动平仓或订单操作。</p></div><div class="toolbar"><button class="secondary" type="button" data-refresh>刷新持仓</button></div></header>
     <div class="stats position-stats"><div class="stat"><small>当前持仓</small><b>${Number(summary.position_count || 0)}</b><span>仅统计非零仓位事实</span></div><div class="stat"><small>涉及账户</small><b>${Number(summary.account_count || 0)} / ${accounts.length}</b><span>持仓账户 / 可见账户</span></div><div class="stat"><small>多头 / 空头</small><b>${Number(summary.long_count || 0)} / ${Number(summary.short_count || 0)}</b><span>按仓位数量正负判断</span></div><div class="stat"><small>结果未知</small><b class="${Number(summary.unknown_count || 0) ? 'warning-text' : ''}">${Number(summary.unknown_count || 0)}</b><span>未知事实不计为实时盈亏</span></div></div>
     ${filters}
     ${positions.length ? `<div id="position-list" class="table-wrap position-table"><table><thead><tr><th>交易所</th><th>账户</th><th>标的</th><th>方向 / 数量</th><th>入场价 / 标记价</th><th>未实现盈亏</th><th>数据状态</th></tr></thead><tbody>${rows}</tbody></table></div><section id="position-filter-empty" class="empty-state compact-empty" hidden><div><h2>没有符合筛选的持仓</h2><p>请调整或清除筛选条件。</p></div></section>` : `<section class="empty-state"><div><h2>当前没有可展示的持仓</h2><p>${escapeHtml(emptyCopy)}</p><a class="secondary" href="/accounts" data-link>查看账户状态</a></div></section>`}
