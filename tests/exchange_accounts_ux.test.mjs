@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
+import vm from 'node:vm';
 
 const executionSource = readFileSync(
   new URL('../src/trading_control_plane/web/execution.js', import.meta.url),
@@ -34,10 +35,36 @@ test('production account cards expose the exact-account detail workflow', () => 
   );
   assert.match(routerSource, /venueAccountMatch = path\.match\(\/\^\\\/venues\\\/\(\[\^\/\]\+\)\$\/\)/);
   assert.match(routerSource, /renderVenueAccountDetail\(venueAccountMatch\[1\]\)/);
-  assert.match(indexSource, /execution\.js\?v=196/);
-  assert.match(indexSource, /shared\.js\?v=18/);
-  assert.match(indexSource, /accounts\.js\?v=183/);
-  assert.match(serviceWorkerSource, /trading-shell-v232/);
+  assert.match(indexSource, /execution\.js\?v=197/);
+  assert.match(indexSource, /shared\.js\?v=19/);
+  assert.match(indexSource, /accounts\.js\?v=184/);
+  assert.match(serviceWorkerSource, /trading-shell-v233/);
+});
+
+test('connection verification reports the unchanged current trading eligibility', () => {
+  const helperSource = sharedSource.slice(
+    sharedSource.indexOf('function fmtConnectionVerificationSuccess'),
+    sharedSource.indexOf('const fmtRisk'),
+  );
+  const context = {};
+  vm.runInNewContext(
+    `${helperSource}; result = {
+      enabled: fmtConnectionVerificationSuccess({trading:{status:'ELIGIBLE',enabled:true}}),
+      disabled: fmtConnectionVerificationSuccess({trading:{status:'DISABLED',enabled:false}}),
+    };`,
+    context,
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.result)),
+    {
+      enabled:'连接测试成功；交易资格未改变，当前已开启',
+      disabled:'连接测试成功；交易资格未改变，当前保持关闭',
+    },
+  );
+  assert.match(accountsSource, /fmtConnectionVerificationSuccess\(result\)/);
+  assert.match(executionSource, /fmtConnectionVerificationSuccess\(result\)/);
+  assert.doesNotMatch(accountsSource, /连接验证成功；交易能力仍保持关闭/);
+  assert.doesNotMatch(executionSource, /连接测试成功；交易能力仍保持关闭/);
 });
 
 test('standard Binance account mode is rendered as known product truth', () => {
