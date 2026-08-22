@@ -468,6 +468,11 @@ function fmtBinanceConnectionDiagnostic(connection) {
     ? 'Binance code 未返回' : `Binance ${diagnostics.binance_error_code}`;
   return `${category}（${status}，${code}）；建议 ${retryAt} 后重试`;
 }
+function fmtConnectionVerificationSuccess(result) {
+  return result?.trading?.enabled
+    ? '连接测试成功；交易资格未改变，当前已开启'
+    : '连接测试成功；交易资格未改变，当前保持关闭';
+}
 const fmtRisk = (value) => localizedText(riskLabels[value] || value || '未知');
 const riskGuidance = (reason) => riskReasonGuidance[reason] || {label:'风险检查未通过',action:'查看当前风险事实，处理阻塞后重新检查。'};
 const friendlyApiError = (error) => {
