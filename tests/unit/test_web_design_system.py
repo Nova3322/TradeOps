@@ -186,7 +186,7 @@ def test_compact_density_contract_covers_shell_content_and_mobile() -> None:
         assert token in base
 
     for rule in (
-        ".app-shell { grid-template: 60px 1fr / 248px minmax(0, 1fr); }",
+        ".app-shell { grid-template: 60px 1fr / 216px minmax(0, 1fr); }",
         ".main-content { padding: var(--page-top) var(--page-gutter) 48px; }",
         ".page, .api-access-page { width: 100%; max-width: none; margin: 0; }",
         "th, td { padding: 8px 10px; line-height: var(--line-height-meta); }",
@@ -198,14 +198,14 @@ def test_compact_density_contract_covers_shell_content_and_mobile() -> None:
     ):
         assert rule in components
 
-    assert ".topbar { grid-template-columns: 248px" in shell
+    assert ".topbar { grid-template-columns: 216px" in shell
     assert ".sidebar { top: 56px; height: calc(100dvh - 56px); }" in shell
     assert ".api-access-page { max-width: none; }" in api_access
     for href in (
         "/assets/styles-base.css?v=22",
-        "/assets/styles-components.css?v=24",
+        "/assets/styles-components.css?v=25",
         "/assets/styles-api-access.css?v=4",
-        "/assets/styles-shell.css?v=14",
+        "/assets/styles-shell.css?v=15",
     ):
         assert href in index
 
@@ -240,6 +240,25 @@ def test_spacing_regression_contract_uses_the_final_stylesheet_cascade() -> None
     compact_empty = ordinary_empty.replace("empty-state", "empty-state compact-empty")
     error_state = ordinary_empty.replace("empty-state", "error-state")
     api_empty = ordinary_empty.replace("empty-state", "empty-state api-client-empty")
+    shell = """
+        <html><body>
+          <div class="app-shell" id="shell">
+            <header class="topbar" id="topbar"><a class="brand"></a></header>
+            <aside class="sidebar" id="sidebar"></aside>
+            <button class="desktop-nav-toggle" id="toggle"></button>
+          </div>
+        </body></html>
+    """
+    campaign = """
+        <html><body><div class="campaign-list-table"><table><tbody>
+          <tr id="campaign-row">
+            <td id="instrument" class="campaign-instrument-cell">
+              <div class="campaign-instrument"><b>BTC</b><a id="campaign-link" class="row-link campaign-id-link">abc123…</a></div>
+            </td>
+            <td id="direction" class="campaign-direction-cell"><span class="direction-pill">Long</span></td>
+          </tr>
+        </tbody></table></div></body></html>
+    """
 
     assert _effective_css_value(root, "#target", "--section-gap", 1440) == "20px"
     assert _effective_css_value(root, "#target", "--section-gap", 390) == "16px"
@@ -280,3 +299,24 @@ def test_spacing_regression_contract_uses_the_final_stylesheet_cascade() -> None
     assert _effective_css_value(api_empty, "#target", "min-height", 390) == "120px"
     assert _effective_css_value(error_state, "#target", "min-height", 1440) == "240px"
     assert _effective_css_value(error_state, "#target", "min-height", 390) == "190px"
+
+    assert _effective_css_value(shell, "#shell", "grid-template", 1440) == (
+        "60px 1fr / 216px minmax(0, 1fr)"
+    )
+    assert _effective_css_value(shell, "#topbar", "grid-template-columns", 1440) == (
+        "216px minmax(190px, 250px) minmax(0, 1fr)"
+    )
+    assert _effective_css_value(shell, "#toggle", "left", 1440) == "198px"
+    assert _effective_css_value(shell, "#shell", "display", 1024) == "block"
+    assert _effective_css_value(shell, "#sidebar", "width", 1024) == (
+        "min(360px, calc(100% - 54px))"
+    )
+    assert _effective_css_value(shell, "#sidebar", "width", 390) == (
+        "min(340px, calc(100% - 34px))"
+    )
+    assert _effective_css_value(campaign, "#campaign-row", "grid-template-columns", 390) == (
+        "repeat(2, minmax(0, 1fr))"
+    )
+    assert _effective_css_value(campaign, "#instrument", "grid-column", 390) == "auto"
+    assert _effective_css_value(campaign, "#direction", "justify-self", 390) == "end"
+    assert _effective_css_value(campaign, "#campaign-link", "min-height", 390) == "40px"

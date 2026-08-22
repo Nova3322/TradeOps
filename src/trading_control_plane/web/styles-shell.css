@@ -23,9 +23,9 @@
   --nav-focus: #f5f5f2;
 }
 
-.topbar { grid-template-columns: 248px minmax(190px, 250px) minmax(0, 1fr); }
+.topbar { grid-template-columns: 216px minmax(190px, 250px) minmax(0, 1fr); }
 .topbar > .topbar-actions { grid-column: 3; }
-.topbar:has(> #scope-control[hidden]) { grid-template-columns: 248px minmax(0, 1fr); }
+.topbar:has(> #scope-control[hidden]) { grid-template-columns: 216px minmax(0, 1fr); }
 .topbar:has(> #scope-control[hidden]) > .topbar-actions { grid-column: 2; }
 .header-preferences {
   min-width: 0;
@@ -122,7 +122,7 @@
   position: fixed;
   z-index: 12;
   top: 68px;
-  left: 230px;
+  left: 198px;
   width: 36px;
   height: 36px;
   display: grid;
