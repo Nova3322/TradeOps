@@ -63,7 +63,6 @@ from trading_control_plane.api_core import (
     json,
     perptape_candidate_identity_is_displayable,
     perptape_legacy_candidate_id,
-    quote,
     status,
     timedelta,
 )
@@ -103,6 +102,7 @@ from trading_control_plane.capital_direct_use_cases import CapitalDirectUseCases
 from trading_control_plane.capital_receipt_use_cases import CapitalReceiptUseCases
 from trading_control_plane.capital_transfer_use_cases import CapitalTransferUseCases
 from trading_control_plane.exchange_connection_verification import ExchangeConnectionVerification
+from trading_control_plane.notification import resolve_telegram_review_prompt
 from trading_control_plane.perptape import (
     PERPTAPE_SOURCE_EXCHANGES,
     PERPTAPE_VENUES,
@@ -516,62 +516,9 @@ def create_app(
     def notify_reviewers(
         proposal_id: UUID, proposal_version: int, environment: str = "TESTNET"
     ) -> None:
-        if queries().proposal_uses_notification_routes(proposal_id):
-            return
-        for reviewer in queries().reviewers_for_proposal(proposal_id):
-            detail = queries().proposal_detail(reviewer.user_id, proposal_id)
-            code = token_service.issue_review_reference(
-                user_id=reviewer.user_id,
-                object_id=proposal_id,
-                object_version=proposal_version,
-                now=_now(),
-                ttl=timedelta(seconds=resolved_settings.action_token_ttl_seconds),
-            )
-            review_url = (
-                f"{resolved_settings.public_base_url.rstrip('/')}/proposals/{proposal_id}"
-                f"?review_code={quote(code)}"
-            )
-            notification_key = f"{proposal_id}:{proposal_version}:{reviewer.user_id}"
-            resolved_telegram.send(
-                ProposalNotification(
-                    notification_id="tg_"
-                    + hashlib.sha256(notification_key.encode()).hexdigest()[:20],
-                    reviewer_id=reviewer.user_id,
-                    proposal_id=proposal_id,
-                    proposal_version=proposal_version,
-                    environment=environment,
-                    summary="提案正在等待人工审核；完整冻结语义仅在 Web 中展示。",  # noqa: RUF001
-                    review_code=code,
-                    review_url=review_url,
-                    created_at=_now(),
-                    status=str(detail["status"]),
-                    expires_at=str(detail["expires_at"]),
-                    symbol=None if detail["symbol"] is None else str(detail["symbol"]),
-                    direction=str(detail["direction"]),
-                    risk_tier=str(detail["risk_tier"]),
-                    quantity=str(detail["quantity"]),
-                    max_risk=str(detail["max_risk"]),
-                    account_id=str(detail["account_id"]),
-                    venue=str(detail["venue"]),
-                    order_type="MARKET",
-                    estimated_notional=(
-                        None
-                        if detail["estimated_notional"] is None
-                        else str(detail["estimated_notional"])
-                    ),
-                    quote_currency=(
-                        None
-                        if detail["quote_currency"] is None
-                        else str(detail["quote_currency"])
-                    ),
-                    collateral_currency=(
-                        None
-                        if detail["collateral_currency"] is None
-                        else str(detail["collateral_currency"])
-                    ),
-                    leverage=None if detail["leverage"] is None else str(detail["leverage"]),
-                )
-            )
+        # Proposal submission already freezes and enqueues the subscribed Team routes
+        # in the same transaction. This compatibility hook must never create a second path.
+        del proposal_id, proposal_version, environment
 
     def notify_capital(
         *,
@@ -891,7 +838,6 @@ def create_app(
         action: TelegramProposalReviewAction,
         update_id: int,
     ) -> str:
-        del update_id
         now = _now()
         decision = (
             ReviewDecision.APPROVE if action.action == "APPROVE_PROPOSAL" else ReviewDecision.REJECT
@@ -902,7 +848,11 @@ def create_app(
                 action.proposal_id,
                 action.recipient_id,
                 decision,
-                "Telegram private-chat review after explicit two-step confirmation",
+                (
+                    "Telegram private-chat review after explicit two-step confirmation;"
+                    f"delivery={action.delivery_id};route_version={action.route_version};"
+                    f"update={update_id}"
+                ),
                 expected_version=action.proposal_version,
                 automatic_risk_service_username=(
                     resolved_settings.runtime_sync_service_username
@@ -1038,6 +988,14 @@ def create_app(
 
     if isinstance(resolved_telegram, TelegramBotGateway):
         resolved_telegram.set_action_handler(handle_real_telegram_action)
+        resolved_telegram.set_action_resolver(
+            lambda callback_key: resolve_telegram_review_prompt(
+                resolved_database,
+                callback_key,
+                public_base_url=resolved_settings.public_base_url,
+                now=_now(),
+            )
+        )
 
     if WEB_ROOT.exists():
         app.mount("/assets", StaticFiles(directory=WEB_ROOT), name="web-assets")

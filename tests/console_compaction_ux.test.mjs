@@ -63,4 +63,5 @@ test("home keeps its permission boundary and adds the localized Webhook opportun
   );
   assert.match(quickStart, /canPropose \? '<a class="text-link" href="\/proposals\/new"/);
   assert.match(i18n, /'查看 Webhook 机会':'View Webhook opportunities'/);
+  assert.match(i18n, /'移除':'Remove'/);
 });

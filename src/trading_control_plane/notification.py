@@ -26,8 +26,26 @@ from sqlalchemy.orm import Session
 from trading_control_plane.credentials import CredentialCipher
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected
-from trading_control_plane.models import AuditEvent, NotificationDelivery, NotificationRoute, Team
-from trading_control_plane.telegram import TelegramBotClient, TelegramUnavailable
+from trading_control_plane.models import (
+    Approval,
+    AuditEvent,
+    NotificationDelivery,
+    NotificationRoute,
+    Proposal,
+    RoleAssignment,
+    Team,
+    TeamMembership,
+    User,
+)
+from trading_control_plane.telegram import (
+    TelegramBotClient,
+    TelegramProposalReviewAction,
+    TelegramReviewPrompt,
+    TelegramUnavailable,
+    parse_telegram_callback_data,
+    proposal_review_keyboard,
+    telegram_callback_data,
+)
 
 SUPPORTED_NOTIFICATION_CHANNELS = frozenset({"TELEGRAM", "SLACK", "LARK", "EMAIL"})
 ROUTABLE_NOTIFICATION_EVENT_TYPES = frozenset(
@@ -80,6 +98,8 @@ class NotificationMessage:
     subject: str
     text: str
     html: str
+    telegram_chat_id: str | None = None
+    telegram_reply_markup: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -543,15 +563,18 @@ class StdlibNotificationSender:
         channel = channel.strip().upper()
         normalized, _ = validate_notification_configuration(channel, configuration)
         if channel == "TELEGRAM":
+            payload: dict[str, Any] = {
+                "chat_id": message.telegram_chat_id or normalized["chat_id"],
+                "text": message.html,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            if message.telegram_reply_markup is not None:
+                payload["reply_markup"] = message.telegram_reply_markup
             try:
                 result = TelegramBotClient(normalized["bot_token"]).call(
                     "sendMessage",
-                    {
-                        "chat_id": normalized["chat_id"],
-                        "text": message.html,
-                        "parse_mode": "HTML",
-                        "disable_web_page_preview": True,
-                    },
+                    payload,
                 )
             except TelegramUnavailable as exc:
                 retryable = exc.code == "TELEGRAM_RATE_LIMITED"
@@ -643,6 +666,183 @@ class _PreparedDelivery:
     template_version: int
     payload: dict[str, Any]
     event_id: UUID
+    recipient_user_id: UUID | None
+    telegram_chat_id: str | None
+    telegram_actions_enabled: bool
+
+
+def _eligible_telegram_reviewer(
+    session: Session,
+    *,
+    proposal: Proposal,
+    user: User,
+    now: datetime,
+) -> bool:
+    if (
+        not user.active
+        or user.principal_type != "HUMAN"
+        or user.telegram_chat_id is None
+        or proposal.status != "PENDING_REVIEW"
+        or proposal.expires_at <= now
+        or proposal.proposer_id == user.user_id
+    ):
+        return False
+    membership = session.scalar(
+        select(TeamMembership).where(
+            TeamMembership.team_id == proposal.team_id,
+            TeamMembership.user_id == user.user_id,
+            TeamMembership.active,
+        )
+    )
+    assignment = session.scalar(
+        select(RoleAssignment).where(
+            RoleAssignment.team_id == proposal.team_id,
+            RoleAssignment.user_id == user.user_id,
+            RoleAssignment.role == "REVIEWER",
+        )
+    )
+    if (
+        membership is None
+        or assignment is None
+        or (
+            assignment.account_scope is not None
+            and assignment.account_scope != proposal.account_id
+        )
+        or (assignment.venue_scope is not None and assignment.venue_scope != proposal.venue)
+    ):
+        return False
+    if session.scalar(
+        select(Approval.approval_id).where(
+            Approval.proposal_id == proposal.proposal_id,
+            Approval.reviewer_id == user.user_id,
+        )
+    ) is not None:
+        return False
+    return (
+        session.scalar(
+            select(AuditEvent.audit_event_id)
+            .where(
+                AuditEvent.event_type == "PROPOSAL_DUPLICATE_REUSED",
+                AuditEvent.object_type == "Proposal",
+                AuditEvent.object_id == str(proposal.proposal_id),
+                AuditEvent.actor_id == str(user.user_id),
+            )
+            .limit(1)
+        )
+        is None
+    )
+
+
+def resolve_telegram_review_prompt(
+    database: Database,
+    callback_key: str,
+    *,
+    public_base_url: str,
+    now: datetime,
+) -> TelegramReviewPrompt | None:
+    """Resolve a durable callback against current identity, route, proposal, and RBAC facts."""
+
+    reference = parse_telegram_callback_data(callback_key)
+    if reference is None:
+        return None
+    with database.session_factory() as session:
+        delivery = session.get(NotificationDelivery, reference.delivery_id)
+        if (
+            delivery is None
+            or delivery.status != "SENT"
+            or delivery.channel != "TELEGRAM"
+            or delivery.event_type != "PROPOSAL_REVIEW_REQUIRED"
+            or delivery.object_type != "Proposal"
+            or delivery.recipient_user_id is None
+        ):
+            return None
+        route = session.get(NotificationRoute, delivery.notification_route_id)
+        user = session.get(User, delivery.recipient_user_id)
+        try:
+            proposal_id = UUID(delivery.object_id)
+        except ValueError:
+            return None
+        proposal = session.get(Proposal, proposal_id)
+        try:
+            payload_proposal_version = int(delivery.payload.get("proposal_version", -1))
+        except (TypeError, ValueError):
+            return None
+        if (
+            route is None
+            or user is None
+            or proposal is None
+            or not route.enabled
+            or route.deleted_at is not None
+            or route.version != delivery.route_version
+            or route.channel != delivery.channel
+            or delivery.event_type not in route.event_types
+            or route.recipient_user_id != user.user_id
+            or proposal.version != delivery.object_version
+            or str(delivery.payload.get("proposal_id")) != str(proposal.proposal_id)
+            or payload_proposal_version != proposal.version
+            or not _eligible_telegram_reviewer(
+                session,
+                proposal=proposal,
+                user=user,
+                now=now,
+            )
+        ):
+            return None
+        payload = delivery.payload
+        source_callback_key = telegram_callback_data(
+            "source", reference.action, delivery.notification_delivery_id
+        )
+        review_url = f"{public_base_url.rstrip('/')}/proposals/{proposal.proposal_id}"
+        card = render_notification_message(
+            event_type=delivery.event_type,
+            template_key=delivery.template_key,
+            template_version=delivery.template_version,
+            payload=payload,
+            event_id=str(delivery.notification_event_id),
+            public_base_url=public_base_url,
+        )
+        action = TelegramProposalReviewAction(
+            callback_key=callback_key,
+            recipient_id=user.user_id,
+            proposal_id=proposal.proposal_id,
+            action=reference.action,
+            proposal_version=proposal.version,
+            environment=proposal.environment,
+            symbol=None if payload.get("symbol") is None else str(payload["symbol"]),
+            direction=proposal.direction,
+            risk_tier=proposal.risk_tier,
+            max_risk=str(proposal.max_risk),
+            expires_at=proposal.expires_at.isoformat(),
+            account_id=proposal.account_id,
+            venue=proposal.venue,
+            order_type="MARKET",
+            quantity=str(proposal.quantity),
+            estimated_notional=(
+                None
+                if payload.get("estimated_notional") is None
+                else str(payload["estimated_notional"])
+            ),
+            quote_currency=(
+                None if payload.get("quote_currency") is None else str(payload["quote_currency"])
+            ),
+            collateral_currency=(
+                None
+                if payload.get("collateral_currency") is None
+                else str(payload["collateral_currency"])
+            ),
+            leverage=None if proposal.leverage is None else str(proposal.leverage),
+            delivery_id=delivery.notification_delivery_id,
+            route_version=delivery.route_version,
+        )
+        return TelegramReviewPrompt(
+            action=action,
+            source_callback_key=source_callback_key,
+            original_text=card.html,
+            original_reply_markup=proposal_review_keyboard(
+                delivery.notification_delivery_id,
+                review_url,
+            ),
+        )
 
 
 class NotificationDispatcher:
@@ -818,6 +1018,45 @@ class NotificationDispatcher:
                     now=now,
                 )
                 return delivery.status
+            telegram_chat_id: str | None = None
+            telegram_actions_enabled = False
+            recipient_user_id = delivery.recipient_user_id
+            if (
+                delivery.channel == "TELEGRAM"
+                and delivery.event_type == "PROPOSAL_REVIEW_REQUIRED"
+                and delivery.object_type == "Proposal"
+            ):
+                telegram_chat_id = configuration["chat_id"]
+                recipient = session.scalar(
+                    select(User).where(
+                        User.telegram_chat_id == telegram_chat_id,
+                        User.active,
+                        User.principal_type == "HUMAN",
+                    )
+                )
+                if recipient is not None and (
+                    route.recipient_user_id is None
+                    or route.recipient_user_id == recipient.user_id
+                ):
+                    route.recipient_user_id = recipient.user_id
+                    delivery.recipient_user_id = recipient.user_id
+                    recipient_user_id = recipient.user_id
+                    try:
+                        proposal_id = UUID(delivery.object_id)
+                    except ValueError:
+                        proposal = None
+                    else:
+                        proposal = session.get(Proposal, proposal_id)
+                    telegram_actions_enabled = bool(
+                        proposal is not None
+                        and proposal.version == delivery.object_version
+                        and _eligible_telegram_reviewer(
+                            session,
+                            proposal=proposal,
+                            user=recipient,
+                            now=now,
+                        )
+                    )
             delivery.status = "SENDING"
             delivery.attempt_count += 1
             delivery.last_attempt_at = now
@@ -833,6 +1072,9 @@ class NotificationDispatcher:
                 template_version=delivery.template_version,
                 payload=delivery.payload,
                 event_id=delivery.notification_event_id,
+                recipient_user_id=recipient_user_id,
+                telegram_chat_id=telegram_chat_id,
+                telegram_actions_enabled=telegram_actions_enabled,
             )
 
     def _finalize_success(
@@ -943,6 +1185,21 @@ class NotificationDispatcher:
                 event_id=str(prepared.event_id),
                 public_base_url=self.public_base_url,
             )
+            if prepared.telegram_chat_id is not None:
+                reply_markup = None
+                if prepared.telegram_actions_enabled:
+                    proposal_id = UUID(str(prepared.payload["proposal_id"]))
+                    reply_markup = proposal_review_keyboard(
+                        prepared.notification_delivery_id,
+                        f"{self.public_base_url.rstrip('/')}/proposals/{proposal_id}",
+                    )
+                message = NotificationMessage(
+                    subject=message.subject,
+                    text=message.text,
+                    html=message.html,
+                    telegram_chat_id=prepared.telegram_chat_id,
+                    telegram_reply_markup=reply_markup,
+                )
             result = self.sender.send(
                 prepared.channel,
                 prepared.configuration,

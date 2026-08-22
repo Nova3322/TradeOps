@@ -699,6 +699,9 @@ class NotificationRoute(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     configuration_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
     configuration_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    recipient_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=True
+    )
     credential_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
@@ -753,6 +756,11 @@ class NotificationDelivery(Base):
             "team_id",
             "created_at",
         ),
+        Index(
+            "ix_notification_deliveries_recipient",
+            "recipient_user_id",
+            "created_at",
+        ),
     )
 
     notification_delivery_id: Mapped[UUID] = mapped_column(
@@ -776,6 +784,9 @@ class NotificationDelivery(Base):
     environment: Mapped[str | None] = mapped_column(String(16), nullable=True)
     account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     venue: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    recipient_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(24), nullable=False)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)

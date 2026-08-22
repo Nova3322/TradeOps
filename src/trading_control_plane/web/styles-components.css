@@ -805,7 +805,7 @@ p, li, dd, td { font-size: 14px; }
 .capital-account-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .capital-account-tag { display: inline-flex; align-items: center; gap: 7px; min-height: 30px; max-width: 240px; padding: 4px 8px 4px 10px; border: 1px solid var(--account-color); border-radius: 999px; color: var(--ink); background: transparent; cursor: pointer; }
 .capital-account-tag span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.capital-account-tag b { color: var(--muted); }
+.capital-account-tag .capital-account-remove { flex: 0 0 auto; color: var(--muted); font-weight: 600; white-space: nowrap; }
 .performance-capital-panel { margin: 16px 0 var(--section-gap); padding: 12px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); }
 .performance-capital-panel .capital-overview { margin-top: 10px; }
 .performance-capital-panel .capital-chart-panel { margin-top: 8px; border: 1px solid var(--line); }
@@ -1160,7 +1160,7 @@ input, select, textarea { min-height: var(--control-height); padding: 7px 10px; 
 th, td { padding: 8px 10px; line-height: var(--line-height-meta); }
 th { font-size: var(--font-size-meta); }
 td { font-size: var(--font-size-control); }
-.campaign-instrument { min-width: 0; display: grid; justify-items: start; gap: 2px; }
+.campaign-instrument { min-width: 0; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .campaign-id-link { min-height: 24px; margin: 0; padding: 0; color: var(--muted); font-weight: 400; text-decoration: none; }
 .campaign-id-link:hover, .campaign-id-link:focus-visible { color: var(--accent); text-decoration: underline; }
 .status-pill, .risk-badge, .direction-pill, .proposal-environment, .signal-chip, .env-badge, .tag {
@@ -1311,6 +1311,7 @@ dialog { padding: var(--space-5); }
   .proposal-table td:first-child > .row-link, .position-table td:first-child > .row-link, .campaign-list-table td:first-child > .row-link, .result-table td:first-child > .row-link, .notification-table td:first-child > .row-link { display: inline-flex; }
   .campaign-list-table td.campaign-instrument-cell::before,
   .campaign-list-table td.campaign-direction-cell::before { display: none; }
+  .campaign-list-table .campaign-instrument { display: grid; justify-items: start; gap: 2px; white-space: normal; }
   .campaign-list-table td.campaign-direction-cell { align-self: start; justify-self: end; }
   .campaign-list-table .campaign-id-link { min-height: 40px; padding-block: 4px; }
   .row-link { padding-block: 6px; }
