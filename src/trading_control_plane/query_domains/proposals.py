@@ -484,3 +484,22 @@ class ProposalQueries(QueryComponent):
             for user in users:
                 session.expunge(user)
             return list(users)
+
+    def proposal_uses_notification_routes(self, proposal_id: UUID) -> bool:
+        """A configured team route is authoritative for proactive proposal notifications."""
+
+        with self.database.session_factory() as session:
+            team_id = session.scalar(
+                select(models.Proposal.team_id).where(models.Proposal.proposal_id == proposal_id)
+            )
+            if team_id is None:
+                raise domain.DomainRejected("PROPOSAL_NOT_FOUND", "proposal does not exist")
+            route_id = session.scalar(
+                select(models.NotificationRoute.notification_route_id)
+                .where(
+                    models.NotificationRoute.team_id == team_id,
+                    models.NotificationRoute.deleted_at.is_(None),
+                )
+                .limit(1)
+            )
+            return route_id is not None

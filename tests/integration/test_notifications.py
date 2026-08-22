@@ -7,9 +7,11 @@ import hmac
 import json
 import secrets
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
+from conftest import add_exchange_account_fixture
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 
@@ -26,6 +28,7 @@ from trading_control_plane.notification import (
 )
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
+from trading_control_plane.telegram import MockTelegramGateway
 
 
 def encryption_key() -> str:
@@ -95,6 +98,30 @@ def configure_slack_route(
         configuration={"webhook_url": "https://hooks.slack.com/services/T/B/private-value"},
         expected_version=0,
         idempotency_key=idempotency_key,
+        now=now,
+    )
+    return UUID(result["notification_route_id"])
+
+
+def configure_telegram_review_route(
+    service: TradingService,
+    admin: UUID,
+    *,
+    now: datetime,
+) -> UUID:
+    result = service.configure_notification_route(
+        actor_id=admin,
+        notification_route_id=None,
+        name="Proposal review route",
+        channel="TELEGRAM",
+        event_types=["PROPOSAL_REVIEW_REQUIRED"],
+        enabled=True,
+        configuration={
+            "bot_token": "1234567890:abcdefghijklmnopqrstuvwxyz",
+            "chat_id": "-100123456789",
+        },
+        expected_version=0,
+        idempotency_key="telegram-review-route-create",
         now=now,
     )
     return UUID(result["notification_route_id"])
@@ -454,6 +481,273 @@ def test_notification_api_masks_configuration_and_test_send_has_no_business_auth
             assert denied.status_code == 403, denied.text
 
     asyncio.run(scenario())
+
+
+def test_proposal_review_route_is_authoritative_deduplicated_and_retryable(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("notification-proposal-admin", now=now)
+    reviewer = service.create_user("notification-proposal-reviewer", admin, now=now)
+    second_reviewer = service.create_user(
+        "notification-proposal-second-reviewer", admin, now=now
+    )
+    service.assign_role(reviewer, Role.REVIEWER, admin, "acct-1", "BINANCE", now=now)
+    service.assign_role(second_reviewer, Role.REVIEWER, admin, "acct-1", "BINANCE", now=now)
+    add_exchange_account_fixture(
+        database,
+        admin,
+        "acct-1",
+        "BINANCE",
+        environment="LIVE",
+    )
+    instrument_id = service.register_instrument(
+        actor_id=admin,
+        venue="BINANCE",
+        symbol="BTCUSDT",
+        tick_size=Decimal("0.1"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        contract_multiplier=Decimal("1"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        protection_supported=True,
+        now=now,
+    )
+    route_id = configure_telegram_review_route(service, admin, now=now)
+    configure_slack_route(
+        service,
+        admin,
+        now=now,
+        idempotency_key="unsubscribed-slack-route-create",
+    )
+    legacy_telegram = MockTelegramGateway()
+    app = create_app(
+        Settings(
+            environment="test",
+            database_url=str(database.engine.url),
+            allow_mock_identity=True,
+            session_signing_secret=secrets.token_urlsafe(32),
+            credential_encryption_key=encryption_key(),
+            public_base_url="https://tradeops.example",
+            _env_file=None,
+        ),
+        database,
+        telegram_gateway=legacy_telegram,
+    )
+
+    async def create_pending_proposal() -> UUID:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            login = await client.post(
+                "/api/auth/mock/login",
+                json={"username": "notification-proposal-admin"},
+            )
+            assert login.status_code == 200, login.text
+            created = await client.post(
+                "/api/proposals/manual",
+                json={
+                    "environment": "LIVE",
+                    "account_id": "acct-1",
+                    "venue": "BINANCE",
+                    "instrument_id": str(instrument_id),
+                    "direction": "LONG",
+                    "risk_tier": "HIGH",
+                    "quantity": "0.001",
+                    "max_risk": "1",
+                    "expires_in_minutes": 480,
+                    "trigger_price": "100000",
+                    "invalidation_price": "99000",
+                    "rationale": "notification route card fixture",
+                    "idempotency_key": "notification-proposal-create",
+                },
+            )
+            assert created.status_code == 200, created.text
+            assert created.json()["status"] == "PENDING_REVIEW"
+            return UUID(created.json()["proposal_id"])
+
+    proposal_id = asyncio.run(create_pending_proposal())
+    assert legacy_telegram.notifications() == []
+
+    with database.session_factory() as session:
+        deliveries = session.scalars(
+            select(NotificationDelivery).where(
+                NotificationDelivery.object_type == "Proposal",
+                NotificationDelivery.object_id == str(proposal_id),
+            )
+        ).all()
+        assert len(deliveries) == 1
+        delivery = deliveries[0]
+        delivery_id = delivery.notification_delivery_id
+        frozen_payload = dict(delivery.payload)
+        delivery_created_at = delivery.created_at
+        assert delivery.notification_route_id == route_id
+        assert delivery.event_type == "PROPOSAL_REVIEW_REQUIRED"
+        assert delivery.template_key == "proposal.review-required"
+        assert delivery.template_version == 2
+        assert delivery.object_version == 2
+        assert delivery.route_version == 1
+        assert frozen_payload["proposal_id"] == str(proposal_id)
+        assert frozen_payload["symbol"] == "BTCUSDT"
+        assert frozen_payload["estimated_notional"] == "100.000000000000000000"
+
+    async def record_first_review() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            login = await client.post(
+                "/api/auth/mock/login",
+                json={"username": "notification-proposal-reviewer"},
+            )
+            assert login.status_code == 200, login.text
+            reviewed = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={
+                    "decision": "APPROVE",
+                    "reason": "first independent review",
+                    "expected_version": 2,
+                    "idempotency_key": "notification-proposal-first-review",
+                },
+            )
+            assert reviewed.status_code == 200, reviewed.text
+            assert reviewed.json()["status"] == "PENDING_REVIEW"
+
+    asyncio.run(record_first_review())
+    assert legacy_telegram.notifications() == []
+    with database.session_factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(NotificationDelivery)
+                .where(
+                    NotificationDelivery.object_type == "Proposal",
+                    NotificationDelivery.object_id == str(proposal_id),
+                )
+            )
+            == 1
+        )
+
+    team_id = UUID(TradingQueries(database).user_context(admin)["active_team"]["team_id"])
+    duplicate = service.enqueue_notification_event(
+        actor_id=str(admin),
+        team_id=team_id,
+        event_type="PROPOSAL_REVIEW_REQUIRED",
+        payload=frozen_payload,
+        object_type="Proposal",
+        object_id=proposal_id,
+        object_version=2,
+        idempotency_key="notification-proposal-duplicate-event",
+        correlation_id=uuid4(),
+        environment="LIVE",
+        account_id="acct-1",
+        venue="BINANCE",
+        now=delivery_created_at + timedelta(seconds=1),
+    )
+    assert duplicate["notification_delivery_ids"] == [str(delivery_id)]
+    assert duplicate["route_count"] == 1
+
+    retry_sender = RetryThenSend()
+    dispatcher = NotificationDispatcher(
+        database,
+        credential_encryption_key=encryption_key(),
+        sender=retry_sender,
+        public_base_url="https://tradeops.example",
+    )
+    assert dispatcher.dispatch_one(delivery_id, now=delivery_created_at) == "RETRY_WAIT"
+    with database.session_factory() as session:
+        failed = session.get(NotificationDelivery, delivery_id)
+        assert failed is not None
+        assert failed.status == "RETRY_WAIT"
+        assert failed.sent_at is None
+        assert failed.external_delivery_id is None
+        assert failed.last_error_code == "NOTIFICATION_RATE_LIMITED"
+
+    assert (
+        dispatcher.dispatch_one(delivery_id, now=delivery_created_at + timedelta(seconds=60))
+        == "SENT"
+    )
+    assert (
+        dispatcher.dispatch_one(delivery_id, now=delivery_created_at + timedelta(seconds=61))
+        == "SKIPPED"
+    )
+    assert len(retry_sender.calls) == 2
+    channel, _configuration, card = retry_sender.calls[-1]
+    assert channel == "TELEGRAM"
+    for required in (
+        "BTCUSDT / 做多 · LONG",
+        "acct-1 / BINANCE",
+        "环境: LIVE",
+        "风险等级: 高 · HIGH",
+        "0.001 / 100 USDT",
+        str(proposal_id),
+        f"https://tradeops.example/proposals/{proposal_id}",
+    ):
+        assert required in card.text
+    expected_leverage = format(Decimal(str(frozen_payload["leverage"])).normalize(), "f")
+    assert f"杠杆: {expected_leverage}x" in card.text
+    assert "打开 Web 安全审核" in card.html
+
+    with database.session_factory() as session:
+        sent = session.get(NotificationDelivery, delivery_id)
+        assert sent is not None
+        assert sent.status == "SENT"
+        assert sent.attempt_count == 2
+        assert sent.external_delivery_id == "retry-success"
+        assert session.scalar(select(func.count()).select_from(NotificationDelivery)) == 1
+        audit_types = set(session.scalars(select(AuditEvent.event_type)).all())
+    assert "NOTIFICATION_EVENT_DEDUPLICATED" in audit_types
+    assert "NOTIFICATION_RETRY_SCHEDULED" in audit_types
+    assert "NOTIFICATION_SENT" in audit_types
+
+    restarted = service.enqueue_notification_event(
+        actor_id=str(admin),
+        team_id=team_id,
+        event_type="PROPOSAL_REVIEW_REQUIRED",
+        payload={**frozen_payload, "proposal_version": 3},
+        object_type="Proposal",
+        object_id=proposal_id,
+        object_version=3,
+        idempotency_key="notification-proposal-worker-restart",
+        correlation_id=uuid4(),
+        environment="LIVE",
+        account_id="acct-1",
+        venue="BINANCE",
+        now=delivery_created_at + timedelta(minutes=2),
+    )
+    restarted_id = UUID(restarted["notification_delivery_ids"][0])
+    with database.session_factory.begin() as session:
+        in_flight = session.get(NotificationDelivery, restarted_id)
+        assert in_flight is not None
+        in_flight.status = "SENDING"
+        in_flight.attempt_count = 1
+        in_flight.last_attempt_at = delivery_created_at
+        in_flight.updated_at = delivery_created_at
+
+    restart_sender = RecordingSender()
+    restart_dispatcher = NotificationDispatcher(
+        database,
+        credential_encryption_key=encryption_key(),
+        sender=restart_sender,
+        public_base_url="https://tradeops.example",
+    )
+    report = restart_dispatcher.dispatch_due(
+        now=delivery_created_at + timedelta(minutes=6),
+        limit=50,
+    )
+    assert report["recovered_unknown"] == 1
+    assert report["selected"] == 0
+    assert restart_sender.calls == []
+    with database.session_factory() as session:
+        unknown = session.get(NotificationDelivery, restarted_id)
+        assert unknown is not None
+        assert unknown.status == "OUTCOME_UNKNOWN"
+        assert unknown.sent_at is None
+        assert unknown.external_delivery_id is None
+        assert unknown.last_error_code == "NOTIFICATION_WORKER_INTERRUPTED"
 
 
 def test_signed_webhook_signal_and_notification_outbox_commit_once_together(

@@ -1203,7 +1203,10 @@ td { font-size: var(--font-size-control); }
 .system-health-grid { gap: var(--grid-gap); margin: var(--space-4) 0 var(--section-gap); }
 .system-health-card { padding: var(--card-padding); }
 .system-health-card > p { min-height: 38px; }
-.system-monitoring-disclosure { margin-bottom: var(--section-gap); }
+.system-status-page > .system-monitoring-disclosure {
+  margin: var(--space-3) 0 var(--section-gap);
+  padding: 0;
+}
 .notification-route-grid, .signal-source-grid, .account-detail-config-grid { gap: var(--grid-gap); }
 .notification-route-create { margin: var(--space-4) 0 var(--section-gap); }
 .notification-route-create > summary { min-height: 58px; padding: 12px 16px; }

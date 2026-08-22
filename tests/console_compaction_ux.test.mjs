@@ -9,6 +9,7 @@ const appShell = read("../src/trading_control_plane/web/app-shell.js");
 const proposals = read("../src/trading_control_plane/web/proposals.js");
 const workspace = read("../src/trading_control_plane/web/workspace.js");
 const reporting = read("../src/trading_control_plane/web/reporting.js");
+const i18n = read("../src/trading_control_plane/web/i18n.js");
 
 test("the sidebar readiness label is driven by GET /health/ready and never starts as connected", async () => {
   const source = appShell.slice(
@@ -48,4 +49,18 @@ test("compact review and normal-state copy removes repeated visible status text"
   assert.match(workspace, /'无告警'/);
   assert.doesNotMatch(reporting, /无运行告警 \/ 当前无需处理/);
   assert.match(reporting, /<h2>无告警<\/h2>/);
+});
+
+test("home keeps its permission boundary and adds the localized Webhook opportunity entry", () => {
+  const quickStart = workspace.slice(
+    workspace.indexOf("const quickStart ="),
+    workspace.indexOf("main.innerHTML =", workspace.indexOf("const quickStart =")),
+  );
+  assert.match(quickStart, /observerOnly \? '' :/);
+  assert.match(
+    quickStart,
+    /<a class="secondary" href="\/webhook-signals" data-link>查看 Webhook 机会<\/a>/,
+  );
+  assert.match(quickStart, /canPropose \? '<a class="text-link" href="\/proposals\/new"/);
+  assert.match(i18n, /'查看 Webhook 机会':'View Webhook opportunities'/);
 });
