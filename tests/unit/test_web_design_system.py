@@ -40,3 +40,46 @@ def test_web_design_tokens_are_complete_and_wcag_aa_in_both_themes() -> None:
             for background in ("bg", "panel"):
                 assert _contrast(theme[foreground], theme[background]) >= 4.5
         assert _contrast(theme["action-fg"], theme["action-bg"]) >= 4.5
+
+
+def test_compact_density_contract_covers_shell_content_and_mobile() -> None:
+    base = (WEB_ROOT / "styles-base.css").read_text()
+    components = (WEB_ROOT / "styles-components.css").read_text()
+    shell = (WEB_ROOT / "styles-shell.css").read_text()
+    api_access = (WEB_ROOT / "styles-api-access.css").read_text()
+    index = (WEB_ROOT / "index.html").read_text()
+
+    for token in (
+        "--control-height: 36px",
+        "--page-gutter: 20px",
+        "--page-top: 18px",
+        "--section-gap: 20px",
+        "--card-padding: 16px",
+        "--font-size-body: 14px",
+        "--line-height-body: 1.5",
+    ):
+        assert token in base
+
+    for rule in (
+        ".app-shell { grid-template: 60px 1fr / 248px minmax(0, 1fr); }",
+        ".main-content { padding: var(--page-top) var(--page-gutter) 48px; }",
+        ".page, .api-access-page { width: 100%; max-width: none; margin: 0; }",
+        "th, td { padding: 8px 10px; line-height: var(--line-height-meta); }",
+        ".opportunity-card { min-height: 0; padding: var(--dense-card-padding); }",
+        ".opportunity-card .link-row { margin: 0 0 var(--space-2); }",
+        "--page-gutter: 10px",
+        "--page-top: 12px",
+        ".topbar { height: 56px; min-height: 56px; }",
+    ):
+        assert rule in components
+
+    assert ".topbar { grid-template-columns: 248px" in shell
+    assert ".sidebar { top: 56px; height: calc(100dvh - 56px); }" in shell
+    assert ".api-access-page { max-width: none; }" in api_access
+    for href in (
+        "/assets/styles-base.css?v=22",
+        "/assets/styles-components.css?v=24",
+        "/assets/styles-api-access.css?v=4",
+        "/assets/styles-shell.css?v=14",
+    ):
+        assert href in index
