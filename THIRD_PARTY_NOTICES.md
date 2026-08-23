@@ -31,6 +31,7 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `annotated-doc` | `0.0.4` | Python | `MIT` |
 | `annotated-types` | `0.7.0` | Python | `MIT` |
 | `anyio` | `4.14.2` | Python | `MIT` |
+| `ast-serialize` | `0.8.0` | Python | `MIT` |
 | `asttokens` | `3.0.2` | Python | `Apache-2.0` |
 | `attrs` | `26.1.0` | Python | `MIT` |
 | `beautifulsoup4` | `4.15.0` | Python | `MIT` |
@@ -85,7 +86,7 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `msgpack` | `1.2.1` | Python | `Apache-2.0` |
 | `multidict` | `6.7.1` | Python | `Apache-2.0` |
 | `multitasking` | `0.0.13` | Python | `Apache-2.0` |
-| `mypy` | `1.20.2` | Python | `MIT` |
+| `mypy` | `2.3.1` | Python | `MIT` |
 | `mypy-extensions` | `1.1.0` | Python | `MIT` |
 | `narwhals` | `2.24.0` | Python | `MIT` |
 | `numpy` | `2.5.2` | Python | `BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0` |
@@ -149,7 +150,7 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `watchfiles` | `1.2.0` | Python | `MIT` |
 | `wcwidth` | `0.8.2` | Python | `MIT` |
 | `websocket-client` | `1.9.0` | Python | `Apache-2.0` |
-| `websockets` | `16.1` | Python | `BSD-3-Clause` |
+| `websockets` | `17.0.1` | Python | `BSD-3-Clause` |
 | `winloop` | `0.6.3` | Python | `MIT` |
 | `yarl` | `1.24.2` | Python | `Apache-2.0` |
 | `yfinance` | `1.5.2` | Python | `Apache-2.0` |
