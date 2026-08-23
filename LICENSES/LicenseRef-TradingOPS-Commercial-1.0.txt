@@ -1,6 +1,6 @@
 TradingOPS Commercial License Reference 1.0
 
-Copyright (c) 2026 COPYRIGHT_HOLDER.
+Copyright (c) 2026 Nova3322.
 
 1. Purpose
 
@@ -39,6 +39,6 @@ redistribution rights are implied by this repository reference. No person may
 represent that commercial rights have been granted without an executed
 agreement.
 
-Commercial inquiries: COMMERCIAL_EMAIL
+Commercial inquiries: gaargrg@gmail.com
 
 Do not put confidential commercial terms in a public issue.

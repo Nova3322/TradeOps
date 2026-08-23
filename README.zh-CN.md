@@ -84,7 +84,7 @@ API Key 归属于具体用户，动态继承当前 RBAC，并固定在一个工�
 需要 Python 3.12+、[uv](https://docs.astral.sh/uv/)、Docker 与 Docker Compose。
 
 ```bash
-git clone https://github.com/nineheavens223-sys/TradeOps.git
+git clone https://github.com/Nova3322/TradeOps.git
 cd TradeOps
 cp .env.example .env.local
 export TRADING_LOCAL_ADMIN_USERNAME=trading-admin
@@ -169,6 +169,6 @@ GPL-3.0-only OR LicenseRef-TradingOPS-Commercial-1.0
 
 GPL 允许商业使用、修改和分发，但传播受覆盖作品时需要遵守 GPLv3。需要闭源集成、专有分发或协商条款的用户可以选择单独商业许可证。
 
-商业许可：`COMMERCIAL_EMAIL`。安全问题请通过 `SECURITY_EMAIL` 或仓库的私有安全公告渠道报告。
+版权所有者及商业许可：`Nova3322` · `gaargrg@gmail.com`。安全问题请通过 `gaargrg@gmail.com` 或仓库的私有安全公告渠道报告。
 
 详见 [`LICENSE`](LICENSE)、[GPLv3 正文](LICENSES/GPL-3.0-only.txt)、[商业许可证说明](LICENSES/LicenseRef-TradingOPS-Commercial-1.0.txt) 和 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

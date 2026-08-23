@@ -119,7 +119,7 @@ Requirements: Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker, and Docker
 Compose.
 
 ```bash
-git clone https://github.com/nineheavens223-sys/TradeOps.git
+git clone https://github.com/Nova3322/TradeOps.git
 cd TradeOps
 cp .env.example .env.local
 export TRADING_LOCAL_ADMIN_USERNAME=trading-admin
@@ -233,9 +233,9 @@ The GPL option permits commercial use, modification, and distribution subject
 to GPLv3. Parties that need closed-source integration, proprietary distribution,
 or negotiated terms may obtain a separate commercial license.
 
-Commercial licensing: `COMMERCIAL_EMAIL`
+Copyright holder and commercial licensing: `Nova3322` · `gaargrg@gmail.com`
 
-Private security reports: `SECURITY_EMAIL` or the repository's private security
+Private security reports: `gaargrg@gmail.com` or the repository's private security
 advisory channel.
 
 See [`LICENSE`](LICENSE), [`GPL-3.0-only`](LICENSES/GPL-3.0-only.txt), the
