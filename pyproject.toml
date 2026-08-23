@@ -28,7 +28,7 @@ dependencies = [
   "requests>=2.32,<3",
   "sqlalchemy>=2.0.51,<2.1",
   "uvicorn[standard]>=0.40,<1",
-  "websockets>=15,<17",
+  "websockets>=15,<18",
 ]
 
 [project.urls]
@@ -49,7 +49,7 @@ trading-capital-worker = "trading_control_plane.capital_runtime:main"
 [dependency-groups]
 dev = [
   "httpx>=0.28,<1",
-  "mypy>=1.18,<2",
+  "mypy>=1.18,<3",
   "pytest>=9.1.1,<10",
   "pytest-cov>=7,<8",
   "ruff>=0.14,<1",
