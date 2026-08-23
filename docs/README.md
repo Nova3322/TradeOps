@@ -60,7 +60,7 @@ product claim.
 
 ## Reference
 
-- [Configuration](CONFIGURATION.md)
+- [Local configuration template](../.env.example)
 - [Publication boundary](PUBLICATION_BOUNDARY.md)
 - [Release process](RELEASING.md)
 - [Competitive positioning](COMPETITIVE_POSITIONING.md)

@@ -19,10 +19,11 @@ scan the snapshot with Gitleaks. Ignored local state is deliberately not copied
 into that snapshot.
 
 Git history is a separate publication surface. A clean prospective tree does
-not make historical credentials safe. The existing history must pass the
-redacted full-history scan and the rotation/remediation procedure in
-[`security/HISTORY_CLEANUP_PLAN.md`](security/HISTORY_CLEANUP_PLAN.md) before an
-existing-history publication is approved.
+not make historical credentials safe. Every retained public branch and tag must
+pass a full-history Gitleaks scan before a force update or release. History
+rewrites must be rehearsed in an isolated clone, backed up, mapped from old to
+new object IDs, and pushed with an exact `--force-with-lease`; unknown remote
+updates block publication.
 
 The release manager must inspect the exact candidate rather than relying on a
 developer checkout. See [`RELEASING.md`](RELEASING.md).

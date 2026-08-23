@@ -56,6 +56,20 @@ frozen proposal -> deterministic policy -> approve / review / reject
 - The application is self-hostable. Exchange credentials are encrypted at rest
   and are not returned after submission; trading adapters do not need withdrawal
   permission.
+- The public repository is the source and build boundary. After public `main`
+  CI succeeds, its release workflow builds a single GHCR OCI image index for
+  `linux/amd64` and `linux/arm64`, labels the images with the tested full source
+  SHA, version, and Schema Revision, and publishes SBOM and provenance
+  attestations. It contains no production host or deployment configuration.
+- Production deployment is a separate private-operations boundary. The private
+  Ops repository pins the public source SHA and exact multi-platform manifest
+  digest in `release.yaml`; mutable tags and short SHAs are rejected. A
+  `pending` contract remains non-deployable, and an `active` promotion requires
+  private review plus the GitHub `production` Environment approval.
+- The production host pulls by manifest digest and verifies the selected image
+  architecture and release labels before migration. GitHub Actions and systemd
+  use the same successfully staged immutable Ops revision, so a host restart
+  cannot silently return to a stale public checkout.
 - This repository does not currently package a separate Local Execution Agent
   with hard limits that a remote control plane is technically unable to bypass.
   That architecture must not be presented as an available guarantee.
