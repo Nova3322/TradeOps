@@ -62,8 +62,22 @@ test("home keeps its permission boundary and adds the localized Webhook opportun
     /<a class="secondary" href="\/webhook-signals" data-link>查看 Webhook 机会<\/a>/,
   );
   assert.match(quickStart, /canPropose \? '<a class="text-link" href="\/proposals\/new"/);
+  assert.match(quickStart, /class="stacked-actions home-quick-actions"/);
   assert.match(i18n, /'查看 Webhook 机会':'View Webhook opportunities'/);
   assert.match(i18n, /'移除':'Remove'/);
+});
+
+test("login uses the shorter live-control description and explicit internal-only warning", () => {
+  const login = workspace.slice(
+    workspace.indexOf("function renderLogin()"),
+    workspace.indexOf("function reviewerHomeWorkload"),
+  );
+  assert.match(login, /<h1>实盘交易前的控制层<\/h1>/);
+  assert.match(login, /内部系统，请勿暴露到公网/);
+  assert.doesNotMatch(login, /所有交易行为进入真实账户前的控制层/);
+  assert.match(index, /<title>TradeOps｜实盘交易前的控制层<\/title>/);
+  assert.match(i18n, /'实盘交易前的控制层':'Control layer before live trading'/);
+  assert.match(i18n, /'内部系统，请勿暴露到公网':'Internal system\. Do not expose it to the public internet\.'/);
 });
 
 test("manual proposal intent fields use one aligned responsive grid", () => {

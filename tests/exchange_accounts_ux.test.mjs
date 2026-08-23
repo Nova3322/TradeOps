@@ -35,10 +35,32 @@ test('production account cards expose the exact-account detail workflow', () => 
   );
   assert.match(routerSource, /venueAccountMatch = path\.match\(\/\^\\\/venues\\\/\(\[\^\/\]\+\)\$\/\)/);
   assert.match(routerSource, /renderVenueAccountDetail\(venueAccountMatch\[1\]\)/);
-  assert.match(indexSource, /execution\.js\?v=199/);
-  assert.match(indexSource, /shared\.js\?v=20/);
-  assert.match(indexSource, /accounts\.js\?v=184/);
-  assert.match(serviceWorkerSource, /trading-shell-v236/);
+  assert.match(indexSource, /execution\.js\?v=200/);
+  assert.match(indexSource, /shared\.js\?v=21/);
+  assert.match(indexSource, /accounts\.js\?v=185/);
+  assert.match(serviceWorkerSource, /trading-shell-v240/);
+});
+
+test('account history uses three independently filtered and paginated record lists', () => {
+  for (const marker of [
+    'data-venue-record-list="orders"',
+    "{kind:'fills', controls:fillControls}",
+    "{kind:'funding', controls:fundingControls}",
+    'data-venue-record-list="${escapeHtml(recordList.kind)}"',
+    "rootSelector,",
+    "filterSelectors:['[data-venue-record-search]','[data-venue-record-filter]']",
+    "paginationLabel:'最近委托分页'",
+    "paginationLabel:'成交历史分页'",
+    "paginationLabel:'资金费分页'",
+  ]) assert.equal(accountsSource.includes(marker), true, marker);
+  assert.match(accountsSource, /snapshotMode \? '最后快照中的委托记录' : '最近委托'/);
+  assert.doesNotMatch(accountsSource, /snapshotMode \? '最后快照中的订单记录' : '最近订单记录'/);
+});
+
+test('configured API credentials use the compact update label without changing credential fields', () => {
+  assert.match(accountsSource, /\['BINANCE','OKX','BYBIT'\]\.includes\(venue\) \? '更新 apikey' : '更新凭据'/);
+  assert.match(executionSource, /\['BINANCE','OKX','BYBIT'\]\.includes\(item\.venue\) \? '更新 apikey' : '更新凭据'/);
+  assert.match(accountsSource, /credentials\.state === 'CONFIGURED' \? exchangeCredentialUpdateLabel\(item\.venue\) : '添加加密凭据'/);
 });
 
 test('connection verification reports the unchanged current trading eligibility', () => {

@@ -203,7 +203,7 @@ def test_compact_density_contract_covers_shell_content_and_mobile() -> None:
     assert ".api-access-page { max-width: none; }" in api_access
     for href in (
         "/assets/styles-base.css?v=22",
-        "/assets/styles-components.css?v=26",
+        "/assets/styles-components.css?v=30",
         "/assets/styles-api-access.css?v=4",
         "/assets/styles-shell.css?v=15",
     ):
@@ -228,6 +228,25 @@ def test_spacing_regression_contract_uses_the_final_stylesheet_cascade() -> None
     home = """
         <html><body><div class="home-layout"><section></section><aside id="target"></aside></div>
         </body></html>
+    """
+    home_actions = """
+        <html><body><article class="home-quick-start">
+          <div id="quick-actions" class="stacked-actions home-quick-actions">
+            <a class="secondary">Perptape</a><a class="secondary">Webhook</a>
+            <a id="manual-action" class="text-link">Manual</a>
+          </div>
+        </article></body></html>
+    """
+    account_grids = """
+        <html><body>
+          <div id="account-list" class="mode-account-grid"><article></article></div>
+          <div id="account-detail" class="account-detail-config-grid"><article></article></div>
+        </body></html>
+    """
+    venue_record_tools = """
+        <html><body><div id="record-tools" class="proposal-list-tools venue-record-tools">
+          <label>Search<input></label><label>Status<select></select></label><span>7 / 7</span>
+        </div></body></html>
     """
     system = """
         <html><body>
@@ -312,6 +331,32 @@ def test_spacing_regression_contract_uses_the_final_stylesheet_cascade() -> None
     for width in (1440, 390):
         assert _effective_css_value(home, "#target", "margin-top", width) == "var(--space-5)"
         assert _effective_css_value(home, "#target", "padding-top", width) == "0"
+    for width in (1440, 1024):
+        assert _effective_css_value(home_actions, "#quick-actions", "display", width) == "flex"
+        assert _effective_css_value(home_actions, "#quick-actions", "gap", width) == (
+            "var(--space-1)"
+        )
+        assert _effective_css_value(home_actions, ".secondary", "padding-left", width) == (
+            "var(--space-2)"
+        )
+    assert _effective_css_value(home_actions, "#quick-actions", "display", 390) == "grid"
+    assert _effective_css_value(home_actions, "#quick-actions", "grid-template-columns", 390) == (
+        "1fr"
+    )
+    for width in (1440, 1024, 390):
+        assert _effective_css_value(account_grids, "#account-list", "align-items", width) == (
+            "start"
+        )
+        assert _effective_css_value(account_grids, "#account-detail", "align-items", width) == (
+            "start"
+        )
+    for width in (1440, 1024):
+        assert _effective_css_value(
+            venue_record_tools, "#record-tools", "grid-template-columns", width
+        ) == "minmax(220px, 1fr) minmax(140px, 190px) max-content"
+        assert _effective_css_value(
+            venue_record_tools, "#record-tools > span", "grid-column", width
+        ) == "auto"
     assert _effective_css_value(system, "#target", "margin-bottom", 1440) == (
         "var(--section-gap)"
     )

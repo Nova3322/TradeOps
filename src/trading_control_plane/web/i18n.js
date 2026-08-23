@@ -124,7 +124,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '链接可能已失效，请从当前任务重新进入。':'The link may have expired. Return to Current tasks and try again.', '返回提案列表':'Back to proposals',
   '流程已终止':'Workflow ended', '提案已到期':'Proposal expired', '该提案不能继续扩大风险。条件改变后需创建新提案。':'This proposal cannot add more risk. Create a new proposal if conditions change.',
   '这里保留已进入交易任务的提案、启动窗口已过期的批准记录，以及已过期或已拒绝记录；仍可启动的提案留在当前列表。':'This history keeps proposals that entered a trade, approved proposals whose launch window expired, and expired or rejected records. Proposals that can still launch remain in the current list.',
-  '进入交易控制台':'Open Trading Console', '让自动化交易先经过规则、审批和审计':'Put policy, approval, and audit before automated trading', '所有交易行为进入真实账户前的控制层':'Control every trade before it reaches an exchange account.', '账户密码验证':'Account password',
+  '进入交易控制台':'Open Trading Console', '让自动化交易先经过规则、审批和审计':'Put policy, approval, and audit before automated trading', '实盘交易前的控制层':'Control layer before live trading', '内部系统，请勿暴露到公网':'Internal system. Do not expose it to the public internet.', '账户密码验证':'Account password',
   '账户':'Account', '密码':'Password', '登录':'Sign in', '登录控制台':'Sign in to the console', '请输入账户名':'Enter your account name',
   '请输入密码':'Enter your password', '用户名或密码不正确。':'Incorrect account name or password.',
   '登录尝试过多，请稍后再试。':'Too many sign-in attempts. Try again later.',
@@ -504,7 +504,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '当前连接不可用，以下仅为最后一次保存快照':'The current connection is unavailable; the data below is the last saved snapshot',
   '这些余额、仓位、订单与成交不能作为实时交易依据。恢复只读连接并完成新一轮同步后，页面才会重新标记为当前事实。':'These balances, positions, orders, and fills are not live trading facts. The page returns to current status only after the read-only connection and a fresh sync recover.',
   '当前账户没有持仓；零仓位行情不会冒充当前仓位。':'There are no open positions. Zero-position market observations are not shown as positions.',
-  '当前账户没有未完成委托。':'There are no open orders.', '最近订单记录':'Recent order history', '查看记录':'View history',
+  '当前账户没有未完成委托。':'There are no open orders.', '查看记录':'View history',
   '最后快照中的仓位与风险保护':'Positions and protection in the last snapshot',
   '最后一次保存快照中没有持仓；这不能确认当前账户仍为空仓。':'The last saved snapshot has no position; this does not confirm that the account is currently flat.',
   '最后快照中的委托':'Orders in the last snapshot',
@@ -801,7 +801,8 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '例如 team-risk-2026-08-v1':'For example team-risk-2026-08-v1', '例如 提案审核群':'For example Proposal review group', '由 BotFather 签发':'Issued by BotFather', '不会回显':'Never displayed again',
   '例如 TradingView BTC':'For example TradingView BTC', '例如 kelly':'For example kelly', '例如 reviewer-li':'For example reviewer-li',
   // Expanded administrative forms.
-  '账户 ID':'Account ID', '账户 ID（创建后不可修改）':'Account ID (immutable after creation)', '显示名称':'Display name', '账户名称':'Account name', '保存名称':'Save name', '更新 / 轮换凭据':'Update / rotate credentials', '编辑与凭据':'Edit and credentials', '敏感字段只用于轮换，永不回显':'Sensitive fields are used only for rotation and are never displayed', '账户 ID 创建后不可修改；账户名称可随时更新':'The account ID is immutable after creation; the account name can be updated', '同时填写精确账户 ID 和账户名称':'Enter the exact account ID and account name together', '凭据':'Credentials', '最近验证':'Latest verification', '尚未验证':'Not verified', '交易状态':'Trading status', '运行同步':'Runtime sync', '未绑定':'Not bound', '连接测试':'Test connection',
+  '账户 ID':'Account ID', '账户 ID（创建后不可修改）':'Account ID (immutable after creation)', '显示名称':'Display name', '账户名称':'Account name', '保存名称':'Save name', '更新 apikey':'Update API key', '更新凭据':'Update credentials', '编辑与凭据':'Edit and credentials', '敏感字段只用于轮换，永不回显':'Sensitive fields are used only for rotation and are never displayed', '账户 ID 创建后不可修改；账户名称可随时更新':'The account ID is immutable after creation; the account name can be updated', '同时填写精确账户 ID 和账户名称':'Enter the exact account ID and account name together', '凭据':'Credentials', '最近验证':'Latest verification', '尚未验证':'Not verified', '交易状态':'Trading status', '运行同步':'Runtime sync', '未绑定':'Not bound', '连接测试':'Test connection',
+  '最近委托':'Recent orders', '最后快照中的委托记录':'Order records in the last snapshot', '搜索记录':'Search records', '订单号 / 标的':'Order ID / instrument', '成交编号 / 标的':'Fill ID / instrument', '支付编号 / 标的':'Payment ID / instrument', '订单状态':'Order status', '最近委托分页':'Recent-order pagination', '成交历史分页':'Fill-history pagination', '资金费分页':'Funding pagination', '没有符合条件的委托':'No orders match these filters', '没有符合条件的成交记录':'No fills match these filters', '没有符合条件的资金费记录':'No funding records match these filters',
   '连接诊断':'Connection diagnostic', '连接测试成功；交易能力仍保持关闭':'Connection test succeeded; trading capability remains disabled', '连接测试成功；交易资格未改变，当前已开启':'Connection test succeeded; trading eligibility was unchanged and is currently enabled', '连接测试成功；交易资格未改变，当前保持关闭':'Connection test succeeded; trading eligibility was unchanged and remains disabled',
   '← 返回账户列表':'← Back to accounts', '返回账户列表':'Back to accounts', '账户不存在或不在当前空间':'Account not found in the current workspace', '请返回账户列表，选择当前身份可见的账户。':'Return to the account list and select an account available to your role.', '当前空间内的精确账户配置、连接状态与历史快照。':'Exact-account configuration, connection status, and historical snapshots for the current workspace.', '刷新当前状态':'Refresh current status', '删除实盘账户':'Delete Production account', '账户设置':'Account settings', '连接与凭据':'Connection and credentials', '凭据配置与轮换':'Credential setup and rotation', '凭据尚未配置':'Credentials not configured', '配置后仍需单独验证连接。':'The connection must still be verified separately after setup.', '凭据写入 AES-256-GCM 加密信封，页面和 API 只返回脱敏元数据；轮换后连接会重置为待验证。':'Credentials are stored in an AES-256-GCM encrypted envelope. The page and API return redacted metadata only; rotation resets connection verification.', '添加加密凭据':'Add encrypted credentials',
   '连接与连续同步':'Connection and continuous sync', '只读连接待验证':'Read-only connection pending verification', '最近验证成功':'Latest successful verification', '连续同步':'Continuous sync', '交易资格':'Trading eligibility', '保持关闭':'Kept off', '验证只读连接':'Verify read-only connection', '先添加加密凭据，再运行连接验证。':'Add encrypted credentials before running connection verification.', '启用连续只读同步':'Enable continuous read-only sync', '先完成当前凭据版本的只读连接验证。':'Verify the current credential version first.', 'Worker 与交易资格高级设置':'Advanced worker and trading-eligibility settings', '账户状态及历史快照':'Account status and historical snapshots', '连接与数据':'Connection and data', '连接受限；以下数据不是实时事实':'Connection limited; the data below is not live', '查看技术分类':'View technical category',
@@ -1123,8 +1124,8 @@ const localizedText = (value) => currentLanguage === 'en' ? translateEnglishText
 function applyLanguageToDocument(root = document.body) {
   document.documentElement.lang = currentLanguage;
   document.title = currentLanguage === 'en'
-    ? 'TradeOps | Control every trade before it reaches an exchange account'
-    : 'TradeOps｜所有交易行为进入真实账户前的控制层';
+    ? 'TradeOps | Control layer before live trading'
+    : 'TradeOps｜实盘交易前的控制层';
   if (currentDate) {
     currentDate.dateTime = new Date().toISOString().slice(0, 10);
     currentDate.textContent = new Intl.DateTimeFormat(currentLanguage, {

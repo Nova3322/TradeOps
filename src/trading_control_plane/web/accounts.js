@@ -28,6 +28,10 @@ function exchangeAccountRuntimeHealth(runtime, item) {
   return runtime?.data?.source_health?.[`${item.venue}:${item.account_id}`] || null;
 }
 
+function exchangeCredentialUpdateLabel(venue) {
+  return ['BINANCE','OKX','BYBIT'].includes(venue) ? '更新 apikey' : '更新凭据';
+}
+
 function exchangeAccountDetailConfiguration(item) {
   const credentials = item.credentials || {};
   const permissions = item.permissions || {};
@@ -51,7 +55,7 @@ function exchangeAccountDetailConfiguration(item) {
     ? `<form class="exchange-runtime-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-version="${item.version}" data-enabled="${runtimeBound ? 'true' : 'false'}"><button class="secondary" type="submit" aria-describedby="${runtimeHelpId}" ${canConfigureRuntime ? '' : 'disabled'}>${runtimeBound ? '停用连续只读同步' : '启用连续只读同步'}</button><small id="${runtimeHelpId}">${escapeHtml(runtimeReason)}</small><div class="form-error" role="alert"></div></form>`
     : '';
   const credentialControl = permissions.can_manage_credentials
-    ? `<form class="exchange-credential-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-venue="${escapeHtml(item.venue)}" data-version="${item.version}"><div class="field-grid">${exchangeCredentialFields(item.venue)}</div><p class="safety-note">凭据写入 AES-256-GCM 加密信封，页面和 API 只返回脱敏元数据；轮换后连接会重置为待验证。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">${credentials.state === 'CONFIGURED' ? '轮换加密凭据' : '添加加密凭据'}</button></div></form>`
+    ? `<form class="exchange-credential-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-venue="${escapeHtml(item.venue)}" data-version="${item.version}"><div class="field-grid">${exchangeCredentialFields(item.venue)}</div><p class="safety-note">凭据写入 AES-256-GCM 加密信封，页面和 API 只返回脱敏元数据；轮换后连接会重置为待验证。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">${credentials.state === 'CONFIGURED' ? exchangeCredentialUpdateLabel(item.venue) : '添加加密凭据'}</button></div></form>`
     : '<p class="subtle">当前身份只可查看脱敏凭据状态。</p>';
   const workerHelpId = `freqtrade-help-${item.exchange_account_id}`;
   const workerVerifyReason = !permissions.can_manage_worker ? '当前角色没有该账户范围的凭据管理权限。' : !workerConfigured ? '先保存当前账户专属 Worker，再运行无下单验证。' : !item.active ? '账户已停用，Worker 验证被阻断。' : '核对交易所、期货模式与精确账户绑定，不发送订单。';
@@ -376,8 +380,36 @@ async function renderVenueAccountDetail(requestedAccountId) {
     <div id="history">${venueFactSections(facts, {snapshotMode, historyIncomplete})}</div></section></section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
   bindExchangeAccountForms();
+  bindVenueRecordLists();
   const detailTarget = location.hash ? document.getElementById(location.hash.slice(1)) : null;
   detailTarget?.scrollIntoView({block:'start'});
+}
+
+function venueRecordControls({total, searchPlaceholder, filterLabel, options, paginationLabel, emptyTitle}) {
+  return {
+    tools:`<div class="proposal-list-tools venue-record-tools"><label>搜索记录<input data-venue-record-search type="search" placeholder="${escapeHtml(searchPlaceholder)}"></label><label>${escapeHtml(filterLabel)}<select data-venue-record-filter><option value="">全部</option>${options.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join('')}</select></label><span role="status" aria-live="polite"><b data-venue-record-visible-count>${Math.min(total, 50)}</b> / <b data-venue-record-count>${total}</b> 个结果</span></div>`,
+    footer:`${recordPaginationMarkup(total, paginationLabel)}<section class="empty-state compact-empty" data-venue-record-empty hidden><div><h2>${escapeHtml(emptyTitle)}</h2><p>请清除搜索或调整筛选。</p></div></section>`,
+  };
+}
+
+function bindVenueRecordLists() {
+  document.querySelectorAll('[data-venue-record-list]').forEach(root => {
+    const rootSelector = `[data-venue-record-list="${root.dataset.venueRecordList}"]`;
+    bindRecordList({
+      rootSelector,
+      rowSelector:'[data-venue-record-row]',
+      filterSelectors:['[data-venue-record-search]','[data-venue-record-filter]'],
+      matches:row => {
+        const query = root.querySelector('[data-venue-record-search]')?.value.toLowerCase().trim() || '';
+        const filter = root.querySelector('[data-venue-record-filter]')?.value || '';
+        return (!query || row.dataset.search.includes(query))
+          && (!filter || row.dataset.filter === filter);
+      },
+      emptySelector:'[data-venue-record-empty]',
+      visibleCountSelector:'[data-venue-record-visible-count]',
+      totalCountSelector:'[data-venue-record-count]',
+    });
+  });
 }
 
 function venueFactSections(facts, {snapshotMode = false, historyIncomplete = false} = {}) {
@@ -385,11 +417,11 @@ function venueFactSections(facts, {snapshotMode = false, historyIncomplete = fal
   const activeOrderRows = facts.orders.filter(item => !['FILLED','CANCELLED','REJECTED','EXPIRED'].includes(item.status));
   const historicalOrderRows = facts.orders.filter(item => ['FILLED','CANCELLED','REJECTED','EXPIRED'].includes(item.status));
   const positions = positionRows.map(item => `<tr><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="数量 / 入场">${fmtNumber(item.quantity)} @ ${fmtNumber(item.average_entry_price)}</td><td data-label="标记价">${fmtNumber(item.mark_price)}</td><td data-label="数据状态">${escapeHtml(snapshotMode ? '历史快照' : factStatusLabel(item.fact_status))}</td><td data-label="保护">${item.protection ? `${escapeHtml(fmtStatus(item.protection.status))} · ${item.protection.fully_covered ? '足额' : '不足'}` : '无保护数据'}</td><td data-label="更新时间">${fmtDate(item.observed_at)}</td></tr>`).join('');
-  const renderOrderRows = items => items.map(item => `<tr><td data-label="交易所订单">${escapeHtml(item.venue_order_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="状态">${escapeHtml(fmtStatus(item.status))}</td><td data-label="成交 / 委托">${fmtNumber(item.filled_quantity)} / ${fmtNumber(item.ordered_quantity)}</td><td data-label="关联操作">${item.intent_id ? shortId(item.intent_id) : '外部未关联'}</td><td data-label="更新时间">${fmtDate(item.observed_at)}</td></tr>`).join('');
+  const renderOrderRows = (items, historical = false) => items.map(item => `<tr ${historical ? `data-venue-record-row data-search="${escapeHtml(`${item.venue_order_id} ${item.symbol} ${item.intent_id || ''}`.toLowerCase())}" data-filter="${escapeHtml(item.status)}"` : ''}><td data-label="交易所订单">${escapeHtml(item.venue_order_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="状态">${escapeHtml(fmtStatus(item.status))}</td><td data-label="成交 / 委托">${fmtNumber(item.filled_quantity)} / ${fmtNumber(item.ordered_quantity)}</td><td data-label="关联操作">${item.intent_id ? shortId(item.intent_id) : '外部未关联'}</td><td data-label="更新时间">${fmtDate(item.observed_at)}</td></tr>`).join('');
   const orders = renderOrderRows(activeOrderRows);
-  const orderHistory = renderOrderRows(historicalOrderRows);
-  const fills = facts.fills.map(item => `<tr><td data-label="成交编号">${escapeHtml(item.venue_fill_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="方向 / 数量">${escapeHtml(fmtSide(item.side))} ${fmtNumber(item.quantity)}</td><td data-label="价格">${fmtNumber(item.price)}</td><td data-label="手续费">${fmtNumber(item.fee)} ${escapeHtml(item.fee_currency)}</td><td data-label="成交时间">${fmtDate(item.executed_at)}</td></tr>`).join('');
-  const funding = facts.funding.map(item => `<tr><td data-label="支付编号">${escapeHtml(item.venue_payment_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="金额">${fmtNumber(item.amount)} ${escapeHtml(item.currency)}</td><td data-label="支付时间">${fmtDate(item.paid_at)}</td></tr>`).join('');
+  const orderHistory = renderOrderRows(historicalOrderRows, true);
+  const fills = facts.fills.map(item => `<tr data-venue-record-row data-search="${escapeHtml(`${item.venue_fill_id} ${item.symbol} ${item.fee_currency}`.toLowerCase())}" data-filter="${escapeHtml(item.side)}"><td data-label="成交编号">${escapeHtml(item.venue_fill_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="方向 / 数量">${escapeHtml(fmtSide(item.side))} ${fmtNumber(item.quantity)}</td><td data-label="价格">${fmtNumber(item.price)}</td><td data-label="手续费">${fmtNumber(item.fee)} ${escapeHtml(item.fee_currency)}</td><td data-label="成交时间">${fmtDate(item.executed_at)}</td></tr>`).join('');
+  const funding = facts.funding.map(item => `<tr data-venue-record-row data-search="${escapeHtml(`${item.venue_payment_id} ${item.symbol} ${item.currency}`.toLowerCase())}" data-filter="${escapeHtml(item.currency)}"><td data-label="支付编号">${escapeHtml(item.venue_payment_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="金额">${fmtNumber(item.amount)} ${escapeHtml(item.currency)}</td><td data-label="支付时间">${fmtDate(item.paid_at)}</td></tr>`).join('');
   const reconciliation = facts.reconciliation;
   const positionTitle = snapshotMode ? '最后快照中的仓位与风险保护' : '当前仓位与风险保护';
   const positionEmpty = snapshotMode ? '最后一次保存快照中没有持仓；这不能确认当前账户仍为空仓。' : '当前账户没有持仓；零仓位行情不会冒充当前仓位。';
@@ -402,16 +434,21 @@ function venueFactSections(facts, {snapshotMode = false, historyIncomplete = fal
   const fillEmpty = snapshotMode ? '最后一次保存快照中没有成交记录；这不代表连接中断后没有成交。' : historyIncomplete ? '当前没有已保存的成交；这不代表交易所没有历史成交。' : '当前没有已保存的成交记录。';
   const fundingTitle = snapshotMode ? '最后快照中的资金费' : historyIncomplete ? '已保存资金费' : '资金费';
   const fundingEmpty = snapshotMode ? '最后一次保存快照中没有资金费记录；这不代表连接中断后没有资金费。' : historyIncomplete ? '当前没有已保存的资金费；这不代表交易所没有历史资金费。' : '当前没有已保存的资金费记录。';
+  const orderHistoryControls = venueRecordControls({total:historicalOrderRows.length, searchPlaceholder:'订单号 / 标的', filterLabel:'订单状态', options:['FILLED','CANCELLED','REJECTED','EXPIRED'].map(status => [status, fmtStatus(status)]), paginationLabel:'最近委托分页', emptyTitle:'没有符合条件的委托'});
+  const fillControls = venueRecordControls({total:facts.fills.length, searchPlaceholder:'成交编号 / 标的', filterLabel:'方向', options:[['BUY', fmtSide('BUY')],['SELL', fmtSide('SELL')]], paginationLabel:'成交历史分页', emptyTitle:'没有符合条件的成交记录'});
+  const fundingCurrencies = [...new Set(facts.funding.map(item => item.currency).filter(Boolean))].sort();
+  const fundingControls = venueRecordControls({total:facts.funding.length, searchPlaceholder:'支付编号 / 标的', filterLabel:'币种', options:fundingCurrencies.map(currency => [currency, currency]), paginationLabel:'资金费分页', emptyTitle:'没有符合条件的资金费记录'});
   return `<div class="stats"><div class="stat"><small>权益</small><b>${fmtNumber(facts.equity?.equity)} ${escapeHtml(facts.equity?.currency || '')}</b></div><div class="stat"><small>可用余额</small><b>${fmtNumber(facts.equity?.available_balance)} ${escapeHtml(facts.equity?.currency || '')}</b></div><div class="stat"><small>权益状态</small><b style="font-size:14px">${escapeHtml(snapshotMode ? '历史快照' : factStatusLabel(facts.equity?.fact_status))}</b></div><div class="stat"><small>最近对账</small><b style="font-size:14px" class="${reconciliation?.status === 'MATCH' && !snapshotMode ? 'direction-long' : reconciliation ? 'warning-text' : ''}">${escapeHtml(reconciliation ? snapshotMode ? '历史结果' : fmtStatus(reconciliation.status) : '未运行')}</b><span>${fmtDate(reconciliation?.completed_at)}</span></div></div>
     ${reconciliation?.differences?.length ? `<article class="danger-note"><b>${snapshotMode ? '最后快照的对账差异' : '对账差异'}</b><ul>${reconciliation.differences.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></article>` : ''}
     ${factTable(positionTitle, '<th>标的</th><th>数量 / 入场</th><th>标记价</th><th>数据状态</th><th>保护</th><th>更新时间</th>', positions, positionEmpty, snapshotMode)}
     ${factTable(orderTitle, '<th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th>', orders, orderEmpty, snapshotMode)}
-    ${orderHistory ? `<details class="operation-toolbox venue-order-history"><summary><span><b>${snapshotMode ? '最后快照中的订单记录' : '最近订单记录'}</b><small>${escapeHtml(orderHistoryDescription)}</small></span><strong>查看记录</strong></summary><div class="toolbox-content"><div class="table-scroll-hint venue-fact-scroll-hint">左右滑动查看完整订单记录</div><div class="table-wrap is-scrollable venue-fact-table"><table><thead><tr><th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th></tr></thead><tbody>${orderHistory}</tbody></table></div></div></details>` : ''}
+    ${orderHistory ? `<details class="operation-toolbox venue-order-history"><summary><span><b>${snapshotMode ? '最后快照中的委托记录' : '最近委托'}</b><small>${escapeHtml(orderHistoryDescription)}</small></span><strong>查看记录</strong></summary><div class="toolbox-content venue-record-list" data-venue-record-list="orders">${orderHistoryControls.tools}<div class="table-scroll-hint venue-fact-scroll-hint">左右滑动查看完整委托记录</div><div class="table-wrap is-scrollable venue-fact-table"><table><thead><tr><th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th></tr></thead><tbody>${orderHistory}</tbody></table></div>${orderHistoryControls.footer}</div></details>` : ''}
     ${historyIncomplete ? '<article class="callout venue-history-warning"><b>历史记录尚未补全</b><p>以下成交与资金费只代表已经保存的记录，不能据此判断完整历史；余额、仓位和当前委托不受影响。</p></article>' : ''}
-    ${factTable(fillTitle, '<th>成交编号</th><th>标的</th><th>方向 / 数量</th><th>价格</th><th>手续费</th><th>成交时间</th>', fills, fillEmpty, snapshotMode || historyIncomplete)}
-    ${factTable(fundingTitle, '<th>支付编号</th><th>标的</th><th>金额</th><th>支付时间</th>', funding, fundingEmpty, snapshotMode || historyIncomplete)}`;
+    ${factTable(fillTitle, '<th>成交编号</th><th>标的</th><th>方向 / 数量</th><th>价格</th><th>手续费</th><th>成交时间</th>', fills, fillEmpty, snapshotMode || historyIncomplete, {kind:'fills', controls:fillControls})}
+    ${factTable(fundingTitle, '<th>支付编号</th><th>标的</th><th>金额</th><th>支付时间</th>', funding, fundingEmpty, snapshotMode || historyIncomplete, {kind:'funding', controls:fundingControls})}`;
 }
 
-function factTable(title, headers, rows, emptyCopy = '当前没有已保存的数据。', emptyAttention = false) {
-  return `<section><h2>${escapeHtml(title)}</h2>${rows ? `<div class="table-scroll-hint venue-fact-scroll-hint">左右滑动查看完整${escapeHtml(title)}</div><div class="table-wrap is-scrollable venue-fact-table"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="callout ${emptyAttention ? 'tone-attention' : ''}">${escapeHtml(emptyCopy)}</div>`}</section>`;
+function factTable(title, headers, rows, emptyCopy = '当前没有已保存的数据。', emptyAttention = false, recordList = null) {
+  const table = `<div class="table-scroll-hint venue-fact-scroll-hint">左右滑动查看完整${escapeHtml(title)}</div><div class="table-wrap is-scrollable venue-fact-table"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>`;
+  return `<section><h2>${escapeHtml(title)}</h2>${rows ? recordList ? `<div class="venue-record-list" data-venue-record-list="${escapeHtml(recordList.kind)}">${recordList.controls.tools}${table}${recordList.controls.footer}</div>` : table : `<div class="callout ${emptyAttention ? 'tone-attention' : ''}">${escapeHtml(emptyCopy)}</div>`}</section>`;
 }
