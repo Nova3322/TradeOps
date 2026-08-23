@@ -20,8 +20,8 @@ The machine-readable dependency inventory is `sbom.cdx.json` (CycloneDX 1.5).
 | `abitype` | `1.2.3` | Node.js | `MIT` |
 | `eventemitter3` | `5.0.1` | Node.js | `MIT` |
 | `isows` | `1.0.7` | Node.js | `MIT` |
-| `ox` | `0.14.33` | Node.js | `MIT` |
-| `viem` | `2.55.10` | Node.js | `MIT` |
+| `ox` | `0.14.34` | Node.js | `MIT` |
+| `viem` | `2.55.19` | Node.js | `MIT` |
 | `ws` | `8.21.0` | Node.js | `MIT` |
 | `aiohappyeyeballs` | `2.7.1` | Python | `PSF-2.0` |
 | `aiohttp` | `3.14.3` | Python | `Apache-2.0 AND MIT` |

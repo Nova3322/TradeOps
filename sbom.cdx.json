@@ -2,7 +2,7 @@
   "$schema": "http://cyclonedx.org/schema/bom-1.5.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:8ac2f182-5c77-51fc-bbed-fd471da642ad",
+  "serialNumber": "urn:uuid:6545b16d-fcc3-52c8-82a0-f43c73360c28",
   "version": 1,
   "metadata": {
     "component": {
@@ -19,7 +19,7 @@
     "properties": [
       {
         "name": "tradingops:lock-sha256",
-        "value": "db94be426539c6bcd072704c83e32b8392e15f74de52d897fb4244cd94915a43"
+        "value": "bbb82152fb2c0c7bf5112dddda4cbe65a2bc8b9fc80e5e4ebaa524e97b15285d"
       },
       {
         "name": "tradingops:generation",
@@ -473,12 +473,12 @@
       ]
     },
     {
-      "bom-ref": "ox@0.14.33",
+      "bom-ref": "ox@0.14.34",
       "type": "library",
       "name": "ox",
-      "version": "0.14.33",
+      "version": "0.14.34",
       "scope": "required",
-      "purl": "pkg:npm/ox@0.14.33",
+      "purl": "pkg:npm/ox@0.14.34",
       "properties": [
         {
           "name": "cdx:npm:package:path",
@@ -492,13 +492,13 @@
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/ox/-/ox-0.14.33.tgz"
+          "url": "https://registry.npmjs.org/ox/-/ox-0.14.34.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ae8a00ff8a3b6c1a1fe067b6547fdea2f7cd3dbfc0104632acd8f4df0820739e60e47643f0f8ecfce79686db608e273774372a9f4af6f5b0eebd011d4e251e99"
+          "content": "d76b1e38893b76ff1e02819085c59a78a671373df4e0855c0ef6fd53963b25900455edb5366d583312e38566a1facbb9043e0e9b1e19cf4cf9c778a3f4ce0661"
         }
       ],
       "licenses": [
@@ -510,12 +510,12 @@
       ]
     },
     {
-      "bom-ref": "viem@2.55.10",
+      "bom-ref": "viem@2.55.19",
       "type": "library",
       "name": "viem",
-      "version": "2.55.10",
+      "version": "2.55.19",
       "scope": "required",
-      "purl": "pkg:npm/viem@2.55.10",
+      "purl": "pkg:npm/viem@2.55.19",
       "properties": [
         {
           "name": "cdx:npm:package:path",
@@ -529,13 +529,13 @@
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/viem/-/viem-2.55.10.tgz"
+          "url": "https://registry.npmjs.org/viem/-/viem-2.55.19.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "43d05afbf99af35536339a393f6010ed4c7cad323098266f51cafcaca750db66d5d080451e594cda6e605833fc8456943769c7da85b7406e386a645acdf95835"
+          "content": "e103c85f47983cbb0e064e7734ab3054c910a31b8fec694e067078c0ce9d903a244443b840434d7376e6c8f28ad4f0535625e1d133c90872e322e536d108b77e"
         }
       ],
       "licenses": [
@@ -3016,7 +3016,7 @@
     {
       "ref": "@notilt/sdk@0.2.0",
       "dependsOn": [
-        "viem@2.55.10"
+        "viem@2.55.19"
       ]
     },
     {
@@ -3448,7 +3448,7 @@
       "ref": "orjson-68@3.11.9"
     },
     {
-      "ref": "ox@0.14.33",
+      "ref": "ox@0.14.34",
       "dependsOn": [
         "@adraffy/ens-normalize@1.11.1",
         "@noble/ciphers@1.3.0",
@@ -3796,7 +3796,7 @@
         "narwhals-66@2.24.0",
         "numpy-67@2.5.2",
         "orjson-68@3.11.9",
-        "ox@0.14.33",
+        "ox@0.14.34",
         "packaging-69@26.2",
         "pandas-70@2.3.3",
         "parsimonious-71@0.10.0",
@@ -3853,7 +3853,7 @@
         "urllib3-122@2.7.0",
         "uvicorn-123@0.51.0",
         "uvloop-124@0.22.1",
-        "viem@2.55.10",
+        "viem@2.55.19",
         "watchfiles-125@1.2.0",
         "wcwidth-126@0.8.2",
         "websocket-client-127@1.9.0",
@@ -3900,7 +3900,7 @@
       "ref": "uvloop-124@0.22.1"
     },
     {
-      "ref": "viem@2.55.10",
+      "ref": "viem@2.55.19",
       "dependsOn": [
         "@noble/curves@1.9.1",
         "@noble/hashes@1.8.0",
@@ -3908,7 +3908,7 @@
         "@scure/bip39@1.6.0",
         "abitype@1.2.3",
         "isows@1.0.7",
-        "ox@0.14.33",
+        "ox@0.14.34",
         "ws@8.21.0"
       ]
     },
