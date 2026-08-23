@@ -34,6 +34,7 @@ def test_image_publication_is_immutable_and_records_release_metadata() -> None:
     assert "SOURCE_SHA=${{ steps.release.outputs.source_sha }}" in workflow
     assert "VERSION=${{ steps.release.outputs.version }}" in workflow
     assert "SCHEMA_REVISION=${{ steps.release.outputs.schema_revision }}" in workflow
+    assert "platforms: linux/amd64,linux/arm64" in workflow
     assert "provenance: mode=max" in workflow
     assert "sbom: true" in workflow
     assert "subject-digest: ${{ steps.build.outputs.digest }}" in workflow
