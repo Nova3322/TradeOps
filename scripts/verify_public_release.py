@@ -38,12 +38,13 @@ SECRET_NAME = re.compile(
 PRIVATE_PATH = re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+/")
 REPOSITORY_PLACEHOLDER = re.compile("OWNER" + "/" + "REPOSITORY" + "|" + "REPOSITORY" + "_" + "URL")
 REQUIRED_IDENTITY_TEXT = {
-    "LICENSE": ("COPYRIGHT_HOLDER", "COMMERCIAL_EMAIL"),
-    "NOTICE": ("COPYRIGHT_HOLDER", "COMMERCIAL_EMAIL"),
-    "SECURITY.md": ("SECURITY_EMAIL", "nineheavens223-sys/TradeOps"),
-    "SUPPORT.md": ("COMMERCIAL_EMAIL", "SECURITY_EMAIL"),
-    "README.md": ("nineheavens223-sys/TradeOps.git",),
-    "README.zh-CN.md": ("nineheavens223-sys/TradeOps.git",),
+    "LICENSE": ("Nova3322", "gaargrg@gmail.com"),
+    "NOTICE": ("Nova3322", "gaargrg@gmail.com"),
+    "CLA.md": ("Nova3322",),
+    "SECURITY.md": ("gaargrg@gmail.com", "Nova3322/TradeOps"),
+    "SUPPORT.md": ("gaargrg@gmail.com",),
+    "README.md": ("Nova3322/TradeOps.git", "gaargrg@gmail.com"),
+    "README.zh-CN.md": ("Nova3322/TradeOps.git", "gaargrg@gmail.com"),
 }
 FORBIDDEN_GATES = {
     "TRADING_AUTO_ADD_ENABLED",

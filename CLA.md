@@ -2,7 +2,7 @@
 
 Version 1.0
 
-Project licensing entity: COPYRIGHT_HOLDER
+Project licensing entity: Nova3322
 
 This CLA preserves contributor ownership while allowing TradingOPS to remain
 available under both GPL-3.0-only and separately negotiated commercial terms.
