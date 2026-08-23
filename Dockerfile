@@ -8,6 +8,16 @@ RUN npm ci --omit=dev --ignore-scripts
 
 FROM python:3.12.11-slim-bookworm
 
+ARG SOURCE_SHA=development
+ARG VERSION=0.1.0
+ARG SCHEMA_REVISION=development
+
+LABEL org.opencontainers.image.source="https://github.com/Nova3322/TradeOps" \
+      org.opencontainers.image.revision="${SOURCE_SHA}" \
+      org.opencontainers.image.version="${VERSION}" \
+      io.tradeops.source-sha="${SOURCE_SHA}" \
+      io.tradeops.schema-revision="${SCHEMA_REVISION}"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
