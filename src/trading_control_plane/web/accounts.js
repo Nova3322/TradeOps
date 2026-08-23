@@ -28,6 +28,10 @@ function exchangeAccountRuntimeHealth(runtime, item) {
   return runtime?.data?.source_health?.[`${item.venue}:${item.account_id}`] || null;
 }
 
+function exchangeCredentialUpdateLabel(venue) {
+  return ['BINANCE','OKX','BYBIT'].includes(venue) ? '更新 apikey' : '更新凭据';
+}
+
 function exchangeAccountDetailConfiguration(item) {
   const credentials = item.credentials || {};
   const permissions = item.permissions || {};
@@ -37,8 +41,10 @@ function exchangeAccountDetailConfiguration(item) {
   const workerConfigured = Boolean(executionWorker.configured);
   const workerStatus = executionWorker.status === 'VERIFIED' ? '已验证' : executionWorker.status === 'NOT_VERIFIED' ? '待验证' : executionWorker.status === 'UNCONFIGURED' ? '未配置' : fmtStatus(executionWorker.status);
   const verificationHelpId = `connection-help-${item.exchange_account_id}`;
-  const canRunVerification = permissions.can_verify_connection && credentials.state === 'CONFIGURED' && item.active;
-  const verificationReason = !permissions.can_verify_connection ? '当前角色没有该账户范围的凭据管理权限。' : credentials.state !== 'CONFIGURED' ? '先添加加密凭据，再运行连接验证。' : !item.active ? '账户已停用，连接验证被阻断。' : '只读取官方账户接口并保存连接事实，不导入余额或开启交易。';
+  const retryAt = item.connection?.diagnostics?.next_retry_at ? new Date(item.connection.diagnostics.next_retry_at).getTime() : 0;
+  const retryDeferred = Number.isFinite(retryAt) && retryAt > Date.now();
+  const canRunVerification = permissions.can_verify_connection && credentials.state === 'CONFIGURED' && item.active && !retryDeferred;
+  const verificationReason = !permissions.can_verify_connection ? '当前角色没有该账户范围的凭据管理权限。' : credentials.state !== 'CONFIGURED' ? '先添加加密凭据，再运行连接验证。' : !item.active ? '账户已停用，连接验证被阻断。' : retryDeferred ? `${fmtBinanceConnectionDiagnostic(item.connection)}；到期前不会重复请求 Binance。` : '只读取官方账户接口并保存连接事实，不导入余额或开启交易。';
   const verificationControl = permissions.can_verify_connection
     ? `<form class="exchange-connection-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-version="${item.version}"><button class="secondary" type="submit" aria-describedby="${verificationHelpId}" ${canRunVerification ? '' : 'disabled'}>验证只读连接</button><small id="${verificationHelpId}">${escapeHtml(verificationReason)}</small><div class="form-error" role="alert"></div></form>`
     : `<p class="subtle">${escapeHtml(verificationReason)}</p>`;
@@ -49,7 +55,7 @@ function exchangeAccountDetailConfiguration(item) {
     ? `<form class="exchange-runtime-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-version="${item.version}" data-enabled="${runtimeBound ? 'true' : 'false'}"><button class="secondary" type="submit" aria-describedby="${runtimeHelpId}" ${canConfigureRuntime ? '' : 'disabled'}>${runtimeBound ? '停用连续只读同步' : '启用连续只读同步'}</button><small id="${runtimeHelpId}">${escapeHtml(runtimeReason)}</small><div class="form-error" role="alert"></div></form>`
     : '';
   const credentialControl = permissions.can_manage_credentials
-    ? `<form class="exchange-credential-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-venue="${escapeHtml(item.venue)}" data-version="${item.version}"><div class="field-grid">${exchangeCredentialFields(item.venue)}</div><p class="safety-note">凭据写入 AES-256-GCM 加密信封，页面和 API 只返回脱敏元数据；轮换后连接会重置为待验证。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">${credentials.state === 'CONFIGURED' ? '轮换加密凭据' : '添加加密凭据'}</button></div></form>`
+    ? `<form class="exchange-credential-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-venue="${escapeHtml(item.venue)}" data-version="${item.version}"><div class="field-grid">${exchangeCredentialFields(item.venue)}</div><p class="safety-note">凭据写入 AES-256-GCM 加密信封，页面和 API 只返回脱敏元数据；轮换后连接会重置为待验证。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">${credentials.state === 'CONFIGURED' ? exchangeCredentialUpdateLabel(item.venue) : '添加加密凭据'}</button></div></form>`
     : '<p class="subtle">当前身份只可查看脱敏凭据状态。</p>';
   const workerHelpId = `freqtrade-help-${item.exchange_account_id}`;
   const workerVerifyReason = !permissions.can_manage_worker ? '当前角色没有该账户范围的凭据管理权限。' : !workerConfigured ? '先保存当前账户专属 Worker，再运行无下单验证。' : !item.active ? '账户已停用，Worker 验证被阻断。' : '核对交易所、期货模式与精确账户绑定，不发送订单。';
@@ -62,19 +68,23 @@ function exchangeAccountDetailConfiguration(item) {
     ? `<input name="base_url" type="hidden" value="${escapeHtml(workerEndpoint)}"><details class="worker-endpoint-override"><summary><span><b>Worker 服务地址</b><small>${executionWorker.endpoint ? '当前绑定地址' : '已按部署配置自动选择'} · 不是工作空间或账户 URL</small></span><strong>修改</strong></summary><label>自定义 Worker 服务地址<input data-worker-endpoint-override type="url" maxlength="2048" value="${escapeHtml(workerEndpoint)}" placeholder="https://worker.example:8080" required></label></details>`
     : `<label>Worker 服务地址<input name="base_url" type="url" maxlength="2048" value="" placeholder="https://worker.example:8080" required><small>这是 Freqtrade Worker 的网络地址，不是工作空间或账户 URL。</small></label>`;
   const workerControl = executionWorker.supported && permissions.can_manage_worker
-    ? `<form class="freqtrade-worker-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-version="${item.version}"><div class="account-worker-scope"><span>自动绑定当前账户</span><b>${escapeHtml(item.account_id)} · ${escapeHtml(exchangeVenueLabels[item.venue] || item.venue)}</b><small>空间和账户范围由当前页面自动确定，无需填写 URL。</small></div><div class="field-grid"><label>执行模式<select name="mode"><option value="DRY_RUN" ${executionWorker.mode === 'DRY_RUN' ? 'selected' : ''}>DRY_RUN</option><option value="LIVE" ${executionWorker.mode === 'LIVE' ? 'selected' : ''}>LIVE</option></select></label><label>Worker 名称<input name="name" maxlength="120" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" value="${escapeHtml(executionWorker.name || `${item.venue.toLowerCase()}-${item.account_id}`)}" required></label>${workerEndpointControl}<label>控制用户名<input name="username" autocomplete="new-password" maxlength="120" required></label><label>控制密码<input name="password" type="password" autocomplete="new-password" maxlength="2048" required></label>${hip3Field}</div><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存 Worker 新版本</button>${workerConfigured ? '<button class="secondary" type="button" data-freqtrade-unconfigure>移除绑定</button>' : ''}</div></form>`
+    ? `<form class="freqtrade-worker-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-version="${item.version}"><div class="account-worker-scope"><span>自动绑定当前账户</span><b>${escapeHtml(item.account_id)} · ${escapeHtml(exchangeVenueLabels[item.venue] || item.venue)}</b><small>空间和账户范围由当前页面自动确定，无需填写 URL。</small></div><div class="field-grid"><label>执行模式<select name="mode"><option value="${item.environment === 'LIVE' ? 'LIVE' : 'TESTNET'}" selected>${item.environment === 'LIVE' ? 'LIVE' : 'TESTNET'}</option></select></label><label>Worker 名称<input name="name" maxlength="120" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" value="${escapeHtml(executionWorker.name || `${item.venue.toLowerCase()}-${item.account_id}`)}" required></label>${workerEndpointControl}<label>控制用户名<input name="username" autocomplete="new-password" maxlength="120" required></label><label>控制密码<input name="password" type="password" autocomplete="new-password" maxlength="2048" required></label>${hip3Field}</div><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存 Worker 新版本</button>${workerConfigured ? '<button class="secondary" type="button" data-freqtrade-unconfigure>移除绑定</button>' : ''}</div></form>`
     : '<p class="subtle">当前身份只可查看 Worker 脱敏状态。</p>';
   const tradingEligible = item.trading?.status === 'ELIGIBLE';
   const tradingConfigured = item.trading?.status !== 'DISABLED';
   const spaceLive = session?.active_team?.execution_mode === 'LIVE' && session.active_team?.trading_enabled;
-  const tradingReady = item.runtime_binding?.trading_connector === 'FREQTRADE_EXTERNAL' && executionWorker.live_ready && item.active && item.connection?.status === 'VERIFIED' && runtimeBound && spaceLive;
+  const scopeModeActive = item.environment === 'LIVE' ? spaceLive : session?.active_team?.execution_mode === 'TESTNET' && session.active_team?.trading_enabled;
+  const tradingReady = item.runtime_binding?.trading_connector === 'FREQTRADE_EXTERNAL' && executionWorker.scope_ready && item.active && item.connection?.status === 'VERIFIED' && runtimeBound && scopeModeActive;
   const canConfigureTrading = permissions.can_manage_trading && (tradingConfigured || tradingReady);
   const tradingHelpId = `trading-help-${item.exchange_account_id}`;
-  const tradingReason = !permissions.can_manage_trading ? '当前角色没有该账户范围的账户管理权限。' : tradingConfigured ? '停用会立即撤销当前账户的交易资格。' : !spaceLive ? '当前空间尚未进入真实模式并启用交易。' : item.connection?.status !== 'VERIFIED' ? '先完成只读连接验证。' : !runtimeBound ? '先启用连续只读同步。' : !executionWorker.live_ready ? '先配置并验证当前账户专属的 LIVE Freqtrade Worker。' : '只启用当前空间与账户资格；其他服务端安全开关仍独立生效。';
+  const tradingReason = !permissions.can_manage_trading ? '当前角色没有该账户范围的账户管理权限。' : tradingConfigured ? '停用会立即撤销当前账户的交易资格。' : !scopeModeActive ? '当前空间尚未进入该账户对应模式并启用交易。' : item.connection?.status !== 'VERIFIED' ? '先完成只读连接验证。' : !runtimeBound ? '先启用连续只读同步。' : !executionWorker.scope_ready ? '先配置并验证当前账户环境一致的 Freqtrade Worker。' : '只启用当前空间与账户资格；其他服务端安全开关仍独立生效。';
   const tradingControl = permissions.can_manage_trading
     ? `<form class="exchange-trading-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-version="${item.version}" data-enabled="${tradingEligible ? 'true' : 'false'}"><button class="${tradingEligible ? 'secondary' : 'danger'}" type="submit" aria-describedby="${tradingHelpId}" ${canConfigureTrading ? '' : 'disabled'}>${tradingConfigured ? '停用账户交易资格' : '启用账户交易资格'}</button><small id="${tradingHelpId}">${escapeHtml(tradingReason)}</small><div class="form-error" role="alert"></div></form>`
     : '';
-  return `<section class="account-detail-config" aria-labelledby="account-config-title"><div class="section-heading"><div><p class="eyebrow">账户设置</p><h2 id="account-config-title">连接与凭据</h2></div><span class="subtle">账户版本 ${item.version}</span></div><div class="account-detail-config-grid"><article id="credentials" class="card account-config-card"><p class="eyebrow">凭据配置与轮换</p><h2>${credentials.state === 'CONFIGURED' ? '凭据已加密保存' : '凭据尚未配置'}</h2><p class="subtle">${credentials.state === 'CONFIGURED' ? `${credentials.key_hint || '已脱敏'} · 版本 ${credentials.version}` : '配置后仍需单独验证连接。'}</p>${credentialControl}</article><article id="connection" class="card account-config-card"><p class="eyebrow">连接与连续同步</p><h2>${item.connection?.status === 'VERIFIED' ? '只读连接已验证' : '只读连接待验证'}</h2><dl class="definition-grid">${definition('最近检查', fmtDate(item.connection?.checked_at))}${definition('最近验证成功', fmtDate(item.connection?.last_verified_at))}${definition('连续同步', runtimeBound ? '已绑定' : '未绑定')}${definition('交易资格', item.trading?.enabled ? '账户级已允许' : '保持关闭')}</dl>${verificationControl}${runtimeControl}</article></div><details class="card account-advanced-settings"><summary><span><b>Worker 与交易资格高级设置</b><small>${escapeHtml(workerStatus)} · ${escapeHtml(fmtStatus(executionWorker.mode || 'UNCONFIGURED'))} · 仅绑定 ${escapeHtml(item.account_id)}</small></span><strong>展开</strong></summary><div class="toolbox-content"><dl class="definition-grid">${definition('绑定范围', `${item.account_id} · ${item.venue}`)}${definition('Worker', executionWorker.name || '未配置')}${definition('端点', executionWorker.endpoint || '未配置或无权查看')}${definition('最近验证', fmtDate(executionWorker.last_verified_at))}${definition('错误代码', executionWorker.error_code || '无')}${definition('真实订单发送', '本页不提供；服务端 Gate 独立控制')}</dl>${workerVerify}${workerControl}${tradingControl}</div></details></section>`;
+  const diagnostics = item.connection?.diagnostics;
+  const rateLimitHeaders = diagnostics?.rate_limit_headers || {};
+  const diagnosticDetail = diagnostics ? `<details class="venue-technical-detail"><summary>查看 Binance API 失败详情</summary><dl class="definition-grid">${definition('限流类型', binanceLimitCategoryLabels[diagnostics.category] || diagnostics.category)}${definition('HTTP Status', diagnostics.http_status || '未返回')}${definition('Binance error code', diagnostics.binance_error_code ?? '未返回')}${definition('Binance message', diagnostics.binance_error_message || '未返回')}${definition('Retry-After', `${diagnostics.retry_after_seconds || 0} 秒`)}${definition('失败时间', fmtDate(diagnostics.failed_at))}${definition('建议重试时间', fmtDate(diagnostics.next_retry_at))}${definition('限流 / weight headers', Object.entries(rateLimitHeaders).map(([key, value]) => `${key}: ${value}`).join('；') || '未返回')}</dl></details>` : '';
+  return `<section class="account-detail-config" aria-labelledby="account-config-title"><div class="section-heading"><div><p class="eyebrow">账户设置</p><h2 id="account-config-title">连接与凭据</h2></div><span class="subtle">账户版本 ${item.version}</span></div><div class="account-detail-config-grid"><article id="credentials" class="card account-config-card"><p class="eyebrow">凭据配置与轮换</p><h2>${credentials.state === 'CONFIGURED' ? '凭据已加密保存' : '凭据尚未配置'}</h2><p class="subtle">${credentials.state === 'CONFIGURED' ? `${credentials.key_hint || '已脱敏'} · 版本 ${credentials.version}` : '配置后仍需单独验证连接。'}</p>${credentialControl}</article><article id="connection" class="card account-config-card"><p class="eyebrow">连接与连续同步</p><h2>${item.connection?.status === 'VERIFIED' ? '只读连接已验证' : '只读连接待验证'}</h2><dl class="definition-grid">${definition('最近检查', fmtDate(item.connection?.checked_at))}${definition('最近验证成功', fmtDate(item.connection?.last_verified_at))}${definition('连接诊断', item.connection?.status === 'FAILED' ? fmtBinanceConnectionDiagnostic(item.connection) : '无')}${definition('连续同步', runtimeBound ? '已绑定' : '未绑定')}${definition('交易资格', item.trading?.enabled ? '账户级已允许' : '保持关闭')}</dl>${diagnosticDetail}${verificationControl}${runtimeControl}</article></div><details class="card account-advanced-settings"><summary><span><b>Worker 与交易资格高级设置</b><small>${escapeHtml(workerStatus)} · ${escapeHtml(fmtStatus(executionWorker.mode || 'UNCONFIGURED'))} · 仅绑定 ${escapeHtml(item.account_id)}</small></span><strong>展开</strong></summary><div class="toolbox-content"><dl class="definition-grid">${definition('绑定范围', `${item.account_id} · ${item.venue}`)}${definition('Worker', executionWorker.name || '未配置')}${definition('端点', executionWorker.endpoint || '未配置或无权查看')}${definition('最近验证', fmtDate(executionWorker.last_verified_at))}${definition('错误代码', executionWorker.error_code || '无')}${definition('真实订单发送', '本页不提供；服务端 Gate 独立控制')}</dl>${workerVerify}${workerControl}${tradingControl}</div></details></section>`;
 }
 
 function credentialPayload(form, venue) {
@@ -111,7 +121,7 @@ function bindExchangeAccountForms() {
     const body = {expected_version:Number(form.dataset.version), idempotency_key:crypto.randomUUID()};
     try {
       const result = await withPending(event.submitter, '只读验证中…', () => api(`/api/exchange-accounts/${form.dataset.exchangeAccountId}/connection-verifications`, {method:'POST', body:JSON.stringify(body)}));
-      showToast(result.connection?.status === 'VERIFIED' ? '只读连接验证成功；交易能力仍保持关闭' : `连接验证失败：${result.connection?.error_code || 'READ_ONLY_PROBE_FAILED'}`);
+      showToast(result.connection?.status === 'VERIFIED' ? fmtConnectionVerificationSuccess(result) : `连接验证失败：${fmtBinanceConnectionDiagnostic(result.connection)}`);
       await route();
     } catch (error) { showApiError(error, form.querySelector('.form-error')); }
   }));
@@ -213,52 +223,69 @@ async function renderVenueAccountDetail(requestedAccountId) {
     return;
   }
   const venue = account.venue;
-  const endpoint = venue.toLowerCase();
-  const legacyStatusRequest = ['BINANCE','HYPERLIQUID'].includes(venue)
-    ? api(`/api/venues/${endpoint}/status`).catch(error => [403, 409].includes(error.status) ? null : Promise.reject(error))
-    : Promise.resolve(null);
-  const [legacyStatus, runtime, factsResult] = await Promise.all([
-    legacyStatusRequest,
+  const [runtime, factsResult, health] = await Promise.all([
     api('/api/runtime/status').catch(error => [403, 409].includes(error.status) ? null : Promise.reject(error)),
-    api(`/api/venues/${endpoint}/facts?account_id=${encodeURIComponent(account.account_id)}`),
+    api(`/api/exchange-accounts/${encodeURIComponent(account.exchange_account_id)}/facts`),
+    api(`/api/exchange-accounts/${encodeURIComponent(account.exchange_account_id)}/fact-health`),
   ]);
   const accountId = account.account_id;
   const facts = factsResult.data;
-  const processRuntimeEnabled = Boolean(runtime?.data?.external_boundaries?.runtime_sync?.enabled);
-  const status = legacyStatus || {
+  const persistedHistoryIncomplete = Boolean(
+    health?.data?.error_code && String(health.data.error_code).includes('HISTORY_INCOMPLETE')
+  );
+  const persistedFactsCurrent = Boolean(
+    health?.data?.data_status === 'CURRENT'
+      && (health.data.runtime_status === 'SUCCESS' || persistedHistoryIncomplete)
+  );
+  const status = {
     venue,
-    execution_backend:'UNAVAILABLE',
+    account_mode:account.account_mode || 'STANDARD',
+    execution_backend:'FREQTRADE',
     worker_configured:false,
-    automatic_sync_enabled:Boolean(processRuntimeEnabled && account?.runtime_binding?.bound),
-    automatic_sync_interval_seconds:runtime?.data?.external_boundaries?.runtime_sync?.interval_seconds || 0,
+    automatic_sync_enabled:Boolean(persistedFactsCurrent && account?.runtime_binding?.bound),
+    automatic_sync_interval_seconds:runtime?.data?.external_boundaries?.fact_adapter?.reconciliation_seconds || 0,
     default_account_id:accountId,
-    fact_environment:'LIVE',
+    fact_environment:account.environment,
   };
-  status.automatic_sync_enabled = Boolean(processRuntimeEnabled && account.runtime_binding?.bound);
+  status.automatic_sync_enabled = Boolean(persistedFactsCurrent && account.runtime_binding?.bound);
   status.default_account_id = accountId;
   const aggregateConnection = runtime?.data?.connections?.[venue] || null;
-  const exactHealth = exchangeAccountRuntimeHealth(runtime, account);
+  const persistedHealth = health?.data
+    ? {
+        ...health.data,
+        status:health.data.runtime_status || (health.data.data_status === 'CURRENT' ? 'SUCCESS' : 'FAILED'),
+      }
+    : null;
+  const exactHealth = persistedHealth || exchangeAccountRuntimeHealth(runtime, account);
   const connection = exactHealth
     ? {
         ...aggregateConnection,
-        available:exactHealth.status === 'SUCCESS' && status.automatic_sync_enabled,
-        category:exactHealth.status === 'SUCCESS'
+        available:(exactHealth.status === 'SUCCESS' || String(exactHealth.error_code || '').includes('HISTORY_INCOMPLETE')) && status.automatic_sync_enabled,
+        category:String(exactHealth.error_code || '').includes('HISTORY_INCOMPLETE')
+          ? 'READ_ONLY_CONNECTED_HISTORY_INCOMPLETE'
+          : exactHealth.status === 'SUCCESS'
           ? status.automatic_sync_enabled ? 'READ_ONLY_CONNECTED' : 'EXPLICITLY_DISABLED'
-          : String(exactHealth.error_code || '').includes('HISTORY_INCOMPLETE')
-            ? 'READ_ONLY_CONNECTED_HISTORY_INCOMPLETE'
-            : exactHealth.status === 'SKIPPED' ? 'PROBE_SKIPPED' : 'READ_ONLY_PROBE_FAILED',
+          : exactHealth.status === 'SKIPPED' ? 'PROBE_SKIPPED' : 'READ_ONLY_PROBE_FAILED',
         error_code:exactHealth.error_code,
         checked_at:exactHealth.checked_at,
         last_success_at:exactHealth.last_success_at,
         retry_at:exactHealth.retry_at,
         consecutive_failures:exactHealth.consecutive_failures,
-        reason:exactHealth.status === 'SUCCESS' && !status.automatic_sync_enabled
+        reason:String(exactHealth.error_code || '').includes('HISTORY_INCOMPLETE')
+          ? '当前余额、仓位与订单只读事实已连接；历史成交或资金费补全暂不完整。'
+          : exactHealth.status === 'SUCCESS' && !status.automatic_sync_enabled
           ? '最近只读探针成功，但连续同步当前关闭，因此不标记为实时连接。'
-          : aggregateConnection?.reason || '该账户最近一次只读同步没有形成可用实时事实。',
+          : exactHealth.status === 'SUCCESS'
+            ? '最近一次精确账户只读同步成功。'
+            : aggregateConnection?.reason || '该账户最近一次只读同步没有形成可用实时事实。',
         owner_role:aggregateConnection?.owner_role || '系统管理员',
-        next_action:exactHealth.status === 'SUCCESS' && !status.automatic_sync_enabled
+        next_action:String(exactHealth.error_code || '').includes('HISTORY_INCOMPLETE')
+          ? '等待上游历史接口恢复；新增风险继续保持阻断。'
+          : exactHealth.status === 'SUCCESS' && !status.automatic_sync_enabled
           ? '在连接设置中启用连续只读同步。'
-          : aggregateConnection?.next_action || '检查精确账户错误代码并等待下一次有界重试。',
+          : exactHealth.status === 'SUCCESS'
+            ? '无需操作；订单、签名与资金动作仍由独立 Gate 阻断。'
+            : aggregateConnection?.next_action || '检查精确账户错误代码并等待下一次有界重试。',
       }
     : account.connection?.status === 'VERIFIED'
       ? {available:false, category:account.runtime_binding?.bound ? 'NOT_YET_VERIFIED' : 'EXPLICITLY_DISABLED', checked_at:account.connection.checked_at, last_success_at:account.connection.last_verified_at, reason:account.runtime_binding?.bound ? '凭据连接验证已通过，但连续同步尚未产出可用探针。' : '凭据连接验证已通过，但连续同步当前关闭。', owner_role:'系统管理员', next_action:account.runtime_binding?.bound ? '等待首次有界同步，期间仅使用已保存快照。' : '在连接设置中启用连续只读同步。'}
@@ -286,7 +313,7 @@ async function renderVenueAccountDetail(requestedAccountId) {
   const hip3Dexes = Array.isArray(status.hip3_dexes) ? status.hip3_dexes : [];
   const venueDetail = currentLanguage === 'en'
     ? venue === 'BINANCE'
-      ? ({PORTFOLIO_MARGIN:'Unified account',MAIN_ACCOUNT:'Main account',SUBACCOUNT:'Subaccount'}[status.account_mode] || 'Unknown account mode')
+      ? ({STANDARD:'Standard account',PORTFOLIO_MARGIN:'Unified account',MAIN_ACCOUNT:'Main account',SUBACCOUNT:'Subaccount'}[status.account_mode] || 'Unknown account mode')
       : venue === 'HYPERLIQUID'
         ? `Core markets${status.hip3_available ? ` + HIP-3${hip3Dexes.length ? ` (${hip3Dexes.join(', ')})` : ''}` : ''}`
         : venue === 'OKX' ? 'USDT linear SWAP scope' : 'Unified USDT linear perpetual scope'
@@ -353,8 +380,36 @@ async function renderVenueAccountDetail(requestedAccountId) {
     <div id="history">${venueFactSections(facts, {snapshotMode, historyIncomplete})}</div></section></section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
   bindExchangeAccountForms();
+  bindVenueRecordLists();
   const detailTarget = location.hash ? document.getElementById(location.hash.slice(1)) : null;
   detailTarget?.scrollIntoView({block:'start'});
+}
+
+function venueRecordControls({total, searchPlaceholder, filterLabel, options, paginationLabel, emptyTitle}) {
+  return {
+    tools:`<div class="proposal-list-tools venue-record-tools"><label>搜索记录<input data-venue-record-search type="search" placeholder="${escapeHtml(searchPlaceholder)}"></label><label>${escapeHtml(filterLabel)}<select data-venue-record-filter><option value="">全部</option>${options.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join('')}</select></label><span role="status" aria-live="polite"><b data-venue-record-visible-count>${Math.min(total, 50)}</b> / <b data-venue-record-count>${total}</b> 个结果</span></div>`,
+    footer:`${recordPaginationMarkup(total, paginationLabel)}<section class="empty-state compact-empty" data-venue-record-empty hidden><div><h2>${escapeHtml(emptyTitle)}</h2><p>请清除搜索或调整筛选。</p></div></section>`,
+  };
+}
+
+function bindVenueRecordLists() {
+  document.querySelectorAll('[data-venue-record-list]').forEach(root => {
+    const rootSelector = `[data-venue-record-list="${root.dataset.venueRecordList}"]`;
+    bindRecordList({
+      rootSelector,
+      rowSelector:'[data-venue-record-row]',
+      filterSelectors:['[data-venue-record-search]','[data-venue-record-filter]'],
+      matches:row => {
+        const query = root.querySelector('[data-venue-record-search]')?.value.toLowerCase().trim() || '';
+        const filter = root.querySelector('[data-venue-record-filter]')?.value || '';
+        return (!query || row.dataset.search.includes(query))
+          && (!filter || row.dataset.filter === filter);
+      },
+      emptySelector:'[data-venue-record-empty]',
+      visibleCountSelector:'[data-venue-record-visible-count]',
+      totalCountSelector:'[data-venue-record-count]',
+    });
+  });
 }
 
 function venueFactSections(facts, {snapshotMode = false, historyIncomplete = false} = {}) {
@@ -362,11 +417,11 @@ function venueFactSections(facts, {snapshotMode = false, historyIncomplete = fal
   const activeOrderRows = facts.orders.filter(item => !['FILLED','CANCELLED','REJECTED','EXPIRED'].includes(item.status));
   const historicalOrderRows = facts.orders.filter(item => ['FILLED','CANCELLED','REJECTED','EXPIRED'].includes(item.status));
   const positions = positionRows.map(item => `<tr><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="数量 / 入场">${fmtNumber(item.quantity)} @ ${fmtNumber(item.average_entry_price)}</td><td data-label="标记价">${fmtNumber(item.mark_price)}</td><td data-label="数据状态">${escapeHtml(snapshotMode ? '历史快照' : factStatusLabel(item.fact_status))}</td><td data-label="保护">${item.protection ? `${escapeHtml(fmtStatus(item.protection.status))} · ${item.protection.fully_covered ? '足额' : '不足'}` : '无保护数据'}</td><td data-label="更新时间">${fmtDate(item.observed_at)}</td></tr>`).join('');
-  const renderOrderRows = items => items.map(item => `<tr><td data-label="交易所订单">${escapeHtml(item.venue_order_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="状态">${escapeHtml(fmtStatus(item.status))}</td><td data-label="成交 / 委托">${fmtNumber(item.filled_quantity)} / ${fmtNumber(item.ordered_quantity)}</td><td data-label="关联操作">${item.intent_id ? shortId(item.intent_id) : '外部未关联'}</td><td data-label="更新时间">${fmtDate(item.observed_at)}</td></tr>`).join('');
+  const renderOrderRows = (items, historical = false) => items.map(item => `<tr ${historical ? `data-venue-record-row data-search="${escapeHtml(`${item.venue_order_id} ${item.symbol} ${item.intent_id || ''}`.toLowerCase())}" data-filter="${escapeHtml(item.status)}"` : ''}><td data-label="交易所订单">${escapeHtml(item.venue_order_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="状态">${escapeHtml(fmtStatus(item.status))}</td><td data-label="成交 / 委托">${fmtNumber(item.filled_quantity)} / ${fmtNumber(item.ordered_quantity)}</td><td data-label="关联操作">${item.intent_id ? shortId(item.intent_id) : '外部未关联'}</td><td data-label="更新时间">${fmtDate(item.observed_at)}</td></tr>`).join('');
   const orders = renderOrderRows(activeOrderRows);
-  const orderHistory = renderOrderRows(historicalOrderRows);
-  const fills = facts.fills.map(item => `<tr><td data-label="成交编号">${escapeHtml(item.venue_fill_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="方向 / 数量">${escapeHtml(fmtSide(item.side))} ${fmtNumber(item.quantity)}</td><td data-label="价格">${fmtNumber(item.price)}</td><td data-label="手续费">${fmtNumber(item.fee)} ${escapeHtml(item.fee_currency)}</td><td data-label="成交时间">${fmtDate(item.executed_at)}</td></tr>`).join('');
-  const funding = facts.funding.map(item => `<tr><td data-label="支付编号">${escapeHtml(item.venue_payment_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="金额">${fmtNumber(item.amount)} ${escapeHtml(item.currency)}</td><td data-label="支付时间">${fmtDate(item.paid_at)}</td></tr>`).join('');
+  const orderHistory = renderOrderRows(historicalOrderRows, true);
+  const fills = facts.fills.map(item => `<tr data-venue-record-row data-search="${escapeHtml(`${item.venue_fill_id} ${item.symbol} ${item.fee_currency}`.toLowerCase())}" data-filter="${escapeHtml(item.side)}"><td data-label="成交编号">${escapeHtml(item.venue_fill_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="方向 / 数量">${escapeHtml(fmtSide(item.side))} ${fmtNumber(item.quantity)}</td><td data-label="价格">${fmtNumber(item.price)}</td><td data-label="手续费">${fmtNumber(item.fee)} ${escapeHtml(item.fee_currency)}</td><td data-label="成交时间">${fmtDate(item.executed_at)}</td></tr>`).join('');
+  const funding = facts.funding.map(item => `<tr data-venue-record-row data-search="${escapeHtml(`${item.venue_payment_id} ${item.symbol} ${item.currency}`.toLowerCase())}" data-filter="${escapeHtml(item.currency)}"><td data-label="支付编号">${escapeHtml(item.venue_payment_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="金额">${fmtNumber(item.amount)} ${escapeHtml(item.currency)}</td><td data-label="支付时间">${fmtDate(item.paid_at)}</td></tr>`).join('');
   const reconciliation = facts.reconciliation;
   const positionTitle = snapshotMode ? '最后快照中的仓位与风险保护' : '当前仓位与风险保护';
   const positionEmpty = snapshotMode ? '最后一次保存快照中没有持仓；这不能确认当前账户仍为空仓。' : '当前账户没有持仓；零仓位行情不会冒充当前仓位。';
@@ -379,16 +434,21 @@ function venueFactSections(facts, {snapshotMode = false, historyIncomplete = fal
   const fillEmpty = snapshotMode ? '最后一次保存快照中没有成交记录；这不代表连接中断后没有成交。' : historyIncomplete ? '当前没有已保存的成交；这不代表交易所没有历史成交。' : '当前没有已保存的成交记录。';
   const fundingTitle = snapshotMode ? '最后快照中的资金费' : historyIncomplete ? '已保存资金费' : '资金费';
   const fundingEmpty = snapshotMode ? '最后一次保存快照中没有资金费记录；这不代表连接中断后没有资金费。' : historyIncomplete ? '当前没有已保存的资金费；这不代表交易所没有历史资金费。' : '当前没有已保存的资金费记录。';
+  const orderHistoryControls = venueRecordControls({total:historicalOrderRows.length, searchPlaceholder:'订单号 / 标的', filterLabel:'订单状态', options:['FILLED','CANCELLED','REJECTED','EXPIRED'].map(status => [status, fmtStatus(status)]), paginationLabel:'最近委托分页', emptyTitle:'没有符合条件的委托'});
+  const fillControls = venueRecordControls({total:facts.fills.length, searchPlaceholder:'成交编号 / 标的', filterLabel:'方向', options:[['BUY', fmtSide('BUY')],['SELL', fmtSide('SELL')]], paginationLabel:'成交历史分页', emptyTitle:'没有符合条件的成交记录'});
+  const fundingCurrencies = [...new Set(facts.funding.map(item => item.currency).filter(Boolean))].sort();
+  const fundingControls = venueRecordControls({total:facts.funding.length, searchPlaceholder:'支付编号 / 标的', filterLabel:'币种', options:fundingCurrencies.map(currency => [currency, currency]), paginationLabel:'资金费分页', emptyTitle:'没有符合条件的资金费记录'});
   return `<div class="stats"><div class="stat"><small>权益</small><b>${fmtNumber(facts.equity?.equity)} ${escapeHtml(facts.equity?.currency || '')}</b></div><div class="stat"><small>可用余额</small><b>${fmtNumber(facts.equity?.available_balance)} ${escapeHtml(facts.equity?.currency || '')}</b></div><div class="stat"><small>权益状态</small><b style="font-size:14px">${escapeHtml(snapshotMode ? '历史快照' : factStatusLabel(facts.equity?.fact_status))}</b></div><div class="stat"><small>最近对账</small><b style="font-size:14px" class="${reconciliation?.status === 'MATCH' && !snapshotMode ? 'direction-long' : reconciliation ? 'warning-text' : ''}">${escapeHtml(reconciliation ? snapshotMode ? '历史结果' : fmtStatus(reconciliation.status) : '未运行')}</b><span>${fmtDate(reconciliation?.completed_at)}</span></div></div>
     ${reconciliation?.differences?.length ? `<article class="danger-note"><b>${snapshotMode ? '最后快照的对账差异' : '对账差异'}</b><ul>${reconciliation.differences.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></article>` : ''}
     ${factTable(positionTitle, '<th>标的</th><th>数量 / 入场</th><th>标记价</th><th>数据状态</th><th>保护</th><th>更新时间</th>', positions, positionEmpty, snapshotMode)}
     ${factTable(orderTitle, '<th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th>', orders, orderEmpty, snapshotMode)}
-    ${orderHistory ? `<details class="operation-toolbox venue-order-history"><summary><span><b>${snapshotMode ? '最后快照中的订单记录' : '最近订单记录'}</b><small>${escapeHtml(orderHistoryDescription)}</small></span><strong>查看记录</strong></summary><div class="toolbox-content"><div class="table-scroll-hint venue-fact-scroll-hint">左右滑动查看完整订单记录</div><div class="table-wrap is-scrollable venue-fact-table"><table><thead><tr><th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th></tr></thead><tbody>${orderHistory}</tbody></table></div></div></details>` : ''}
+    ${orderHistory ? `<details class="operation-toolbox venue-order-history"><summary><span><b>${snapshotMode ? '最后快照中的委托记录' : '最近委托'}</b><small>${escapeHtml(orderHistoryDescription)}</small></span><strong>查看记录</strong></summary><div class="toolbox-content venue-record-list" data-venue-record-list="orders">${orderHistoryControls.tools}<div class="table-scroll-hint venue-fact-scroll-hint">左右滑动查看完整委托记录</div><div class="table-wrap is-scrollable venue-fact-table"><table><thead><tr><th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th></tr></thead><tbody>${orderHistory}</tbody></table></div>${orderHistoryControls.footer}</div></details>` : ''}
     ${historyIncomplete ? '<article class="callout venue-history-warning"><b>历史记录尚未补全</b><p>以下成交与资金费只代表已经保存的记录，不能据此判断完整历史；余额、仓位和当前委托不受影响。</p></article>' : ''}
-    ${factTable(fillTitle, '<th>成交编号</th><th>标的</th><th>方向 / 数量</th><th>价格</th><th>手续费</th><th>成交时间</th>', fills, fillEmpty, snapshotMode || historyIncomplete)}
-    ${factTable(fundingTitle, '<th>支付编号</th><th>标的</th><th>金额</th><th>支付时间</th>', funding, fundingEmpty, snapshotMode || historyIncomplete)}`;
+    ${factTable(fillTitle, '<th>成交编号</th><th>标的</th><th>方向 / 数量</th><th>价格</th><th>手续费</th><th>成交时间</th>', fills, fillEmpty, snapshotMode || historyIncomplete, {kind:'fills', controls:fillControls})}
+    ${factTable(fundingTitle, '<th>支付编号</th><th>标的</th><th>金额</th><th>支付时间</th>', funding, fundingEmpty, snapshotMode || historyIncomplete, {kind:'funding', controls:fundingControls})}`;
 }
 
-function factTable(title, headers, rows, emptyCopy = '当前没有已保存的数据。', emptyAttention = false) {
-  return `<section><h2>${escapeHtml(title)}</h2>${rows ? `<div class="table-scroll-hint venue-fact-scroll-hint">左右滑动查看完整${escapeHtml(title)}</div><div class="table-wrap is-scrollable venue-fact-table"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="callout ${emptyAttention ? 'tone-attention' : ''}">${escapeHtml(emptyCopy)}</div>`}</section>`;
+function factTable(title, headers, rows, emptyCopy = '当前没有已保存的数据。', emptyAttention = false, recordList = null) {
+  const table = `<div class="table-scroll-hint venue-fact-scroll-hint">左右滑动查看完整${escapeHtml(title)}</div><div class="table-wrap is-scrollable venue-fact-table"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>`;
+  return `<section><h2>${escapeHtml(title)}</h2>${rows ? recordList ? `<div class="venue-record-list" data-venue-record-list="${escapeHtml(recordList.kind)}">${recordList.controls.tools}${table}${recordList.controls.footer}</div>` : table : `<div class="callout ${emptyAttention ? 'tone-attention' : ''}">${escapeHtml(emptyCopy)}</div>`}</section>`;
 }

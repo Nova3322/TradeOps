@@ -15,7 +15,8 @@ classifiers = [
 ]
 dependencies = [
   "alembic>=1.18.5,<2",
-  "cryptography>=50,<51",
+  "ccxt==4.5.74",
+  "cryptography>=49,<51",
   "fastapi>=0.128,<1",
   "hyperliquid-python-sdk>=0.24,<0.25",
   "prometheus-client>=0.23,<1",
@@ -23,6 +24,7 @@ dependencies = [
   "pydantic-settings>=2.12,<3",
   "pyfolio-reloaded==0.9.9",
   "quantstats==0.0.81",
+  "requests>=2.32,<3",
   "sqlalchemy>=2.0.51,<2.1",
   "uvicorn[standard]>=0.40,<1",
   "websockets>=15,<17",
@@ -39,6 +41,9 @@ trading-api = "trading_control_plane.__main__:main"
 trading-doctor = "trading_control_plane.operations:main"
 trading-notification-worker = "trading_control_plane.notification_runtime:main"
 trading-sync-worker = "trading_control_plane.runtime:main"
+trading-fact-adapter = "trading_control_plane.fact_adapter_runtime:main"
+trading-execution-worker = "trading_control_plane.execution_runtime:main"
+trading-capital-worker = "trading_control_plane.capital_runtime:main"
 
 [dependency-groups]
 dev = [
@@ -63,6 +68,16 @@ packages = ["src/trading_control_plane"]
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
 testpaths = ["tests"]
+filterwarnings = [
+  "error",
+  # FastAPI 0.x currently re-exports Starlette's TestClient through the deprecated
+  # httpx compatibility path. Keep this third-party-only exception exact and tested.
+  "ignore:Using `httpx` with `starlette\\.testclient` is deprecated; install `httpx2` instead\\.:starlette.exceptions.StarletteDeprecationWarning:fastapi\\.testclient",
+  # pyfolio-reloaded imports optional Zipline support before TradingOPS can enter its
+  # local warning boundary. These two dependency warnings are exact and tested.
+  'ignore:Module "zipline\.assets" not found; multipliers will not be applied to position notionals\.:UserWarning:pyfolio\.pos',
+  "ignore:The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future\\. This includes implicit conversion of bare integers \\(e\\.g\\. `\\+ 1`\\)\\.Please use a specific unit instead\\.:DeprecationWarning:pyfolio\\.round_trips",
+]
 markers = [
   "integration: requires TEST_DATABASE_URL pointing to a disposable PostgreSQL database",
 ]

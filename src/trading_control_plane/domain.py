@@ -11,9 +11,12 @@ MONEY_QUANTUM: Final = Decimal("0.000000000000000001")
 
 
 class DomainRejected(RuntimeError):
-    def __init__(self, code: str, detail: str) -> None:
+    def __init__(
+        self, code: str, detail: str, *, metadata: dict[str, object] | None = None
+    ) -> None:
         self.code = code
         self.detail = detail
+        self.metadata = metadata
         super().__init__(f"{code}: {detail}")
 
 
@@ -134,6 +137,17 @@ class RiskTier(StrEnum):
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
+
+
+RISK_TIER_LEVERAGE: Final[dict[RiskTier, Decimal]] = {
+    RiskTier.LOW: Decimal(3),
+    RiskTier.MEDIUM: Decimal(5),
+    RiskTier.HIGH: Decimal(10),
+}
+
+
+def leverage_for_risk_tier(risk_tier: RiskTier) -> Decimal:
+    return RISK_TIER_LEVERAGE[risk_tier]
 
 
 class RiskResult(StrEnum):

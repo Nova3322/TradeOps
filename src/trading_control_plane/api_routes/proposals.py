@@ -33,6 +33,9 @@ from trading_control_plane.api_core import (
     timedelta,
 )
 from trading_control_plane.api_routes.context import ApiRouteContext
+from trading_control_plane.service_domains.proposal_automation import (
+    advance_approved_proposal,
+)
 
 
 class _ProposalsRoutes:
@@ -669,7 +672,19 @@ class _ProposalsRoutes:
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
             self.require_capability(identity, "proposal.view")
-            return self.queries().proposal_detail(identity.user_id, proposal_id, now=_now())
+            detail = self.queries().proposal_detail(identity.user_id, proposal_id, now=_now())
+            detail["execution_preview"] = {
+                "account_id": detail["account_id"],
+                "venue": detail["venue"],
+                "symbol": detail["symbol"],
+                "side": "BUY" if detail["direction"] == "LONG" else "SELL",
+                "order_type": "MARKET",
+                "quantity": detail["quantity"],
+                "estimated_notional": detail["estimated_notional"],
+                "quote_currency": detail["quote_currency"],
+                "leverage": detail["leverage"],
+            }
+            return detail
 
         @self.app.post("/api/proposals/{proposal_id}/reviews")
         def review_proposal(
@@ -688,29 +703,39 @@ class _ProposalsRoutes:
                 if agent_call:
                     raise DomainRejected(
                         "HUMAN_WEB_CONFIRMATION_REQUIRED",
-                        "proposal approval requires the owner to complete step-up in the web UI",
+                        "proposal approval requires an authenticated human web session",
                     )
-                if payload.action_grant is None:
-                    raise DomainRejected(
-                        "ACTION_GRANT_REQUIRED", "proposal approval requires action-level step-up"
-                    )
-                self.token_service.verify_action_grant(
-                    payload.action_grant,
-                    user_id=identity.user_id,
-                    action="proposal.approve",
-                    object_id=proposal_id,
-                    object_version=payload.expected_version,
-                    now=now,
-                )
-            result = self.service().review_proposal(
+            workflow_service = self.service()
+            result = workflow_service.review_proposal(
                 proposal_id,
                 identity.user_id,
                 ReviewDecision(payload.decision),
                 payload.reason,
                 expected_version=payload.expected_version,
                 idempotency_key=payload.idempotency_key,
+                automatic_risk_service_username=(
+                    self.resolved_settings.runtime_sync_service_username
+                    if payload.decision == "APPROVE"
+                    else None
+                ),
                 now=now,
             )
+            automation: dict[str, str | None] | None = None
+            if result is ProposalStatus.APPROVED:
+                try:
+                    automation = advance_approved_proposal(
+                        workflow_service,
+                        proposal_id=proposal_id,
+                        fallback_service_username=(
+                            self.resolved_settings.runtime_sync_service_username
+                        ),
+                        now=now,
+                    )
+                except DomainRejected as exc:
+                    automation = {
+                        "status": "BLOCKED",
+                        "error_code": exc.code,
+                    }
             detail = self.queries().proposal_detail(identity.user_id, proposal_id, now=now)
             if result is ProposalStatus.PENDING_REVIEW:
                 self.notify_reviewers(
@@ -721,6 +746,7 @@ class _ProposalsRoutes:
             return {
                 "proposal_id": str(proposal_id),
                 "status": result.value,
+                "automation": automation,
                 "detail": detail,
             }
 

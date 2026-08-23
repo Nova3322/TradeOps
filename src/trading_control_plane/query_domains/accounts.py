@@ -1,14 +1,338 @@
 from __future__ import annotations
 
-from trading_control_plane.query_component import QueryComponent
+from datetime import datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import UUID
 
-# ruff: noqa: F403, F405
-from trading_control_plane.query_core import *
+from sqlalchemy import select
+
+from trading_control_plane.authorization_policy import ROLE_ACTIONS
+from trading_control_plane.domain import DomainRejected, Role
+from trading_control_plane.models import (
+    AccountEquity,
+    ExchangeAccount,
+    FundingPayment,
+    Instrument,
+    Position,
+    ProtectionOrder,
+    ReconciliationRun,
+    RoleAssignment,
+    RuntimeSourceHealth,
+    VenueFill,
+    VenueOrder,
+)
+from trading_control_plane.query_component import QueryComponent
+from trading_control_plane.query_component import iso_datetime as _iso
+from trading_control_plane.request_context import current_api_client_context
 
 
 class AccountQueries(QueryComponent):
+    def native_asset_mark(
+        self,
+        actor_id: UUID,
+        asset: str,
+    ) -> tuple[Decimal, datetime] | None:
+        """Read the active team's newest persisted USD perpetual mark for an asset."""
+
+        _workspace_id, team_id = self.active_scope_ids(actor_id)
+        normalized = asset.upper()
+        symbols = (
+            f"{normalized}USDT",
+            f"{normalized}-USDT-SWAP",
+            normalized,
+        )
+        with self.database.session_factory() as session:
+            row = session.execute(
+                select(Position.mark_price, Position.observed_at)
+                .join(Instrument, Instrument.instrument_id == Position.instrument_id)
+                .where(
+                    Position.team_id == team_id,
+                    Position.fact_status == "KNOWN",
+                    Position.mark_price > 0,
+                    Instrument.symbol.in_(symbols),
+                )
+                .order_by(Position.observed_at.desc())
+                .limit(1)
+            ).first()
+        return None if row is None else (Decimal(row[0]), row[1])
+
+    def configured_risk_scopes(self, actor_id: UUID) -> tuple[tuple[str, str, str], ...]:
+        """Return the active team's registered LIVE account scopes.
+
+        Risk configuration follows the same database registry as facts and
+        execution; deployment-wide venue defaults are not account identities.
+        """
+
+        _workspace_id, team_id = self.active_scope_ids(actor_id)
+        with self.database.session_factory() as session:
+            rows = session.execute(
+                select(
+                    ExchangeAccount.environment,
+                    ExchangeAccount.account_id,
+                    ExchangeAccount.venue,
+                )
+                .where(
+                    ExchangeAccount.team_id == team_id,
+                    ExchangeAccount.environment == "LIVE",
+                    ExchangeAccount.active.is_(True),
+                    ExchangeAccount.deleted_at.is_(None),
+                )
+                .order_by(ExchangeAccount.account_id, ExchangeAccount.venue)
+            ).all()
+        return tuple(
+            (str(row[0]), str(row[1]), str(row[2]))
+            for row in rows
+            if self.can_user(
+                actor_id,
+                "system.view",
+                str(row[1]),
+                str(row[2]),
+            )
+        )
+
+    def capital_account_scope(
+        self,
+        actor_id: UUID,
+        account_id: str,
+        venue: str,
+        environment: str = "LIVE",
+    ) -> dict[str, str]:
+        """Resolve one capital account without depending on venue-listing RBAC."""
+
+        workspace_id, team_id = self.active_scope_ids(actor_id)
+        if not self.can_user(actor_id, "capital.view", account_id, venue):
+            raise DomainRejected(
+                "RBAC_DENIED",
+                "capital account is outside the current assignment scope",
+            )
+        with self.database.session_factory() as session:
+            accounts = session.scalars(
+                select(ExchangeAccount).where(
+                    ExchangeAccount.team_id == team_id,
+                    ExchangeAccount.account_id == account_id,
+                    ExchangeAccount.venue == venue,
+                    ExchangeAccount.environment == environment,
+                    ExchangeAccount.active.is_(True),
+                    ExchangeAccount.deleted_at.is_(None),
+                )
+            ).all()
+        if len(accounts) != 1:
+            raise DomainRejected(
+                "CAPITAL_ACCOUNT_SCOPE_MISMATCH",
+                "capital operation is outside one exact active account",
+            )
+        account = accounts[0]
+        return {
+            "workspace_id": str(workspace_id),
+            "team_id": str(team_id),
+            "exchange_account_id": str(account.exchange_account_id),
+            "account_id": account.account_id,
+            "venue": account.venue,
+            "environment": account.environment,
+            "account_mode": str(
+                (account.credential_metadata or {}).get("account_mode", "STANDARD")
+            ),
+        }
+
+    def _exchange_account_scope(
+        self,
+        actor_id: UUID,
+        exchange_account_id: UUID,
+    ) -> tuple[UUID, UUID, str, str, str]:
+        workspace_id, team_id = self.active_scope_ids(actor_id)
+        with self.database.session_factory() as session:
+            account = session.scalar(
+                select(ExchangeAccount).where(
+                    ExchangeAccount.exchange_account_id == exchange_account_id,
+                    ExchangeAccount.team_id == team_id,
+                    ExchangeAccount.deleted_at.is_(None),
+                )
+            )
+            if account is None:
+                raise DomainRejected(
+                    "EXCHANGE_ACCOUNT_NOT_FOUND",
+                    "exchange account is outside the active team or does not exist",
+                )
+            if not self.can_user(
+                actor_id,
+                "venue.view",
+                account.account_id,
+                account.venue,
+            ):
+                raise DomainRejected("RBAC_DENIED", "account facts are outside the current scope")
+            return (
+                workspace_id,
+                team_id,
+                account.account_id,
+                account.venue,
+                account.environment,
+            )
+
+    def exchange_account_facts(
+        self,
+        actor_id: UUID,
+        exchange_account_id: UUID,
+    ) -> dict[str, Any]:
+        _workspace_id, _team_id, account_id, venue, environment = self._exchange_account_scope(
+            actor_id, exchange_account_id
+        )
+        return self.venue_facts(actor_id, account_id, venue, environment)
+
+    def exchange_account_fact_health(
+        self,
+        actor_id: UUID,
+        exchange_account_id: UUID,
+        *,
+        stale_after_seconds: int,
+        now: datetime,
+    ) -> dict[str, Any]:
+        workspace_id, team_id, account_id, venue, environment = self._exchange_account_scope(
+            actor_id, exchange_account_id
+        )
+        with self.database.session_factory() as session:
+            source = session.scalar(
+                select(RuntimeSourceHealth).where(
+                    RuntimeSourceHealth.team_id == team_id,
+                    RuntimeSourceHealth.source_name == venue,
+                    RuntimeSourceHealth.environment == environment,
+                    RuntimeSourceHealth.account_id == account_id,
+                    RuntimeSourceHealth.venue == venue,
+                )
+            )
+        history_incomplete = bool(
+            source is not None and "HISTORY_INCOMPLETE" in str(source.error_code or "")
+        )
+        if source is None:
+            data_status = "UNKNOWN"
+        elif now - source.checked_at > timedelta(seconds=stale_after_seconds):
+            data_status = "STALE"
+        elif source.status == "SUCCESS" or history_incomplete:
+            data_status = "CURRENT"
+        else:
+            data_status = "UNKNOWN"
+        return {
+            "workspace_id": str(workspace_id),
+            "team_id": str(team_id),
+            "exchange_account_id": str(exchange_account_id),
+            "account_id": account_id,
+            "venue": venue,
+            "environment": environment,
+            "source": "CCXT_PRO",
+            "data_status": data_status,
+            "runtime_status": None if source is None else source.status,
+            "checked_at": None if source is None else _iso(source.checked_at),
+            "last_success_at": None if source is None else _iso(source.last_success_at),
+            "error_code": None if source is None else source.error_code,
+        }
+
+    def current_positions(self, actor_id: UUID, environment: str) -> dict[str, Any]:
+        workspace_id, team_id = self.active_scope_ids(actor_id)
+        with self.database.session_factory() as session:
+            accounts = session.scalars(
+                select(ExchangeAccount)
+                .where(
+                    ExchangeAccount.team_id == team_id,
+                    ExchangeAccount.environment == environment,
+                    ExchangeAccount.deleted_at.is_(None),
+                )
+                .order_by(ExchangeAccount.venue, ExchangeAccount.label, ExchangeAccount.account_id)
+            ).all()
+            visible_accounts = [
+                item
+                for item in accounts
+                if self.can_user(
+                    actor_id,
+                    "venue.view",
+                    item.account_id,
+                    item.venue,
+                )
+            ]
+            account_by_scope = {(item.account_id, item.venue): item for item in visible_accounts}
+            positions = session.scalars(
+                select(Position)
+                .where(
+                    Position.team_id == team_id,
+                    Position.environment == environment,
+                    Position.quantity != Decimal(0),
+                )
+                .order_by(Position.venue, Position.account_id, Position.observed_at.desc())
+            ).all()
+            visible_positions = [
+                item for item in positions if (item.account_id, item.venue) in account_by_scope
+            ]
+            instrument_ids = {item.instrument_id for item in visible_positions}
+            instruments = (
+                session.scalars(
+                    select(Instrument).where(Instrument.instrument_id.in_(instrument_ids))
+                ).all()
+                if instrument_ids
+                else []
+            )
+            instrument_by_id = {item.instrument_id: item for item in instruments}
+
+            projected: list[dict[str, Any]] = []
+            for item in visible_positions:
+                instrument = instrument_by_id.get(item.instrument_id)
+                if instrument is None:
+                    continue
+                account = account_by_scope[(item.account_id, item.venue)]
+                unrealized_pnl = (
+                    None
+                    if item.fact_status != "KNOWN"
+                    else (item.mark_price - item.average_entry_price) * item.quantity
+                )
+                projected.append(
+                    {
+                        "position_id": str(item.position_id),
+                        "exchange_account_id": str(account.exchange_account_id),
+                        "account_id": item.account_id,
+                        "account_label": account.label,
+                        "account_active": account.active,
+                        "venue": item.venue,
+                        "environment": item.environment,
+                        "instrument_id": str(item.instrument_id),
+                        "symbol": instrument.symbol,
+                        "collateral_currency": instrument.collateral_currency,
+                        "direction": "LONG" if item.quantity > 0 else "SHORT",
+                        "quantity": str(abs(item.quantity)),
+                        "signed_quantity": str(item.quantity),
+                        "average_entry_price": str(item.average_entry_price),
+                        "mark_price": str(item.mark_price),
+                        "unrealized_pnl": (None if unrealized_pnl is None else str(unrealized_pnl)),
+                        "fact_status": item.fact_status,
+                        "observed_at": _iso(item.observed_at),
+                    }
+                )
+
+            return {
+                "workspace_id": str(workspace_id),
+                "team_id": str(team_id),
+                "environment": environment,
+                "accounts": [
+                    {
+                        "exchange_account_id": str(item.exchange_account_id),
+                        "account_id": item.account_id,
+                        "label": item.label,
+                        "venue": item.venue,
+                        "active": item.active,
+                    }
+                    for item in visible_accounts
+                ],
+                "positions": projected,
+                "summary": {
+                    "position_count": len(projected),
+                    "account_count": len(
+                        {(item["account_id"], item["venue"]) for item in projected}
+                    ),
+                    "long_count": sum(item["direction"] == "LONG" for item in projected),
+                    "short_count": sum(item["direction"] == "SHORT" for item in projected),
+                    "unknown_count": sum(item["fact_status"] != "KNOWN" for item in projected),
+                },
+            }
+
     def exchange_accounts(self, actor_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(actor_id)
+        workspace_id, team_id = self.active_scope_ids(actor_id)
         with self.database.session_factory() as session:
             assignments = session.scalars(
                 select(RoleAssignment).where(
@@ -36,7 +360,7 @@ class AccountQueries(QueryComponent):
                 item
                 for item in accounts
                 if any(
-                    self.service.can_user(actor_id, action, item.account_id, item.venue)
+                    self.can_user(actor_id, action, item.account_id, item.venue)
                     for action in listing_actions
                 )
             ]
@@ -47,7 +371,7 @@ class AccountQueries(QueryComponent):
                     "account.credentials.manage",
                 }:
                     return False
-                return self.service.can_user(
+                return self.can_user(
                     actor_id,
                     action,
                     account.account_id,
@@ -88,6 +412,7 @@ class AccountQueries(QueryComponent):
     @staticmethod
     def _exchange_account_projection(item: ExchangeAccount) -> dict[str, Any]:
         metadata = dict(item.credential_metadata or {})
+        worker_runtime = dict(item.freqtrade_runtime_metadata or {})
         credential_state = "UNCONFIGURED" if item.credential_version == 0 else "CONFIGURED"
         if item.trading_status == "ELIGIBLE":
             trading_reason = "account policy is eligible; global and task gates still apply"
@@ -108,8 +433,12 @@ class AccountQueries(QueryComponent):
             next_action = "enable the database-bound continuous read-only sync"
         elif item.freqtrade_worker_mode == "UNCONFIGURED":
             next_action = "bind one encrypted Freqtrade worker to this exact account"
-        elif item.freqtrade_worker_mode != "LIVE" or item.freqtrade_worker_status != "VERIFIED":
-            next_action = "verify an account-bound LIVE Freqtrade worker"
+        elif (
+            item.freqtrade_worker_mode
+            != ("LIVE" if item.environment == "LIVE" else "TESTNET")
+            or item.freqtrade_worker_status != "VERIFIED"
+        ):
+            next_action = "verify an account-bound Freqtrade worker for the exact environment"
         elif item.trading_status == "ELIGIBLE":
             next_action = "verify global, sender, risk, and task gates before LIVE execution"
         else:
@@ -120,6 +449,7 @@ class AccountQueries(QueryComponent):
             "account_id": item.account_id,
             "venue": item.venue,
             "environment": item.environment,
+            "account_mode": str(metadata.get("account_mode") or "STANDARD"),
             "label": item.label,
             "registration_source": item.registration_source,
             "active": item.active,
@@ -130,6 +460,11 @@ class AccountQueries(QueryComponent):
                 "checked_at": _iso(item.last_connection_check_at),
                 "last_verified_at": _iso(item.last_verified_at),
                 "read_only_capability": item.connection_status == "VERIFIED",
+                **(
+                    {"diagnostics": metadata["last_connection_error"]}
+                    if isinstance(metadata.get("last_connection_error"), dict)
+                    else {}
+                ),
             },
             "trading": {
                 "status": item.trading_status,
@@ -176,14 +511,34 @@ class AccountQueries(QueryComponent):
                 "error_code": item.freqtrade_error_code,
                 "checked_at": _iso(item.freqtrade_last_check_at),
                 "last_verified_at": _iso(item.freqtrade_last_verified_at),
+                "runtime": {
+                    **worker_runtime,
+                    "fingerprint_verified": bool(
+                        item.freqtrade_runtime_fingerprint
+                        and item.freqtrade_runtime_fingerprint
+                        == worker_runtime.get("observed_fingerprint")
+                        and item.freqtrade_worker_status == "VERIFIED"
+                    ),
+                    "verified_fingerprint_present": bool(
+                        item.freqtrade_runtime_fingerprint
+                    ),
+                },
                 "hip3_dexes": list(item.freqtrade_hip3_dexes or []),
                 "auth": {
                     "state": ("CONFIGURED" if item.freqtrade_auth_version > 0 else "UNCONFIGURED"),
                     "version": item.freqtrade_auth_version,
                     "username_hint": (item.freqtrade_auth_metadata or {}).get("username_hint"),
+                    "rpc_websocket_configured": bool(
+                        (item.freqtrade_auth_metadata or {}).get("ws_configured")
+                    ),
                 },
                 "live_ready": (
                     item.freqtrade_worker_mode == "LIVE"
+                    and item.freqtrade_worker_status == "VERIFIED"
+                ),
+                "scope_ready": (
+                    item.freqtrade_worker_mode
+                    == ("LIVE" if item.environment == "LIVE" else "TESTNET")
                     and item.freqtrade_worker_status == "VERIFIED"
                 ),
                 "order_send": False,
@@ -200,9 +555,9 @@ class AccountQueries(QueryComponent):
         venue: str,
         environment: str,
     ) -> dict[str, Any]:
-        if not self.service.can_user(user_id, "view", account_id, venue):
+        if not self.can_user(user_id, "view", account_id, venue):
             raise DomainRejected("RBAC_DENIED", "venue facts are outside the current scope")
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
             account = session.scalar(
                 select(ExchangeAccount.exchange_account_id).where(

@@ -39,6 +39,13 @@ class ProposalNotification:
     risk_tier: str | None = None
     quantity: str | None = None
     max_risk: str | None = None
+    account_id: str | None = None
+    venue: str | None = None
+    order_type: str | None = None
+    estimated_notional: str | None = None
+    quote_currency: str | None = None
+    collateral_currency: str | None = None
+    leverage: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,14 +90,31 @@ class TelegramProposalReviewAction:
     risk_tier: str | None = None
     max_risk: str | None = None
     expires_at: str | None = None
+    account_id: str | None = None
+    venue: str | None = None
+    order_type: str | None = None
+    quantity: str | None = None
+    estimated_notional: str | None = None
+    quote_currency: str | None = None
+    collateral_currency: str | None = None
+    leverage: str | None = None
+    delivery_id: UUID | None = None
+    route_version: int | None = None
 
 
 @dataclass(frozen=True)
-class _ActionPrompt:
+class TelegramReviewPrompt:
     action: TelegramProposalReviewAction
     source_callback_key: str
     original_text: str
     original_reply_markup: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TelegramCallbackReference:
+    stage: str
+    action: str
+    delivery_id: UUID
 
 
 MAX_TELEGRAM_TEXT = 3_500
@@ -183,9 +207,16 @@ def render_proposal_notification(notification: ProposalNotification) -> str:
         f"<b>截止</b>　{_format_deadline(notification.expires_at)}",
         f"<b>币对 / 方向</b>　{_optional(notification.symbol)} / "
         f"{_labeled_code(notification.direction, _DIRECTION_LABELS)}",
+        f"<b>账户 / 场所</b>　{_optional(notification.account_id)} / "
+        f"{_optional(notification.venue)}",
+        f"<b>订单</b>　{_optional(notification.order_type)} · 数量 "
+        f"{_optional(notification.quantity)}",
+        f"<b>预计名义价值 / 杠杆</b>　{_optional(notification.estimated_notional)} "
+        f"{_optional(notification.quote_currency, fallback='')} · "
+        f"{_optional(notification.leverage)}x",
         f"<b>风险</b>　{_labeled_code(notification.risk_tier, _RISK_LABELS)}"
-        f" · 最大风险 {_optional(notification.max_risk)}",
-        f"<b>数量</b>　{_optional(notification.quantity)}",
+        f" · 最大风险 {_optional(notification.max_risk)} "
+        f"{_optional(notification.collateral_currency, fallback='')}",
     ]
     summary = _escaped(notification.summary, max_length=1_800)
     return _ensure_message_limit(
@@ -208,7 +239,8 @@ def render_help() -> str:
         "• 对当前冻结提案批准或拒绝\n"
         "• 每次操作都需要第二次明确确认并写入统一审计\n\n"
         "<b>明确不支持</b>\n"
-        "• 不看资金、不下单、不划转资金\n"
+        "• Bot 本身不看资金、不调用交易所、不划转资金\n"
+        "• 批准达到阈值后，TradeOps 后台按实时风控和 Gate 自动执行，不再要求后续按钮\n"
         "• 不切换风险 Gate、不改成员权限\n"
         "• 不绕过创建者不可自审、对象版本、到期和服务端权限校验"
     )
@@ -220,7 +252,8 @@ def render_status() -> str:
         "<b>会话</b>　仅限已绑定的内部成员私聊\n"
         "<b>动作</b>　冻结提案批准 / 拒绝，必须二次确认\n"
         "<b>复核</b>　服务端重新检查身份、独立审核、版本与到期\n"
-        "<b>禁止</b>　资金、订单、风险开关、权限变更\n"
+        "<b>边界</b>　Bot 只写审核结论；TradeOps 后台按风控和 Gate 自动执行交易\n"
+        "<b>禁止</b>　资金动作、风险开关、权限变更\n"
         "<b>权威状态</b>　以 Trading Web 与 PostgreSQL 为准\n\n"
         "此状态不会显示余额、密钥、Token、私钥或地址。"
     )
@@ -290,6 +323,51 @@ TelegramBinder = Callable[[str, str, str], str]
 TelegramChatResolver = Callable[[UUID], str | None]
 TelegramTodoResolver = Callable[[str], list[ProposalNotification]]
 TelegramActionHandler = Callable[[TelegramProposalReviewAction, int], str]
+TelegramActionResolver = Callable[[str], TelegramReviewPrompt | None]
+
+
+def telegram_callback_data(stage: str, action: str, delivery_id: UUID) -> str:
+    stage_code = {"source": "s", "confirm": "c", "cancel": "x"}[stage]
+    action_code = {"APPROVE_PROPOSAL": "a", "REJECT_PROPOSAL": "r"}[action]
+    return f"tr{stage_code}{action_code}:{delivery_id.hex}"
+
+
+def parse_telegram_callback_data(value: str) -> TelegramCallbackReference | None:
+    if len(value) != 37 or not value.startswith("tr") or value[4] != ":":
+        return None
+    stage = {"s": "source", "c": "confirm", "x": "cancel"}.get(value[2])
+    action = {"a": "APPROVE_PROPOSAL", "r": "REJECT_PROPOSAL"}.get(value[3])
+    if stage is None or action is None:
+        return None
+    try:
+        delivery_id = UUID(hex=value[5:])
+    except ValueError:
+        return None
+    return TelegramCallbackReference(stage=stage, action=action, delivery_id=delivery_id)
+
+
+def proposal_review_keyboard(delivery_id: UUID, review_url: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "需确认 · 批准",
+                    "callback_data": telegram_callback_data(
+                        "source", "APPROVE_PROPOSAL", delivery_id
+                    ),
+                }
+            ],
+            [
+                {
+                    "text": "需确认 · 拒绝",
+                    "callback_data": telegram_callback_data(
+                        "source", "REJECT_PROPOSAL", delivery_id
+                    ),
+                }
+            ],
+            [{"text": "打开 Web 安全审核", "url": review_url}],
+        ]
+    }
 
 
 class TelegramUnavailable(RuntimeError):
@@ -392,9 +470,9 @@ class TelegramBotClient:
 class TelegramBotGateway(MockTelegramGateway):
     """Real private-chat Telegram transport with local long polling.
 
-    Business state remains in Trading. Short-lived callback mappings are intentionally
-    process-local: after a restart old buttons fail closed and the user must use a fresh
-    notification or the Web/PWA detail page.
+    Business state remains in Trading. Route-delivered callbacks are resolved from the
+    durable outbox after every click, so a restart does not weaken identity or proposal
+    checks. The legacy direct-send mapping remains process-local for compatibility tests.
     """
 
     _ACTION_LABELS: ClassVar[dict[str, str]] = {
@@ -402,7 +480,10 @@ class TelegramBotGateway(MockTelegramGateway):
         "REJECT_PROPOSAL": "拒绝冻结提案",
     }
     _ACTION_IMPACTS: ClassVar[dict[str, str]] = {
-        "APPROVE_PROPOSAL": "记录一次独立批准。仍需风险检查、短期授权和交易 Gate；不会下单。",
+        "APPROVE_PROPOSAL": (
+            "记录一次独立批准。达到审核阈值且实时风控、短期授权和交易 Gate 全部通过后，"
+            "TradeOps 会自动预留风险、调用 Freqtrade、查询成交并对账；不再要求后续按钮。"
+        ),
         "REJECT_PROPOSAL": "拒绝并终止当前冻结提案；不会创建订单或资金动作。",
     }
     _COMMANDS: ClassVar[list[dict[str, str]]] = [
@@ -421,6 +502,7 @@ class TelegramBotGateway(MockTelegramGateway):
         binder: TelegramBinder,
         chat_resolver: TelegramChatResolver,
         todo_resolver: TelegramTodoResolver | None = None,
+        action_resolver: TelegramActionResolver | None = None,
         review_queue_url: str | None = None,
         poll_timeout_seconds: int = 20,
         client: TelegramBotClient | None = None,
@@ -432,13 +514,14 @@ class TelegramBotGateway(MockTelegramGateway):
         self._binder = binder
         self._chat_resolver = chat_resolver
         self._todo_resolver = todo_resolver
+        self._action_resolver = action_resolver
         self._review_queue_url = review_queue_url
         self._poll_timeout_seconds = poll_timeout_seconds
         self._action_handler: TelegramActionHandler | None = None
         self._actions: dict[str, TelegramProposalReviewAction] = {}
-        self._source_prompts: dict[str, _ActionPrompt] = {}
-        self._confirmations: dict[str, _ActionPrompt] = {}
-        self._cancellations: dict[str, _ActionPrompt] = {}
+        self._source_prompts: dict[str, TelegramReviewPrompt] = {}
+        self._confirmations: dict[str, TelegramReviewPrompt] = {}
+        self._cancellations: dict[str, TelegramReviewPrompt] = {}
         self._stop_event = threading.Event()
         self._poll_thread: threading.Thread | None = None
         self._last_poll_success_at: datetime | None = None
@@ -481,6 +564,9 @@ class TelegramBotGateway(MockTelegramGateway):
 
     def set_action_handler(self, handler: TelegramActionHandler) -> None:
         self._action_handler = handler
+
+    def set_action_resolver(self, resolver: TelegramActionResolver) -> None:
+        self._action_resolver = resolver
 
     def start(self) -> None:
         if self.running:
@@ -536,9 +622,17 @@ class TelegramBotGateway(MockTelegramGateway):
                     risk_tier=notification.risk_tier,
                     max_risk=notification.max_risk,
                     expires_at=notification.expires_at,
+                    account_id=notification.account_id,
+                    venue=notification.venue,
+                    order_type=notification.order_type,
+                    quantity=notification.quantity,
+                    estimated_notional=notification.estimated_notional,
+                    quote_currency=notification.quote_currency,
+                    collateral_currency=notification.collateral_currency,
+                    leverage=notification.leverage,
                 )
                 rows.append([{"text": label, "callback_data": callback_key}])
-            rows.append([{"text": "查看完整冻结快照", "url": notification.review_url}])
+            rows.append([{"text": "打开 Web 安全审核", "url": notification.review_url}])
             keyboard = {"inline_keyboard": rows}
         else:
             keyboard = {
@@ -557,7 +651,7 @@ class TelegramBotGateway(MockTelegramGateway):
             with self._lock:
                 self._actions.update(pending_actions)
                 for callback_key, pending_action in pending_actions.items():
-                    self._source_prompts[callback_key] = _ActionPrompt(
+                    self._source_prompts[callback_key] = TelegramReviewPrompt(
                         action=pending_action,
                         source_callback_key=callback_key,
                         original_text=text,
@@ -859,6 +953,16 @@ class TelegramBotGateway(MockTelegramGateway):
             confirmation = self._confirmations.get(callback_key)
             cancellation = self._cancellations.get(callback_key)
         prompt = source_prompt or confirmation or cancellation
+        durable_reference = parse_telegram_callback_data(callback_key)
+        if prompt is None and durable_reference is not None and self._action_resolver is not None:
+            prompt = self._action_resolver(callback_key)
+            if prompt is not None:
+                if durable_reference.stage == "source":
+                    source_prompt = prompt
+                elif durable_reference.stage == "confirm":
+                    confirmation = prompt
+                else:
+                    cancellation = prompt
         resolved_action = action if prompt is None else prompt.action
         if (
             resolved_action is None
@@ -899,11 +1003,20 @@ class TelegramBotGateway(MockTelegramGateway):
         callback_id: str,
         chat_id: int,
         message_id: object,
-        prompt: _ActionPrompt,
+        prompt: TelegramReviewPrompt,
     ) -> None:
-        suffix = prompt.source_callback_key.removeprefix("pr_")
-        confirm_key = "cc_" + suffix
-        cancel_key = "cx_" + suffix
+        durable_reference = parse_telegram_callback_data(prompt.source_callback_key)
+        if durable_reference is None:
+            suffix = prompt.source_callback_key.removeprefix("pr_")
+            confirm_key = "cc_" + suffix
+            cancel_key = "cx_" + suffix
+        else:
+            confirm_key = telegram_callback_data(
+                "confirm", prompt.action.action, durable_reference.delivery_id
+            )
+            cancel_key = telegram_callback_data(
+                "cancel", prompt.action.action, durable_reference.delivery_id
+            )
         with self._lock:
             self._confirmations[confirm_key] = prompt
             self._cancellations[cancel_key] = prompt
@@ -927,7 +1040,7 @@ class TelegramBotGateway(MockTelegramGateway):
         callback_id: str,
         chat_id: int,
         message_id: object,
-        prompt: _ActionPrompt,
+        prompt: TelegramReviewPrompt,
     ) -> None:
         self._discard_confirmation(prompt)
         self._answer_callback(callback_id, "已取消，未提交任何操作。", show_alert=False)
@@ -943,7 +1056,7 @@ class TelegramBotGateway(MockTelegramGateway):
         callback_id: str,
         chat_id: int,
         message_id: object,
-        prompt: _ActionPrompt,
+        prompt: TelegramReviewPrompt,
         update_id: int,
     ) -> None:
         if self._action_handler is None:
@@ -981,13 +1094,13 @@ class TelegramBotGateway(MockTelegramGateway):
             {"inline_keyboard": []},
         )
 
-    def _discard_confirmation(self, prompt: _ActionPrompt) -> None:
+    def _discard_confirmation(self, prompt: TelegramReviewPrompt) -> None:
         suffix = prompt.source_callback_key.removeprefix("pr_")
         with self._lock:
             self._confirmations.pop("cc_" + suffix, None)
             self._cancellations.pop("cx_" + suffix, None)
 
-    def _discard_action_buttons(self, prompt: _ActionPrompt) -> None:
+    def _discard_action_buttons(self, prompt: TelegramReviewPrompt) -> None:
         with self._lock:
             for row in prompt.original_reply_markup.get("inline_keyboard", []):
                 for button in row:
@@ -1009,8 +1122,13 @@ class TelegramBotGateway(MockTelegramGateway):
             f"<b>结论</b>　{_escaped(self._ACTION_LABELS[action.action])}\n"
             f"<b>币对 / 方向</b>　{_optional(action.symbol)} / "
             f"{_labeled_code(action.direction, _DIRECTION_LABELS)}\n"
+            f"<b>账户 / 场所</b>　{_optional(action.account_id)} / {_optional(action.venue)}\n"
+            f"<b>订单</b>　{_optional(action.order_type)} · 数量 {_optional(action.quantity)}\n"
+            f"<b>预计名义价值 / 杠杆</b>　{_optional(action.estimated_notional)} "
+            f"{_optional(action.quote_currency, fallback='')} · {_optional(action.leverage)}x\n"
             f"<b>风险</b>　{_labeled_code(action.risk_tier, _RISK_LABELS)}"
-            f" · 最大风险 {_optional(action.max_risk)}\n"
+            f" · 最大风险 {_optional(action.max_risk)} "
+            f"{_optional(action.collateral_currency, fallback='')}\n"
             f"<b>截止</b>　{_format_deadline(action.expires_at)}\n"
             f"<b>对象</b>　提案 <code>{_short_id(action.proposal_id)}</code>\n"
             f"<b>环境 / 版本</b>　<code>{_escaped(action.environment)}</code> "
@@ -1045,7 +1163,12 @@ class TelegramBotGateway(MockTelegramGateway):
             f"<b>对象</b>　提案 <code>{_short_id(action.proposal_id)}</code>\n"
             f"<b>提交版本</b>　v{action.proposal_version}\n\n"
             f"{result_text}\n\n"
-            "按钮已失效。批准提案不代表风险检查通过、授权已签发或订单已创建。"
+            + (
+                "按钮已失效。批准达到阈值后，TradeOps 会自动运行风控、授权、风险预留、"
+                "Freqtrade 执行、成交查询和对账；事实、权限或 Gate 不满足时保持阻断。"
+                if action.action == "APPROVE_PROPOSAL"
+                else "按钮已失效。当前冻结提案已按权威服务端结果结束。"
+            )
         )
 
     def _edit_message(

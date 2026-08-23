@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from decimal import Decimal
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -14,13 +16,679 @@ from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.credentials import CredentialCipher
 from trading_control_plane.database import Database
-from trading_control_plane.domain import DomainRejected, Role
-from trading_control_plane.exchange_connection import ConnectionProbeResult
+from trading_control_plane.domain import DomainRejected, ExecutionEnvironment, Role
 from trading_control_plane.freqtrade import FreqtradeWorkerClient, FreqtradeWorkerSpec
-from trading_control_plane.models import AuditEvent, ExchangeAccount, RoleAssignment, User
+from trading_control_plane.models import (
+    AuditEvent,
+    DirectCapitalOperation,
+    ExchangeAccount,
+    Instrument,
+    OrderIntent,
+    Position,
+    RoleAssignment,
+    RuntimeSourceHealth,
+    User,
+    VenueOrder,
+)
+from trading_control_plane.models import (
+    VenueFill as PersistedVenueFill,
+)
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
+from trading_control_plane.runtime_contracts import ConnectionProbeResult
 from trading_control_plane.service import TradingService
+from trading_control_plane.venue_read_only import (
+    VenueEquity,
+    VenueFill,
+    VenueInstrument,
+    VenuePosition,
+    VenueReadOnlySnapshot,
+)
+from trading_control_plane.venue_read_only import (
+    VenueOrder as ReadOnlyVenueOrder,
+)
+
+
+def _runtime_probe(fingerprint: str, *, whitelist: list[str]) -> dict[str, object]:
+    return {
+        "status": "READY",
+        "runtime_fingerprint": fingerprint,
+        "whitelist": whitelist,
+        "exchange": "binance",
+        "trading_mode": "futures",
+        "dry_run": False,
+        "demo_trading": False,
+        "worker_state": "running",
+        "version": "2026.7",
+        "bot_name": "tradeops-binance-live",
+        "force_entry_enabled": True,
+        "position_adjustment_enabled": True,
+        "external_order_send": True,
+        "network": "LIVE",
+    }
+
+
+def test_freqtrade_runtime_fingerprint_change_invalidates_verified_binding(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("worker-fingerprint-admin", now=now)
+    account_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id="worker-fingerprint-account",
+        venue="BINANCE",
+        label="Worker Fingerprint",
+        credentials={"api_key": "account-key", "api_secret": "account-secret"},
+        idempotency_key="worker-fingerprint-account",
+        now=now,
+    )
+    configured = service.configure_exchange_account_freqtrade_worker(
+        account_id,
+        actor_id=admin,
+        mode="LIVE",
+        name="worker-fingerprint-live",
+        base_url="http://127.0.0.1:18091",
+        username="control-plane",
+        password="worker-password",  # noqa: S106
+        ws_token="worker-fingerprint-rpc-token",  # noqa: S106
+        hip3_dexes=(),
+        expected_version=1,
+        idempotency_key="worker-fingerprint-configure",
+        now=now,
+    )
+    unverified_binding, replay = service.prepare_exchange_account_freqtrade_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=int(configured["version"]),
+        idempotency_key="worker-fingerprint-runtime-unverified",
+    )
+    assert unverified_binding is not None and replay is None
+    assert (
+        service.record_freqtrade_runtime_probe(
+            unverified_binding,
+            probe_result=_runtime_probe("a" * 64, whitelist=["SOL/USDT:USDT"]),
+            error_code=None,
+            now=now,
+        )
+        == "FREQTRADE_WORKER_NOT_VERIFIED"
+    )
+    still_unverified = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert still_unverified["execution_worker"]["status"] == "NOT_VERIFIED"
+    assert still_unverified["execution_worker"]["runtime"]["fingerprint_verified"] is False
+    first_binding, replay = service.prepare_exchange_account_freqtrade_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=int(still_unverified["version"]),
+        idempotency_key="worker-fingerprint-verify-a",
+    )
+    assert first_binding is not None and replay is None
+    verified = service.record_exchange_account_freqtrade_verification(
+        first_binding,
+        actor_id=admin,
+        error_code=None,
+        idempotency_key="worker-fingerprint-verify-a",
+        now=now,
+        probe_result=_runtime_probe("a" * 64, whitelist=["SOL/USDT:USDT"]),
+    )
+    runtime_binding, replay = service.prepare_exchange_account_freqtrade_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=int(verified["version"]),
+        idempotency_key="worker-fingerprint-runtime-b",
+    )
+    assert runtime_binding is not None and replay is None
+    assert (
+        service.record_freqtrade_runtime_probe(
+            runtime_binding,
+            probe_result=None,
+            error_code="FREQTRADE_WORKER_UNAVAILABLE",
+            now=now + timedelta(milliseconds=250),
+        )
+        == "FREQTRADE_WORKER_UNAVAILABLE"
+    )
+    unavailable = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert unavailable["execution_worker"]["status"] == "VERIFIED"
+    assert (
+        unavailable["execution_worker"]["error_code"]
+        == "FREQTRADE_WORKER_UNAVAILABLE"
+    )
+    recovery_binding, replay = service.prepare_exchange_account_freqtrade_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=int(unavailable["version"]),
+        idempotency_key="worker-fingerprint-runtime-recovery",
+    )
+    assert recovery_binding is not None and replay is None
+    assert (
+        service.record_freqtrade_runtime_probe(
+            recovery_binding,
+            probe_result=_runtime_probe("a" * 64, whitelist=["SOL/USDT:USDT"]),
+            error_code=None,
+            now=now + timedelta(milliseconds=500),
+        )
+        is None
+    )
+    recovered = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert recovered["execution_worker"]["status"] == "VERIFIED"
+    assert recovered["execution_worker"]["error_code"] is None
+    changed_binding, replay = service.prepare_exchange_account_freqtrade_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=int(recovered["version"]),
+        idempotency_key="worker-fingerprint-runtime-changed",
+    )
+    assert changed_binding is not None and replay is None
+    error = service.record_freqtrade_runtime_probe(
+        changed_binding,
+        probe_result=_runtime_probe(
+            "b" * 64,
+            whitelist=["SOL/USDT:USDT", "AVA/USDT:USDT"],
+        ),
+        error_code=None,
+        now=now + timedelta(seconds=1),
+    )
+    assert error == "FREQTRADE_RUNTIME_FINGERPRINT_CHANGED"
+    stale = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert stale["execution_worker"]["status"] == "STALE"
+    assert (
+        stale["execution_worker"]["error_code"]
+        == "FREQTRADE_RUNTIME_FINGERPRINT_CHANGED"
+    )
+    assert stale["execution_worker"]["runtime"]["fingerprint_verified"] is False
+
+    replacement, replay = service.prepare_exchange_account_freqtrade_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=int(stale["version"]),
+        idempotency_key="worker-fingerprint-verify-b",
+    )
+    assert replacement is not None and replay is None
+    service.record_exchange_account_freqtrade_verification(
+        replacement,
+        actor_id=admin,
+        error_code=None,
+        idempotency_key="worker-fingerprint-verify-b",
+        now=now + timedelta(seconds=2),
+        probe_result=_runtime_probe(
+            "b" * 64,
+            whitelist=["SOL/USDT:USDT", "AVA/USDT:USDT"],
+        ),
+    )
+    current = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert current["execution_worker"]["status"] == "VERIFIED"
+    assert current["execution_worker"]["runtime"]["fingerprint_verified"] is True
+
+
+def test_fact_adapter_ingestion_refreshes_exact_account_runtime_health(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("fact-health-admin", now=now)
+    account_uuid = service.create_exchange_account(
+        actor_id=admin,
+        account_id="fact-health-main",
+        venue="BINANCE",
+        label="Fact Health Main",
+        credentials={"api_key": "fact-health-key", "api_secret": "fact-health-secret"},
+        idempotency_key="create-fact-health-account",
+        now=now,
+    )
+    command, replay = service.prepare_exchange_account_connection_verification(
+        account_uuid,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key="verify-fact-health-account",
+    )
+    assert command is not None and replay is None
+    verified = service.record_exchange_account_connection_verification(
+        command,
+        ConnectionProbeResult(True, None),
+        actor_id=admin,
+        idempotency_key="record-fact-health-verification",
+        now=now,
+    )
+    service.configure_exchange_account_runtime_sync(
+        account_uuid,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(verified["version"]),
+        idempotency_key="enable-fact-health-runtime",
+        now=now,
+    )
+    binding = service.runtime_account_bindings()[0]
+    snapshot = VenueReadOnlySnapshot(
+        symbol="BTCUSDT",
+        observed_at=now,
+        instrument=VenueInstrument(
+            symbol="BTCUSDT",
+            tick_size=Decimal("0.1"),
+            lot_size=Decimal("0.001"),
+            minimum_notional=Decimal("5"),
+            quote_currency="USDT",
+            collateral_currency="USDT",
+            active=True,
+        ),
+        orders=(),
+        fills=(),
+        position=VenuePosition(
+            quantity=Decimal(0),
+            average_entry_price=Decimal(0),
+            mark_price=Decimal("60000"),
+            observed_at=now,
+        ),
+        equity=VenueEquity(
+            equity=Decimal("100"),
+            available_balance=Decimal("100"),
+            currency="USDT",
+            observed_at=now,
+        ),
+        funding=(),
+        protection=None,
+    )
+    eth_snapshot = replace(
+        snapshot,
+        symbol="ETHUSDT",
+        instrument=replace(snapshot.instrument, symbol="ETHUSDT"),
+        position=replace(
+            snapshot.position,
+            quantity=Decimal("0.1"),
+            average_entry_price=Decimal("3000"),
+            mark_price=Decimal("3010"),
+        ),
+    )
+
+    service.ingest_normalized_read_only_account_snapshot(
+        binding.account_id,
+        binding.service_principal_id,
+        (snapshot, eth_snapshot),
+        venue=binding.venue,
+        environment=ExecutionEnvironment.LIVE,
+        runtime_binding=binding,
+        now=now,
+    )
+    with database.session_factory() as session:
+        health = session.scalar(
+            select(RuntimeSourceHealth).where(
+                RuntimeSourceHealth.team_id == binding.team_id,
+                RuntimeSourceHealth.account_id == binding.account_id,
+                RuntimeSourceHealth.venue == binding.venue,
+            )
+        )
+        assert health is not None
+        assert health.status == "SUCCESS"
+        assert health.checked_at == now
+        assert health.last_success_at == now
+        assert health.error_code is None
+
+    degraded_at = now + timedelta(seconds=1)
+    service.ingest_normalized_read_only_account_snapshot(
+        binding.account_id,
+        binding.service_principal_id,
+        (
+            replace(
+                snapshot,
+                observed_at=degraded_at,
+                history_error_code="FACT_ADAPTER_HISTORY_INCOMPLETE",
+            ),
+        ),
+        venue=binding.venue,
+        environment=ExecutionEnvironment.LIVE,
+        runtime_binding=binding,
+        now=degraded_at,
+    )
+    projected = TradingQueries(database).exchange_account_fact_health(
+        admin,
+        account_uuid,
+        stale_after_seconds=360,
+        now=degraded_at,
+    )
+    assert projected["data_status"] == "CURRENT"
+    assert projected["runtime_status"] == "FAILED"
+    assert projected["error_code"] == "FACT_ADAPTER_HISTORY_INCOMPLETE"
+
+    with database.session_factory() as session:
+        eth_position = session.scalar(
+            select(Position)
+            .join(Instrument, Position.instrument_id == Instrument.instrument_id)
+            .where(
+                Position.team_id == binding.team_id,
+                Position.account_id == binding.account_id,
+                Position.venue == binding.venue,
+                Instrument.symbol == "ETHUSDT",
+            )
+        )
+        assert eth_position is not None
+        covered_events = session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "BINANCE_POSITION_COVERED",
+                AuditEvent.object_id == str(eth_position.position_id),
+            )
+        ).all()
+        assert eth_position.quantity == 0
+        assert eth_position.observed_at == degraded_at
+        assert len(covered_events) == 1
+
+    refreshed_at = degraded_at + timedelta(seconds=1)
+    service.ingest_normalized_read_only_account_snapshot(
+        binding.account_id,
+        binding.service_principal_id,
+        (
+            replace(
+                snapshot,
+                observed_at=refreshed_at,
+                history_error_code="FACT_ADAPTER_HISTORY_INCOMPLETE",
+            ),
+        ),
+        venue=binding.venue,
+        environment=ExecutionEnvironment.LIVE,
+        runtime_binding=binding,
+        now=refreshed_at,
+    )
+    with database.session_factory() as session:
+        eth_position = session.scalar(
+            select(Position)
+            .join(Instrument, Position.instrument_id == Instrument.instrument_id)
+            .where(
+                Position.team_id == binding.team_id,
+                Position.account_id == binding.account_id,
+                Position.venue == binding.venue,
+                Instrument.symbol == "ETHUSDT",
+            )
+        )
+        assert eth_position is not None
+        covered_events = session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "BINANCE_POSITION_COVERED",
+                AuditEvent.object_id == str(eth_position.position_id),
+            )
+        ).all()
+        assert eth_position.observed_at == refreshed_at
+        assert len(covered_events) == 1
+
+
+def test_confirmed_external_fill_closes_matching_unbound_order(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("external-fill-admin", now=now)
+    account_uuid = service.create_exchange_account(
+        actor_id=admin,
+        account_id="external-fill-main",
+        venue="BINANCE",
+        label="External Fill Main",
+        credentials={"api_key": "external-fill-key", "api_secret": "external-fill-secret"},
+        idempotency_key="create-external-fill-account",
+        now=now,
+    )
+    command, replay = service.prepare_exchange_account_connection_verification(
+        account_uuid,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key="verify-external-fill-account",
+    )
+    assert command is not None and replay is None
+    verified = service.record_exchange_account_connection_verification(
+        command,
+        ConnectionProbeResult(True, None),
+        actor_id=admin,
+        idempotency_key="record-external-fill-verification",
+        now=now,
+    )
+    service.configure_exchange_account_runtime_sync(
+        account_uuid,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(verified["version"]),
+        idempotency_key="enable-external-fill-runtime",
+        now=now,
+    )
+    binding = service.runtime_account_bindings()[0]
+    base = VenueReadOnlySnapshot(
+        symbol="SOLUSDT",
+        observed_at=now,
+        instrument=VenueInstrument(
+            symbol="SOLUSDT",
+            tick_size=Decimal("0.01"),
+            lot_size=Decimal("0.001"),
+            minimum_notional=Decimal("5"),
+            quote_currency="USDT",
+            collateral_currency="USDT",
+            active=True,
+        ),
+        orders=(
+            ReadOnlyVenueOrder(
+                order_id="external-close-order",
+                client_order_id="external-close-client",
+                status="SENT",
+                side="SELL",
+                order_type="MARKET",
+                ordered_quantity=Decimal("0.130"),
+                filled_quantity=Decimal(0),
+                stop_price=Decimal(0),
+                reduce_only=True,
+                close_position=False,
+                observed_at=now,
+            ),
+            ReadOnlyVenueOrder(
+                order_id="external-protection-order",
+                client_order_id="external-protection-client",
+                status="SENT",
+                side="SELL",
+                order_type="STOPLOSS",
+                ordered_quantity=Decimal("0.130"),
+                filled_quantity=Decimal(0),
+                stop_price=Decimal("80"),
+                reduce_only=True,
+                close_position=False,
+                observed_at=now,
+            ),
+        ),
+        fills=(),
+        position=VenuePosition(
+            quantity=Decimal("0.130"),
+            average_entry_price=Decimal("82"),
+            mark_price=Decimal("81.84"),
+            observed_at=now,
+        ),
+        equity=VenueEquity(
+            equity=Decimal("100"),
+            available_balance=Decimal("90"),
+            currency="USDT",
+            observed_at=now,
+        ),
+        funding=(),
+        protection=None,
+    )
+    service.ingest_normalized_read_only_account_snapshot(
+        binding.account_id,
+        binding.service_principal_id,
+        (base,),
+        venue=binding.venue,
+        environment=ExecutionEnvironment.LIVE,
+        runtime_binding=binding,
+        now=now,
+    )
+
+    filled_at = now + timedelta(seconds=1)
+    filled = replace(
+        base,
+        observed_at=filled_at,
+        orders=(),
+        fills=(
+            VenueFill(
+                fill_id="external-close-fill",
+                order_id="external-close-order",
+                side="SELL",
+                quantity=Decimal("0.130"),
+                price=Decimal("81.84"),
+                fee=Decimal("0.004"),
+                fee_currency="USDT",
+                executed_at=filled_at,
+            ),
+        ),
+        position=replace(
+            base.position,
+            quantity=Decimal(0),
+            average_entry_price=Decimal(0),
+            observed_at=filled_at,
+        ),
+        equity=replace(base.equity, observed_at=filled_at),
+    )
+    for observed_at in (filled_at, filled_at + timedelta(seconds=1)):
+        service.ingest_normalized_read_only_account_snapshot(
+            binding.account_id,
+            binding.service_principal_id,
+            (replace(filled, observed_at=observed_at),),
+            venue=binding.venue,
+            environment=ExecutionEnvironment.LIVE,
+            runtime_binding=binding,
+            now=observed_at,
+        )
+
+    with database.session_factory() as session:
+        order = session.scalar(
+            select(VenueOrder).where(VenueOrder.venue_order_id == "external-close-order")
+        )
+        assert order is not None
+        assert order.order_intent_id is None
+        assert order.status == "FILLED"
+        assert order.ordered_quantity == Decimal("0.130")
+        assert order.filled_quantity == Decimal("0.130")
+        protection_order = session.scalar(
+            select(VenueOrder).where(
+                VenueOrder.venue_order_id == "external-protection-order"
+            )
+        )
+        assert protection_order is not None
+        assert protection_order.order_intent_id is None
+        assert protection_order.status == "CANCELLED"
+        assert session.query(PersistedVenueFill).count() == 1
+        assert session.query(OrderIntent).count() == 0
+
+    fail_closed_at = filled_at + timedelta(seconds=2)
+    nonzero_snapshot = replace(
+        base,
+        symbol="ETHUSDT",
+        observed_at=fail_closed_at,
+        instrument=replace(base.instrument, symbol="ETHUSDT"),
+        orders=(
+            replace(
+                base.orders[1],
+                order_id="nonzero-protection-order",
+                client_order_id="nonzero-protection-client",
+                observed_at=fail_closed_at,
+            ),
+            replace(
+                base.orders[1],
+                order_id="still-open-protection-order",
+                client_order_id="still-open-protection-client",
+                observed_at=fail_closed_at,
+            ),
+            replace(
+                base.orders[0],
+                order_id="ordinary-market-order",
+                client_order_id="ordinary-market-client",
+                reduce_only=False,
+                observed_at=fail_closed_at,
+            ),
+            replace(
+                base.orders[0],
+                order_id="ordinary-limit-order",
+                client_order_id="ordinary-limit-client",
+                order_type="LIMIT",
+                reduce_only=False,
+                observed_at=fail_closed_at,
+            ),
+        ),
+        fills=(),
+        position=replace(
+            base.position,
+            quantity=Decimal("0.2"),
+            average_entry_price=Decimal("3000"),
+            mark_price=Decimal("3010"),
+            observed_at=fail_closed_at,
+        ),
+        equity=replace(base.equity, observed_at=fail_closed_at),
+    )
+    unknown_snapshot = replace(
+        nonzero_snapshot,
+        symbol="XRPUSDT",
+        instrument=replace(nonzero_snapshot.instrument, symbol="XRPUSDT"),
+        orders=(
+            replace(
+                base.orders[1],
+                order_id="unknown-position-protection-order",
+                client_order_id="unknown-position-protection-client",
+                observed_at=fail_closed_at,
+            ),
+        ),
+        position=replace(
+            base.position,
+            quantity=Decimal("10"),
+            average_entry_price=Decimal("1"),
+            mark_price=Decimal("1"),
+            observed_at=fail_closed_at,
+        ),
+    )
+    service.ingest_normalized_read_only_account_snapshot(
+        binding.account_id,
+        binding.service_principal_id,
+        (nonzero_snapshot, unknown_snapshot),
+        venue=binding.venue,
+        environment=ExecutionEnvironment.LIVE,
+        runtime_binding=binding,
+        now=fail_closed_at,
+    )
+    with database.session_factory.begin() as session:
+        unknown_position = session.scalar(
+            select(Position)
+            .join(Instrument, Position.instrument_id == Instrument.instrument_id)
+            .where(
+                Position.team_id == binding.team_id,
+                Position.account_id == binding.account_id,
+                Position.venue == binding.venue,
+                Instrument.symbol == "XRPUSDT",
+            )
+            .with_for_update()
+        )
+        assert unknown_position is not None
+        unknown_position.fact_status = "UNKNOWN"
+
+    service._cover_absent_positions(
+        binding.account_id,
+        binding.service_principal_id,
+        venue=binding.venue,
+        environment=ExecutionEnvironment.LIVE,
+        active_symbols={"ETHUSDT", "XRPUSDT"},
+        observed_order_ids={"still-open-protection-order"},
+        now=fail_closed_at + timedelta(seconds=1),
+    )
+    with database.session_factory() as session:
+        states = dict(
+            session.execute(
+                select(VenueOrder.venue_order_id, VenueOrder.status).where(
+                    VenueOrder.venue_order_id.in_(
+                        {
+                            "nonzero-protection-order",
+                            "unknown-position-protection-order",
+                            "still-open-protection-order",
+                            "ordinary-market-order",
+                            "ordinary-limit-order",
+                        }
+                    )
+                )
+            ).all()
+        )
+        assert states == {
+            "nonzero-protection-order": "UNKNOWN",
+            "unknown-position-protection-order": "UNKNOWN",
+            "still-open-protection-order": "SENT",
+            "ordinary-market-order": "UNKNOWN",
+            "ordinary-limit-order": "UNKNOWN",
+        }
 
 
 def encryption_key() -> str:
@@ -101,6 +769,115 @@ def test_exchange_account_credentials_are_encrypted_scoped_and_never_projected(
     assert rotated["trading"]["enabled"] is False
 
 
+def test_current_positions_aggregate_visible_accounts_with_direction_and_unrealized_pnl(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("position-admin", now=now)
+    service.create_exchange_account(
+        actor_id=admin,
+        account_id="binance-position-main",
+        venue="BINANCE",
+        label="Binance Position Main",
+        credentials={"api_key": "binance-key", "api_secret": "binance-secret"},
+        idempotency_key="create-binance-position-account",
+        now=now,
+    )
+    service.create_exchange_account(
+        actor_id=admin,
+        account_id="okx-position-main",
+        venue="OKX",
+        label="OKX Position Main",
+        credentials={
+            "api_key": "okx-key",
+            "api_secret": "okx-secret",
+            "passphrase": "okx-passphrase",
+        },
+        idempotency_key="create-okx-position-account",
+        now=now,
+    )
+    binance_instrument = service.register_instrument(
+        actor_id=admin,
+        venue="BINANCE",
+        symbol="BTCUSDT",
+        tick_size=Decimal("0.1"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        contract_multiplier=Decimal("1"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        protection_supported=True,
+        now=now,
+    )
+    okx_instrument = service.register_instrument(
+        actor_id=admin,
+        venue="OKX",
+        symbol="ETH-USDT-SWAP",
+        tick_size=Decimal("0.01"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        contract_multiplier=Decimal("1"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        protection_supported=True,
+        now=now,
+    )
+    service.record_position(
+        "binance-position-main",
+        "BINANCE",
+        binance_instrument,
+        Decimal("2"),
+        Decimal("100"),
+        Decimal("110"),
+        True,
+        admin,
+        now=now,
+    )
+    service.record_position(
+        "okx-position-main",
+        "OKX",
+        okx_instrument,
+        Decimal("-3"),
+        Decimal("50"),
+        Decimal("40"),
+        True,
+        admin,
+        now=now,
+    )
+
+    projected = TradingQueries(database).current_positions(admin, "LIVE")
+    assert projected["summary"] == {
+        "position_count": 2,
+        "account_count": 2,
+        "long_count": 1,
+        "short_count": 1,
+        "unknown_count": 0,
+    }
+    by_symbol = {item["symbol"]: item for item in projected["positions"]}
+    assert by_symbol["BTCUSDT"]["direction"] == "LONG"
+    assert by_symbol["BTCUSDT"]["quantity"] == "2.000000000000000000"
+    assert Decimal(by_symbol["BTCUSDT"]["unrealized_pnl"]) == Decimal("20")
+    assert by_symbol["ETH-USDT-SWAP"]["direction"] == "SHORT"
+    assert by_symbol["ETH-USDT-SWAP"]["quantity"] == "3.000000000000000000"
+    assert Decimal(by_symbol["ETH-USDT-SWAP"]["unrealized_pnl"]) == Decimal("30")
+
+    observer = service.create_user("position-observer", admin, now=now)
+    service.assign_role(
+        observer,
+        Role.OBSERVER,
+        admin,
+        account_scope="binance-position-main",
+        venue_scope="BINANCE",
+        now=now,
+    )
+    observer_projection = TradingQueries(database).current_positions(observer, "LIVE")
+    assert [item["symbol"] for item in observer_projection["positions"]] == ["BTCUSDT"]
+    assert [item["account_id"] for item in observer_projection["accounts"]] == [
+        "binance-position-main"
+    ]
+
+
 def test_exchange_account_delete_is_fail_closed_and_can_be_reconnected(
     database: Database,
 ) -> None:
@@ -171,6 +948,72 @@ def test_exchange_account_delete_is_fail_closed_and_can_be_reconnected(
         assert {"EXCHANGE_ACCOUNT_DELETED", "EXCHANGE_ACCOUNT_RESTORED"} <= events
 
 
+def test_expired_unsubmitted_direct_capital_plan_is_projected_blocked_and_not_running(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("expired-direct-capital-admin", now=now)
+    account_pk = service.create_exchange_account(
+        actor_id=admin,
+        account_id="binance-expired-plan",
+        venue="BINANCE",
+        label="Expired direct capital plan",
+        credentials={"api_key": "expired-key", "api_secret": "expired-secret"},
+        idempotency_key="create-expired-direct-capital-account",
+        now=now,
+    )
+    team_id = UUID(TradingQueries(database).user_context(admin)["active_team"]["team_id"])
+    operation_id = uuid4()
+    with database.session_factory.begin() as session:
+        session.add(
+            DirectCapitalOperation(
+                operation_id=operation_id,
+                team_id=team_id,
+                path="BINANCE_TO_VAULT",
+                treasury_provider="SAFE_SPENDING_LIMIT",
+                status="UNSIGNED_PLAN_READY",
+                receipt_status="NOT_SUBMITTED",
+                account_id="binance-expired-plan",
+                venue="BINANCE",
+                asset="USDC",
+                network="ARBITRUM",
+                amount=Decimal("1"),
+                max_fee=Decimal("0.1"),
+                min_received=Decimal("0.9"),
+                stages=[],
+                blockers=[],
+                expires_at=now - timedelta(seconds=1),
+                final_confirmed_at=now - timedelta(minutes=1),
+                actor_id=admin,
+                correlation_id=uuid4(),
+                idempotency_key="expired-direct-capital-operation",
+                version=2,
+                created_at=now - timedelta(minutes=1),
+                updated_at=now - timedelta(minutes=1),
+            )
+        )
+
+    projected = next(
+        item
+        for item in TradingQueries(database).capital_center(admin)["direct_operations"]
+        if item["operation_id"] == str(operation_id)
+    )
+    assert projected["status"] == "BLOCKED"
+    assert projected["receipt_status"] == "NOT_SUBMITTED"
+    assert "CAPITAL_DIRECT_OPERATION_EXPIRED" in projected["blockers"]
+
+    deleted = service.delete_exchange_account(
+        account_pk,
+        actor_id=admin,
+        confirmation="DELETE:LIVE:binance-expired-plan:BINANCE",
+        expected_version=1,
+        idempotency_key="delete-expired-direct-capital-account",
+        now=now,
+    )
+    assert deleted["status"] == "DELETED"
+
+
 def test_account_setup_is_allowed_before_team_activation_and_cross_team_rotation_is_denied(
     database: Database,
 ) -> None:
@@ -231,7 +1074,21 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
     database: Database,
 ) -> None:
     now = datetime.now(UTC)
-    TradingService(database).bootstrap_admin("api-account-admin", now=now)
+    service = TradingService(database)
+    admin = service.bootstrap_admin("api-account-admin", now=now)
+    instrument = service.register_instrument(
+        actor_id=admin,
+        venue="BINANCE",
+        symbol="BTCUSDT",
+        tick_size=Decimal("0.1"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        contract_multiplier=Decimal("1"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        protection_supported=True,
+        now=now,
+    )
     settings = Settings(
         environment="test",
         database_url=str(database.engine.url),
@@ -273,6 +1130,23 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
             )
             assert created.status_code == 200, created.text
             assert "api-secret-never-return" not in created.text
+            service.record_position(
+                "binance-api-main",
+                "BINANCE",
+                instrument,
+                Decimal("-2"),
+                Decimal("100"),
+                Decimal("90"),
+                True,
+                admin,
+                now=now,
+            )
+            current_positions = await client.get("/api/positions", params={"environment": "LIVE"})
+            assert current_positions.status_code == 200, current_positions.text
+            position = current_positions.json()["data"]["positions"][0]
+            assert position["account_id"] == "binance-api-main"
+            assert position["direction"] == "SHORT"
+            assert Decimal(position["unrealized_pnl"]) == Decimal("20")
             listed = await client.get("/api/exchange-accounts")
             assert listed.status_code == 200, listed.text
             assert "api-secret-never-return" not in listed.text
@@ -289,11 +1163,20 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
             }
             assert item["connection"]["status"] == "NOT_VERIFIED"
             assert item["trading"]["enabled"] is False
-            facts = await client.get(
-                "/api/venues/binance/facts", params={"account_id": "binance-api-main"}
-            )
+            facts = await client.get(f"/api/exchange-accounts/{item['exchange_account_id']}/facts")
             assert facts.status_code == 200, facts.text
             assert facts.json()["data"]["account_id"] == "binance-api-main"
+            service.record_position(
+                "binance-api-main",
+                "BINANCE",
+                instrument,
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("90"),
+                True,
+                admin,
+                now=now + timedelta(seconds=1),
+            )
             page = await client.get("/venues")
             assert page.status_code == 200
             assert "api-secret-never-return" not in page.text
@@ -332,6 +1215,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
     )
     second_id = service.create_exchange_account(
         actor_id=admin,
+        environment="TESTNET",
         account_id="binance-worker-b",
         venue="BINANCE",
         label="Binance Worker B",
@@ -358,7 +1242,11 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
         now=now,
     )
     first_probe = WorkerProbeFixture(exchange="binance", dry_run=False)
-    second_probe = WorkerProbeFixture(exchange="binance", dry_run=True)
+    second_probe = WorkerProbeFixture(
+        exchange="binance",
+        dry_run=False,
+        bot_name="tradeops-binance-testnet",
+    )
     workers = (
         FreqtradeWorkerClient(
             FreqtradeWorkerSpec(
@@ -430,7 +1318,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
                     "http://127.0.0.1:18082",
                     "worker-b-user",
                     "worker-b-password",
-                    "DRY_RUN",
+                    "TESTNET",
                 ),
             )
             for index, (account, name, url, username, password, mode) in enumerate(
@@ -445,6 +1333,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
                         "base_url": url,
                         "username": username,
                         "password": password,
+                        "ws_token": f"worker-rpc-token-{index}-fixture",
                         "hip3_dexes": [],
                         "expected_version": 1,
                         "idempotency_key": f"configure-worker-{index}",
@@ -480,10 +1369,8 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
             }
             assert by_account["binance-worker-a"]["execution_worker"]["live_ready"] is True
             assert by_account["binance-worker-b"]["execution_worker"]["live_ready"] is False
-            assert (
-                by_account["binance-worker-a"]["execution_worker"]["default_endpoint"]
-                == "http://127.0.0.1:8081"
-            )
+            assert by_account["binance-worker-b"]["execution_worker"]["scope_ready"] is True
+            assert "default_endpoint" not in by_account["binance-worker-a"]["execution_worker"]
             status = await client.get("/api/execution/freqtrade/status")
             assert status.status_code == 200
             assert status.json()["workers"] == []
@@ -537,7 +1424,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
             for item in stored
         } == {
             ("binance-worker-a", "VERIFIED", "LIVE"),
-            ("binance-worker-b", "VERIFIED", "DRY_RUN"),
+            ("binance-worker-b", "VERIFIED", "TESTNET"),
         }
 
 
@@ -562,6 +1449,7 @@ def test_freqtrade_probe_cannot_commit_after_worker_rotation(database: Database)
         base_url="http://127.0.0.1:18081",
         username="worker-user-v1",
         password="worker-password-v1",  # noqa: S106
+        ws_token="worker-rpc-token-v1-fixture",  # noqa: S106
         hip3_dexes=(),
         expected_version=1,
         idempotency_key="worker-race-configure-v1",
@@ -582,6 +1470,7 @@ def test_freqtrade_probe_cannot_commit_after_worker_rotation(database: Database)
         base_url="http://127.0.0.1:18082",
         username="worker-user-v2",
         password="worker-password-v2",  # noqa: S106
+        ws_token="worker-rpc-token-v2-fixture",  # noqa: S106
         hip3_dexes=(),
         expected_version=int(configured["version"]),
         idempotency_key="worker-race-configure-v2",
@@ -609,21 +1498,129 @@ class FakeExchangeConnectionVerifier:
     def verify(
         self,
         *,
+        workspace_id: str,
+        team_id: str,
+        account_id: str,
         venue: str,
         environment: str,
+        account_mode: str,
         credentials: Mapping[str, str],
         now: datetime,
     ) -> ConnectionProbeResult:
         assert now.utcoffset() is not None
+        assert workspace_id and team_id and account_id
         assert environment in {"TESTNET", "LIVE"}
+        assert account_mode in {"STANDARD", "PORTFOLIO_MARGIN"}
         self.calls.append((venue, dict(credentials)))
         return self.outcomes[venue]
 
 
+def test_binance_process_cooldown_defers_without_mutating_account_state(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    TradingService(database).bootstrap_admin("binance-cooldown-admin", now=now)
+    retry_at = now + timedelta(minutes=5)
+    verifier = FakeExchangeConnectionVerifier(
+        {
+            "BINANCE": ConnectionProbeResult(
+                False,
+                "BINANCE_RATE_LIMITED_COOLDOWN",
+                {
+                    "category": "IP_TEMPORARILY_BANNED",
+                    "http_status": 418,
+                    "failed_at": now.isoformat(),
+                    "next_retry_at": retry_at.isoformat(),
+                },
+            )
+        }
+    )
+    settings = Settings(
+        environment="test",
+        database_url=str(database.engine.url),
+        allow_mock_identity=True,
+        session_signing_secret="binance-cooldown-secret-long-enough",  # noqa: S106
+        credential_encryption_key=encryption_key(),
+        public_base_url="http://test",
+        _env_file=None,
+    )
+    app = create_app(
+        settings,
+        database,
+        PerptapeClient(
+            base_url="https://perptape.com",
+            api_key=None,
+            contract_version="breakouts-v1",
+            cache_ttl=timedelta(minutes=1),
+        ),
+        exchange_connection_verifier=verifier,
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            login = await client.post(
+                "/api/auth/mock/login", json={"username": "binance-cooldown-admin"}
+            )
+            assert login.status_code == 200
+            created = await client.post(
+                "/api/exchange-accounts",
+                json={
+                    "account_id": "binance-cooldown-account",
+                    "venue": "BINANCE",
+                    "label": "Binance Cooldown",
+                    "credentials": {"api_key": "key", "api_secret": "secret"},
+                    "idempotency_key": "binance-cooldown-create",
+                },
+            )
+            assert created.status_code == 200, created.text
+            account_id = created.json()["exchange_account_id"]
+
+            deferred = await client.post(
+                f"/api/exchange-accounts/{account_id}/connection-verifications",
+                json={
+                    "expected_version": 1,
+                    "idempotency_key": "binance-cooldown-verify",
+                },
+            )
+            assert deferred.status_code == 429, deferred.text
+            assert deferred.json()["error"] == {
+                "code": "BINANCE_CONNECTION_RETRY_DEFERRED",
+                "message": (
+                    "Binance connection verification was not sent while the current "
+                    "process cooldown is active"
+                ),
+                "details": {
+                    "category": "IP_TEMPORARILY_BANNED",
+                    "http_status": 418,
+                    "failed_at": now.isoformat(),
+                    "next_retry_at": retry_at.isoformat(),
+                },
+                "retryable": True,
+            }
+
+            listed = (await client.get("/api/exchange-accounts")).json()["data"]["data"]
+            account = next(item for item in listed if item["exchange_account_id"] == account_id)
+            assert account["version"] == 1
+            assert account["connection"]["status"] == "NOT_VERIFIED"
+            assert account["connection"]["error_code"] is None
+            assert account["runtime_binding"]["bound"] is False
+            assert account["trading"]["status"] == "DISABLED"
+            assert len(verifier.calls) == 1
+
+    asyncio.run(scenario())
+
+
 class WorkerProbeFixture:
-    def __init__(self, *, exchange: str, dry_run: bool) -> None:
+    def __init__(
+        self,
+        *,
+        exchange: str,
+        dry_run: bool,
+        bot_name: str = "tradeops-worker-fixture",
+    ) -> None:
         self.exchange = exchange
         self.dry_run = dry_run
+        self.bot_name = bot_name
         self.calls: list[str] = []
 
     def __call__(
@@ -647,7 +1644,10 @@ class WorkerProbeFixture:
                 "exchange": self.exchange,
                 "trading_mode": "futures",
                 "dry_run": self.dry_run,
+                "demo_trading": False,
+                "bot_name": self.bot_name,
                 "force_entry_enable": True,
+                "position_adjustment_enable": True,
                 "state": "RUNNING",
             }
         if url.endswith("/version"):
@@ -861,6 +1861,20 @@ def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enabl
             assert replay.json()["version"] == results["BINANCE"]["version"]
             assert len(verifier.calls) == 4
 
+            recent_success_reuse = await client.post(
+                f"/api/exchange-accounts/{account_ids['BINANCE']}/connection-verifications",
+                json={
+                    "expected_version": results["BINANCE"]["version"],
+                    "idempotency_key": "verify-binance-team-account-cooldown-reuse",
+                },
+            )
+            assert recent_success_reuse.status_code == 200, recent_success_reuse.text
+            assert recent_success_reuse.json()["version"] == results["BINANCE"]["version"]
+            assert (
+                recent_success_reuse.json()["connection"] == results["BINANCE"]["connection"]
+            )
+            assert len(verifier.calls) == 4
+
             for venue in {"BINANCE", "HYPERLIQUID", "BYBIT"}:
                 enabled = await client.put(
                     f"/api/exchange-accounts/{account_ids[venue]}/runtime-sync",
@@ -927,6 +1941,101 @@ def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enabl
     assert all("secret" not in repr(item) for item in bindings)
     hyperliquid_binding = next(item for item in bindings if item.venue == "HYPERLIQUID")
     assert "api_wallet_private_key" not in hyperliquid_binding.credentials
+
+
+@pytest.mark.parametrize(
+    ("venue", "account_credentials"),
+    [
+        ("BINANCE", {"api_key": "binance-key", "api_secret": "binance-secret"}),
+        (
+            "HYPERLIQUID",
+            {
+                "account_address": "0x1111111111111111111111111111111111111111",
+                "api_wallet_address": "0x2222222222222222222222222222222222222222",
+                "api_wallet_private_key": "hyperliquid-private-key",
+            },
+        ),
+        (
+            "OKX",
+            {
+                "api_key": "okx-key",
+                "api_secret": "okx-secret",
+                "passphrase": "okx-passphrase",
+            },
+        ),
+        ("BYBIT", {"api_key": "bybit-key", "api_secret": "bybit-secret"}),
+    ],
+)
+def test_exchange_connection_rate_limit_cooldowns_are_ephemeral_and_allow_reprobe(
+    database: Database,
+    venue: str,
+    account_credentials: dict[str, str],
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    venue_slug = venue.lower()
+    admin = service.bootstrap_admin(f"{venue_slug}-rate-limit-admin", now=now)
+    account_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id=f"{venue_slug}-rate-limited",
+        venue=venue,
+        label=f"{venue} Rate Limited",
+        credentials=account_credentials,
+        idempotency_key=f"{venue_slug}-rate-limit-create",
+        now=now,
+    )
+    prepared, replay = service.prepare_exchange_account_connection_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key=f"{venue_slug}-rate-limit-first-probe",
+        now=now,
+    )
+    assert replay is None and prepared is not None
+    diagnostics: dict[str, object] = {
+        "category": "REQUEST_WEIGHT_EXCEEDED",
+        "http_status": 429,
+        "binance_error_code": -1003,
+        "binance_error_message": "Too much request weight used",
+        "retry_after_seconds": 60,
+        "rate_limit_headers": {
+            "Retry-After": "60",
+            "X-MBX-USED-WEIGHT-1M": "1200",
+        },
+        "failed_at": now.isoformat(),
+        "next_retry_at": (now + timedelta(seconds=60)).isoformat(),
+    }
+    result = service.record_exchange_account_connection_verification(
+        prepared,
+        ConnectionProbeResult(False, f"{venue}_RATE_LIMITED", diagnostics),
+        actor_id=admin,
+        idempotency_key=f"{venue_slug}-rate-limit-first-probe",
+        now=now,
+    )
+
+    assert result["connection"]["error_code"] == f"{venue}_RATE_LIMITED"
+    assert result["connection"].get("diagnostics") is None
+    projected = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert projected["connection"].get("diagnostics") is None
+    _prepared_replay, persisted_replay = service.prepare_exchange_account_connection_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key=f"{venue_slug}-rate-limit-first-probe",
+        now=now + timedelta(milliseconds=500),
+    )
+    assert _prepared_replay is None
+    assert persisted_replay is not None
+    assert persisted_replay["connection"].get("diagnostics") is None
+    prepared_again, replay = service.prepare_exchange_account_connection_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=2,
+        idempotency_key=f"{venue_slug}-rate-limit-new-egress-reprobe",
+        now=now + timedelta(seconds=1),
+    )
+    assert replay is None
+    assert prepared_again is not None
 
 
 def test_connection_result_is_not_committed_after_credential_rotation(database: Database) -> None:
@@ -1163,6 +2272,7 @@ def test_okx_bybit_reuse_exact_account_freqtrade_eligibility(
         base_url="http://127.0.0.1:18083",
         username="control-plane",
         password="worker-fixture-password",  # noqa: S106
+        ws_token=f"{slug}-rpc-token-fixture",
         hip3_dexes=(),
         expected_version=int(runtime["version"]),
         idempotency_key=f"configure-{slug}-account-worker",
@@ -1271,6 +2381,29 @@ def test_database_runtime_bindings_support_same_account_in_multiple_teams(
     )
     assert all("secret" not in repr(item) for item in bindings)
 
+    stale_second_binding = by_team[second_team_id]
+    service.configure_exchange_account_freqtrade_worker(
+        second_account_id,
+        actor_id=admin,
+        mode="LIVE",
+        name="second-runtime-worker",
+        base_url="http://127.0.0.1:18083",
+        username="control-plane",
+        password="worker-fixture-password",  # noqa: S106
+        ws_token="second-runtime-rpc-token",  # noqa: S106
+        hip3_dexes=(),
+        expected_version=stale_second_binding.account_version,
+        idempotency_key="configure-second-runtime-worker",
+        now=now + timedelta(seconds=4),
+    )
+    service.record_runtime_source_health(
+        stale_second_binding.service_principal_id,
+        {"BINANCE": {"status": "SUCCESS", "items_observed": 1}},
+        scopes={"BINANCE": (stale_second_binding.account_id, "BINANCE")},
+        runtime_account_binding=stale_second_binding,
+        now=now + timedelta(seconds=4, milliseconds=100),
+    )
+
     with pytest.raises(DomainRejected, match="EXCHANGE_ACCOUNT_NOT_FOUND"):
         service.configure_exchange_account_runtime_sync(
             first_account_id,
@@ -1285,11 +2418,10 @@ def test_database_runtime_bindings_support_same_account_in_multiple_teams(
         second_account_id,
         actor_id=admin,
         credentials={"api_key": "rotated-key", "api_secret": "rotated-secret"},
-        expected_version=3,
+        expected_version=4,
         idempotency_key="rotate-second-runtime-account",
         now=now + timedelta(seconds=5),
     )
-    stale_second_binding = by_team[second_team_id]
     with pytest.raises(DomainRejected, match="RUNTIME_BINDING_CHANGED"):
         service.record_runtime_source_health(
             stale_second_binding.service_principal_id,

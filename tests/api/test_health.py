@@ -170,6 +170,46 @@ def test_venue_account_detail_route_serves_the_spa_shell() -> None:
     assert response.headers["content-type"].startswith("text/html")
 
 
+def test_account_assets_use_explicit_account_id_inputs() -> None:
+    app = create_app(settings(), FakeDatabase(ready=False))
+
+    capital = get(app, "/assets/capital.js")
+    accounts = get(app, "/assets/execution.js")
+
+    assert capital.status_code == 200
+    assert "const exchangeAccountInput" in capital.text
+    assert '<input name="${name}"' in capital.text
+    assert "exchangeAccountSelect" not in capital.text
+    assert accounts.status_code == 200
+    assert "账户 ID（创建后不可修改）" in accounts.text  # noqa: RUF001
+    assert "同时填写精确账户 ID 和账户名称" in accounts.text
+
+
+def test_team_mode_switch_is_in_the_header_and_legacy_page_is_removed() -> None:
+    app = create_app(settings(), FakeDatabase(ready=False))
+
+    shell = get(app, "/")
+    execution = get(app, "/assets/execution.js")
+    router = get(app, "/assets/router.js")
+
+    assert shell.status_code == 200
+    assert 'id="environment-badge"' in shell.text
+    assert 'aria-haspopup="listbox"' in shell.text
+    assert 'id="team-mode-menu"' in shell.text
+    assert 'id="team-mode-dialog"' not in shell.text
+    assert 'href="/team-settings"' not in shell.text
+    assert execution.status_code == 200
+    assert "async function openTeamModeDropdown" in execution.text
+    assert "function initializeTeamModeDropdown()" in execution.text
+    assert "I_CONFIRM_LIVE_PRODUCTION_MONEY" in execution.text
+    assert "openTeamModeDialog" not in execution.text
+    assert "team-mode-switch-form" not in execution.text
+    assert "renderTeamSettings" not in execution.text
+    assert router.status_code == 200
+    assert "path === '/team-settings' || path === '/trading-mode'" in router.text
+    assert "history.replaceState({}, '', '/home')" in router.text
+
+
 def test_mock_login_is_not_available_unless_explicitly_enabled() -> None:
     async def post() -> Response:
         app = create_app(settings(), FakeDatabase())

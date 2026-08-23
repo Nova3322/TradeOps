@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 from conftest import add_exchange_account_fixture
 from httpx import ASGITransport, AsyncClient
@@ -12,6 +14,7 @@ from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.models import AuditEvent
 from trading_control_plane.perptape import PerptapeClient
+from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
 
 
@@ -21,9 +24,12 @@ def access_app(database: Database):
         database_url=str(database.engine.url),
         allow_mock_identity=True,
         session_signing_secret="access-test-signing-secret-that-is-long-enough",  # noqa: S106
+        credential_encryption_key=base64.urlsafe_b64encode(
+            b"access-management-key-32-bytes!!"[:32]
+        )
+        .decode()
+        .rstrip("="),
         public_base_url="http://test",
-        runtime_binance_account_id="acct-live",
-        runtime_hyperliquid_account_id="acct-hl",
         _env_file=None,
     )
     perptape = PerptapeClient(
@@ -330,6 +336,20 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
             assert response.status_code == 200, response.text
             member_ids[username] = response.json()["user_id"]
 
+        registry_response = await admin_http.get("/api/exchange-accounts")
+        assert registry_response.status_code == 200, registry_response.text
+        exchange_account_ids = {
+            item["account_id"]: item["exchange_account_id"]
+            for item in registry_response.json()["data"]["data"]
+        }
+        exchange_endpoints = tuple(
+            endpoint
+            for account_id in ("acct-live", "acct-hl", "acct-okx", "acct-bybit")
+            for endpoint in (
+                f"/api/exchange-accounts/{exchange_account_ids[account_id]}/facts",
+                f"/api/exchange-accounts/{exchange_account_ids[account_id]}/fact-health",
+            )
+        )
         endpoints = (
             "/api/opportunities",
             "/api/proposal-defaults",
@@ -338,16 +358,7 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
             "/api/campaign-exceptions",
             "/api/runtime/status",
             "/api/risk-controls",
-            "/api/venues/binance/status",
-            "/api/venues/binance/live/status",
-            "/api/venues/binance/testnet/status",
-            "/api/venues/hyperliquid/status",
-            "/api/venues/hyperliquid/live/status",
-            "/api/venues/hyperliquid/testnet/status",
-            "/api/venues/binance/facts?account_id=acct-live",
-            "/api/venues/hyperliquid/facts?account_id=acct-hl",
-            "/api/venues/okx/facts?account_id=acct-okx",
-            "/api/venues/bybit/facts?account_id=acct-bybit",
+            *exchange_endpoints,
             "/api/capital",
             "/api/admin/users",
         )
@@ -371,16 +382,7 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
                 "/api/campaign-exceptions",
                 "/api/runtime/status",
                 "/api/risk-controls",
-                "/api/venues/binance/status",
-                "/api/venues/binance/live/status",
-                "/api/venues/binance/testnet/status",
-                "/api/venues/hyperliquid/status",
-                "/api/venues/hyperliquid/live/status",
-                "/api/venues/hyperliquid/testnet/status",
-                "/api/venues/binance/facts?account_id=acct-live",
-                "/api/venues/hyperliquid/facts?account_id=acct-hl",
-                "/api/venues/okx/facts?account_id=acct-okx",
-                "/api/venues/bybit/facts?account_id=acct-bybit",
+                *exchange_endpoints,
             },
         }
         for username, permitted in allowed.items():
@@ -431,3 +433,104 @@ def test_six_identity_permission_matrix_is_enforced_by_api_and_member_route(
     database: Database,
 ) -> None:
     asyncio.run(exercise_six_identity_permission_matrix(database))
+
+
+def test_scoped_read_roles_can_open_risk_and_capital_without_cross_scope(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database)
+    admin_id = service.bootstrap_admin("scoped-center-admin", now=now)
+    for venue, account_id in (
+        ("BINANCE", "acct-live"),
+        ("BINANCE", "acct-other"),
+        ("HYPERLIQUID", "acct-live"),
+    ):
+        add_exchange_account_fixture(database, admin_id, account_id, venue)
+    app = access_app(database)
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as admin:
+            await login(admin, "scoped-center-admin")
+            session = (await admin.get("/api/auth/session")).json()["session"]
+            workspace_id = session["active_workspace"]["workspace_id"]
+            team_id = session["active_team"]["team_id"]
+            user_ids: dict[str, str] = {}
+            for role in ("OBSERVER", "REVIEWER", "OPERATOR", "TREASURY_ADMIN"):
+                created = await admin.post(
+                    "/api/admin/users",
+                    json={
+                        "username": f"scoped-{role.lower()}",
+                        "password": f"scoped-{role.lower()}-password",
+                        "roles": [role],
+                        "account_scope": "acct-live",
+                        "venue_scope": "BINANCE",
+                    },
+                )
+                assert created.status_code == 200, created.text
+                user_ids[role] = created.json()["user_id"]
+
+        expected_scopes = (("LIVE", "acct-live", "BINANCE"),)
+        for role in ("OBSERVER", "REVIEWER", "OPERATOR"):
+            assert TradingQueries(database).configured_risk_scopes(
+                UUID(user_ids[role])
+            ) == expected_scopes
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as member:
+                await login(member, f"scoped-{role.lower()}")
+                risk = await member.get("/api/risk-controls")
+                assert risk.status_code == 200, risk.text
+                key = await member.post(
+                    "/api/profile/api-keys",
+                    json={
+                        "name": f"scoped-{role.lower()}-key",
+                        "workspace_id": workspace_id,
+                        "team_id": team_id,
+                        "expires_in_days": 1,
+                        "idempotency_key": f"scoped-{role.lower()}-key",
+                    },
+                )
+                assert key.status_code == 200, key.text
+                token = key.json()["result"]["token"]
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://test",
+                headers={"Authorization": f"Bearer {token}"},
+            ) as bearer:
+                risk = await bearer.get("/api/risk-controls")
+                assert risk.status_code == 200, risk.text
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as treasury:
+            await login(treasury, "scoped-treasury_admin")
+            capital = await treasury.get("/api/capital")
+            assert capital.status_code == 200, capital.text
+            assert "acct-other" not in capital.text
+            assert "HYPERLIQUID" not in capital.text
+            key = await treasury.post(
+                "/api/profile/api-keys",
+                json={
+                    "name": "scoped-treasury-key",
+                    "workspace_id": workspace_id,
+                    "team_id": team_id,
+                    "expires_in_days": 1,
+                    "idempotency_key": "scoped-treasury-key",
+                },
+            )
+            assert key.status_code == 200, key.text
+            token = key.json()["result"]["token"]
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as bearer:
+            capital = await bearer.get("/api/capital")
+            assert capital.status_code == 200, capital.text
+            assert "acct-other" not in capital.text
+            assert "HYPERLIQUID" not in capital.text
+
+    asyncio.run(scenario())

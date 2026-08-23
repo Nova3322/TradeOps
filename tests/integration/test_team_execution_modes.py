@@ -358,6 +358,7 @@ def test_runtime_enums_proposal_environment_and_removed_endpoints_are_testnet_li
         max_risk=Decimal("1"),
         expires_at=now + timedelta(hours=8),
         idempotency_key="server-owned-testnet-proposal",
+        details={"trigger_price": "100000"},
         now=now,
     )
     with database.session_factory() as session:

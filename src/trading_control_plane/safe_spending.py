@@ -14,6 +14,17 @@ JsonObject = dict[str, Any]
 GatewayExecutor = Callable[[JsonObject], JsonObject]
 
 
+def _gateway_rejection_code(message: str) -> str:
+    normalized = message.strip().lower()
+    if normalized == "safe account is not deployed on arbitrum.":
+        return "SAFE_ACCOUNT_NOT_DEPLOYED"
+    if normalized == "safe allowance module is not enabled.":
+        return "SAFE_ALLOWANCE_MODULE_DISABLED"
+    if normalized == "requested amount exceeds the current safe spending limit or balance.":
+        return "SAFE_ALLOWANCE_OR_BALANCE_INSUFFICIENT"
+    return "SAFE_PREFLIGHT_REJECTED"
+
+
 class SafeSpendingGateway:
     """Read-only Safe Allowance Module boundary; never signs or broadcasts."""
 
@@ -50,7 +61,7 @@ class SafeSpendingGateway:
             ) from exc
         if completed.returncode != 0 or response.get("ok") is not True:
             message = str((response.get("error") or {}).get("message") or "Safe preflight failed")
-            raise DomainRejected("SAFE_PREFLIGHT_REJECTED", message[:400])
+            raise DomainRejected(_gateway_rejection_code(message), message[:400])
         data = response.get("data")
         if not isinstance(data, dict):
             raise DomainRejected("SAFE_RESPONSE_INVALID", "Safe gateway omitted its result")

@@ -127,6 +127,7 @@ def create_approved_proposal(
         source_readiness="READY" if source is ProposalSource.SYSTEM else None,
         details=(
             {
+                "trigger_price": "100",
                 "allow_auto_add": True,
                 "requested_adds": 1,
                 "add_trigger_price": "105",
@@ -134,7 +135,7 @@ def create_approved_proposal(
                 "invalidation_price": "90",
             }
             if allow_auto_add
-            else None
+            else {"trigger_price": "100"}
         ),
         now=NOW,
     )
@@ -246,6 +247,7 @@ def test_proposal_idempotency_and_semantic_conflict(
         max_risk=Decimal("40"),
         expires_at=NOW + timedelta(hours=2),
         idempotency_key="proposal-1",
+        details={"trigger_price": "100"},
         now=NOW,
     )
     with pytest.raises(IdempotencyConflict):
@@ -261,6 +263,7 @@ def test_proposal_idempotency_and_semantic_conflict(
             max_risk=Decimal("40"),
             expires_at=NOW + timedelta(hours=2),
             idempotency_key="proposal-1",
+            details={"trigger_price": "100"},
             now=NOW,
         )
 
@@ -352,6 +355,7 @@ def test_perptape_manual_and_automatic_entry_points_share_one_active_scope(
         source_candidate_id="ptr_auto_scope",
         source_observed_at=NOW,
         source_readiness="READY",
+        details={"trigger_price": "100"},
         now=NOW,
     )
     service.submit_proposal(automatic_id, ids["strategy"], now=NOW)
@@ -373,6 +377,7 @@ def test_perptape_manual_and_automatic_entry_points_share_one_active_scope(
         source_candidate_id="pt_one_click_scope",
         source_observed_at=NOW + timedelta(seconds=1),
         source_readiness="READY",
+        details={"trigger_price": "100"},
         deduplicate_active_system_scope=True,
         now=NOW + timedelta(seconds=1),
     )
@@ -488,6 +493,7 @@ def test_self_review_is_forbidden_and_high_risk_needs_two_reviewers(
         max_risk=Decimal("40"),
         expires_at=NOW + timedelta(hours=1),
         idempotency_key="review-proposal",
+        details={"trigger_price": "100"},
         now=NOW,
     )
     service.submit_proposal(proposal_id, ids["proposer"], now=NOW)
@@ -604,6 +610,7 @@ def test_proposal_rejection_and_expiry_are_durable_terminal_states(
         max_risk=Decimal("10"),
         expires_at=NOW + timedelta(hours=1),
         idempotency_key="rejected-proposal",
+        details={"trigger_price": "100"},
         now=NOW,
     )
     service.submit_proposal(rejected, ids["proposer"], now=NOW)
@@ -630,6 +637,7 @@ def test_proposal_rejection_and_expiry_are_durable_terminal_states(
         max_risk=Decimal("10"),
         expires_at=NOW + timedelta(minutes=1),
         idempotency_key="expired-draft",
+        details={"trigger_price": "100"},
         now=NOW,
     )
     with pytest.raises(DomainRejected, match="PROPOSAL_EXPIRED"):
@@ -647,6 +655,7 @@ def test_proposal_rejection_and_expiry_are_durable_terminal_states(
         max_risk=Decimal("10"),
         expires_at=NOW + timedelta(minutes=1),
         idempotency_key="expired-review",
+        details={"trigger_price": "100"},
         now=NOW,
     )
     service.submit_proposal(expired_review, ids["proposer"], now=NOW)
@@ -947,6 +956,192 @@ def test_sender_fencing_rejects_old_owner_after_reconciled_takeover(
     service.validate_sender(
         "TESTNET:acct-1:BINANCE", "worker-b", second, ids["operator"], takeover_time
     )
+
+
+def test_reconciliation_ignores_stale_flat_hyperliquid_dex_outside_worker_scope(
+    service: TradingService,
+) -> None:
+    fixture = WorkflowFixture.create(
+        service,
+        now=NOW,
+        admin_username="hyperliquid-reconciliation-admin",
+        account_id="acct-1",
+        venue="HYPERLIQUID",
+        actors=(ActorSpec("operator", "hyperliquid-operator", Role.OPERATOR),),
+        symbol="BTC",
+        tick_size=Decimal("1"),
+        lot_size=Decimal("0.00001"),
+        minimum_notional=Decimal("10"),
+        quote_currency="USDC",
+        risk_version="hyperliquid-reconciliation-v1",
+        max_fact_age=timedelta(seconds=30),
+    )
+    hip3_instrument = service.register_instrument(
+        actor_id=fixture.ids["admin"],
+        venue="HYPERLIQUID",
+        symbol="xyz:TSLA",
+        tick_size=Decimal("0.01"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("10"),
+        contract_multiplier=Decimal(1),
+        quote_currency="USDC",
+        collateral_currency="USDC",
+        protection_supported=True,
+        now=NOW,
+    )
+    service.record_position(
+        "acct-1",
+        "HYPERLIQUID",
+        hip3_instrument,
+        Decimal(0),
+        Decimal(0),
+        Decimal("300"),
+        True,
+        fixture.ids["operator"],
+        now=NOW,
+    )
+    refreshed_at = NOW + timedelta(minutes=1)
+    fixture.now = refreshed_at
+    fixture.record_flat_facts(mark_price=Decimal("78000"))
+
+    reconciliation_id = service.reconcile_scope(
+        "TESTNET:acct-1:HYPERLIQUID",
+        fixture.ids["operator"],
+        now=refreshed_at,
+    )
+
+    assert service.reconciliation_status(reconciliation_id) is ReconciliationStatus.MATCH
+
+
+def test_reconciliation_keeps_nonzero_hyperliquid_dex_outside_worker_scope_fail_closed(
+    service: TradingService,
+) -> None:
+    fixture = WorkflowFixture.create(
+        service,
+        now=NOW,
+        admin_username="hyperliquid-nonzero-admin",
+        account_id="acct-1",
+        venue="HYPERLIQUID",
+        actors=(ActorSpec("operator", "hyperliquid-nonzero-operator", Role.OPERATOR),),
+        symbol="BTC",
+        tick_size=Decimal("1"),
+        lot_size=Decimal("0.00001"),
+        minimum_notional=Decimal("10"),
+        quote_currency="USDC",
+        risk_version="hyperliquid-nonzero-v1",
+        max_fact_age=timedelta(seconds=30),
+    )
+    hip3_instrument = service.register_instrument(
+        actor_id=fixture.ids["admin"],
+        venue="HYPERLIQUID",
+        symbol="xyz:TSLA",
+        tick_size=Decimal("0.01"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("10"),
+        contract_multiplier=Decimal(1),
+        quote_currency="USDC",
+        collateral_currency="USDC",
+        protection_supported=True,
+        now=NOW,
+    )
+    service.record_position(
+        "acct-1",
+        "HYPERLIQUID",
+        hip3_instrument,
+        Decimal("1"),
+        Decimal("300"),
+        Decimal("300"),
+        True,
+        fixture.ids["operator"],
+        now=NOW,
+    )
+    refreshed_at = NOW + timedelta(minutes=1)
+    fixture.now = refreshed_at
+    fixture.record_flat_facts(mark_price=Decimal("78000"))
+
+    reconciliation_id = service.reconcile_scope(
+        "TESTNET:acct-1:HYPERLIQUID",
+        fixture.ids["operator"],
+        now=refreshed_at,
+    )
+
+    assert service.reconciliation_status(reconciliation_id) is ReconciliationStatus.UNKNOWN
+
+
+def test_expired_sender_lease_allows_only_exact_ready_reduce_only_intent(
+    database: Database,
+    service: TradingService,
+) -> None:
+    ids = seed(service)
+    proposal_id = create_approved_proposal(service, ids)
+    authorization_id = issue_authorization(service, ids, proposal_id)
+    initial = service.create_order_intent(
+        authorization_id,
+        ids["operator"],
+        IntentKind.INITIAL,
+        "acct-1",
+        "BINANCE",
+        ids["instrument"],
+        Direction.LONG,
+        Decimal("1"),
+        "opening",
+        now=NOW,
+    )
+    service.record_position(
+        "acct-1",
+        "BINANCE",
+        ids["instrument"],
+        Decimal("1"),
+        Decimal("100"),
+        Decimal("100"),
+        True,
+        ids["operator"],
+        now=NOW,
+    )
+    with database.session_factory.begin() as session:
+        stored = session.get(OrderIntent, initial.intent_id, with_for_update=True)
+        assert stored is not None
+        stored.status = OrderIntentStatus.FILLED.value
+        stored.updated_at = NOW
+
+    exit_intent_id = service.create_reduction_intent(
+        initial.campaign_id,
+        ids["operator"],
+        "reduce-only-sender",
+        candidates=(TargetCandidate(Decimal("0"), TargetUrgency.URGENT, "exit"),),
+        now=NOW,
+    )
+    scope = "TESTNET:acct-1:BINANCE"
+    first = service.acquire_sender(scope, "worker-old", ids["operator"], NOW)
+
+    with pytest.raises(DomainRejected, match="SENDER_LEASE_HELD"):
+        service.acquire_reduce_only_sender(
+            exit_intent_id,
+            scope,
+            "worker-new",
+            ids["operator"],
+            NOW + timedelta(seconds=30),
+        )
+
+    takeover_time = NOW + timedelta(minutes=2)
+    second = service.acquire_reduce_only_sender(
+        exit_intent_id,
+        scope,
+        "worker-new",
+        ids["operator"],
+        takeover_time,
+    )
+    assert second > first
+    service.validate_sender(scope, "worker-new", second, ids["operator"], takeover_time)
+
+    with pytest.raises(DomainRejected, match="REDUCE_ONLY_SENDER_SCOPE_INVALID"):
+        service.acquire_reduce_only_sender(
+            initial.intent_id,
+            scope,
+            "worker-new",
+            ids["operator"],
+            takeover_time,
+        )
 
 
 def test_active_intent_blocks_duplicate_reduce_only_intent(service: TradingService) -> None:

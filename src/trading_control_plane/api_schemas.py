@@ -240,6 +240,7 @@ class ExchangeAccountCreateRequest(BaseModel):
     environment: Literal["TESTNET", "LIVE"] = "LIVE"
     account_id: str = Field(min_length=1, max_length=120)
     venue: VenueScope
+    account_mode: Literal["STANDARD", "PORTFOLIO_MARGIN"] = "STANDARD"
     label: str | None = Field(default=None, min_length=1, max_length=120)
     credentials: ExchangeCredentialRequest
     idempotency_key: str = Field(min_length=1, max_length=160)
@@ -288,7 +289,7 @@ class ExchangeTradingEligibilityRequest(BaseModel):
 
 
 class FreqtradeWorkerConfigureRequest(BaseModel):
-    mode: Literal["UNCONFIGURED", "DRY_RUN", "LIVE"]
+    mode: Literal["UNCONFIGURED", "DRY_RUN", "TESTNET", "LIVE"]
     name: str | None = Field(
         default=None,
         min_length=1,
@@ -298,6 +299,7 @@ class FreqtradeWorkerConfigureRequest(BaseModel):
     base_url: str | None = Field(default=None, min_length=1, max_length=2_048)
     username: SecretStr | None = Field(default=None, min_length=1, max_length=120)
     password: SecretStr | None = Field(default=None, min_length=1, max_length=2_048)
+    ws_token: SecretStr | None = Field(default=None, min_length=16, max_length=2_048)
     hip3_dexes: list[str] = Field(default_factory=list, max_length=32)
     expected_version: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=160)
@@ -313,8 +315,10 @@ class FreqtradeWorkerConfigureRequest(BaseModel):
                 "configured workers require name, base_url, username and password; "
                 "unconfigured workers must omit them"
             )
-        if not configured and self.hip3_dexes:
-            raise ValueError("unconfigured workers must not include HIP-3 DEX scope")
+        if not configured and (self.hip3_dexes or self.ws_token is not None):
+            raise ValueError(
+                "unconfigured workers must not include WebSocket or HIP-3 configuration"
+            )
         if len(self.hip3_dexes) != len(set(self.hip3_dexes)):
             raise ValueError("hip3_dexes must not contain duplicates")
         return self
@@ -324,6 +328,9 @@ class FreqtradeWorkerConfigureRequest(BaseModel):
 
     def plaintext_password(self) -> str | None:
         return None if self.password is None else self.password.get_secret_value()
+
+    def plaintext_ws_token(self) -> str | None:
+        return None if self.ws_token is None else self.ws_token.get_secret_value()
 
 
 class FreqtradeWorkerVerifyRequest(BaseModel):
@@ -656,6 +663,13 @@ class MockStepUpRequest(BaseModel):
     object_version: int = Field(ge=1)
 
 
+class PasswordStepUpRequest(MockStepUpRequest):
+    password: SecretStr = Field(min_length=12, max_length=128)
+
+    def plaintext_password(self) -> str:
+        return self.password.get_secret_value()
+
+
 class RiskDecisionRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
     requested_quantity: Decimal | None = Field(default=None, gt=0)
@@ -822,6 +836,9 @@ class DirectCapitalWalletSubmissionRequest(BaseModel):
         "HYPERLIQUID_WITHDRAWAL",
         "HYPERLIQUID_CLASS_TRANSFER",
         "TREASURY_DEPOSIT",
+        "TREASURY_WITHDRAWAL",
+        "NOTILT_RELEASE_EXECUTION",
+        "NOTILT_DESTINATION_TRANSFER",
     ]
     outcome: Literal["SUBMITTED", "CANCELLED"]
     transaction_hash: str | None = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
@@ -836,14 +853,18 @@ class DirectCapitalWalletSubmissionRequest(BaseModel):
             if self.transaction_hash is not None or self.action_hash is not None:
                 raise ValueError("cancelled wallet requests cannot include transaction evidence")
             return self
-        if self.stage in {"HYPERLIQUID_DEPOSIT", "TREASURY_DEPOSIT"} and (
-            self.transaction_hash is None
-        ):
+        if self.stage in {
+            "HYPERLIQUID_DEPOSIT",
+            "TREASURY_DEPOSIT",
+            "TREASURY_WITHDRAWAL",
+            "NOTILT_RELEASE_EXECUTION",
+            "NOTILT_DESTINATION_TRANSFER",
+        } and (self.transaction_hash is None):
             raise ValueError("onchain wallet submission requires an Arbitrum transaction hash")
         if self.stage in {"HYPERLIQUID_WITHDRAWAL", "HYPERLIQUID_CLASS_TRANSFER"} and (
-            self.action_hash is None or self.nonce is None
+            self.nonce is None
         ):
-            raise ValueError("Hyperliquid withdrawal submission requires action hash and nonce")
+            raise ValueError("Hyperliquid withdrawal submission requires the signed action nonce")
         return self
 
 
@@ -863,10 +884,10 @@ class DirectCapitalHyperliquidReceiptRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_receipt_reference(self) -> DirectCapitalHyperliquidReceiptRequest:
-        if self.stage.endswith("ARBITRUM") and self.transaction_hash is None:
-            raise ValueError("Arbitrum receipt verification requires a transaction hash")
-        if self.stage.endswith("LEDGER") and self.action_hash is None:
-            raise ValueError("Hyperliquid ledger verification requires an action hash")
+        if self.stage == "HYPERLIQUID_DEPOSIT_ARBITRUM" and self.transaction_hash is None:
+            raise ValueError("Hyperliquid deposit receipt verification requires a transaction hash")
+        if self.stage == "HYPERLIQUID_DEPOSIT_LEDGER" and self.action_hash is None:
+            raise ValueError("Hyperliquid deposit ledger verification requires the deposit hash")
         if (
             self.stage
             in {
@@ -920,6 +941,8 @@ class DirectCapitalConfigurationRequest(BaseModel):
     hyperliquid_bridge_address: str | None = None
     safe_address: str | None = None
     safe_delegate_address: str | None = None
+    clear_notilt_configuration: bool = False
+    clear_safe_configuration: bool = False
     vault_withdrawal_private_key: SecretStr | None = Field(
         default=None, min_length=32, max_length=512
     )
@@ -929,6 +952,20 @@ class DirectCapitalConfigurationRequest(BaseModel):
     max_amount: Decimal | None = Field(default=None, gt=0)
     max_fee: Decimal | None = Field(default=None, ge=0)
     idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_provider_clear(self) -> DirectCapitalConfigurationRequest:
+        if (
+            self.treasury_provider is CapitalTreasuryProvider.NOTILT_VAULT
+            and self.clear_notilt_configuration
+        ):
+            raise ValueError("the selected NoTilt provider configuration cannot be cleared")
+        if (
+            self.treasury_provider is CapitalTreasuryProvider.SAFE_SPENDING_LIMIT
+            and self.clear_safe_configuration
+        ):
+            raise ValueError("the selected Safe provider configuration cannot be cleared")
+        return self
 
     @field_validator(
         "vault_address",
@@ -1145,30 +1182,8 @@ class ReconciliationReasonRequest(BaseModel):
     reason: str = Field(min_length=2, max_length=1_000)
 
 
-class BinanceReadOnlySyncRequest(BaseModel):
-    account_id: str = Field(min_length=1, max_length=120)
-    symbol: str = Field(min_length=1, max_length=64, pattern=r"^[A-Z0-9_]+$")
-
-
-class HyperliquidReadOnlySyncRequest(BaseModel):
-    account_id: str = Field(min_length=1, max_length=120)
-    symbol: str = Field(min_length=1, max_length=64, pattern=r"^[A-Z0-9]+$")
-
-
-class BinanceTestnetActionRequest(BaseModel):
+class FreqtradeActionRequest(BaseModel):
     execution_scope: str = Field(min_length=3, max_length=255)
     owner_id: str = Field(min_length=1, max_length=255)
     fencing_token: int = Field(ge=1)
-
-
-class FreqtradeLiveActionRequest(BinanceTestnetActionRequest):
     idempotency_key: str = Field(min_length=1, max_length=160)
-
-
-class BinanceTestnetProtectionRequest(BinanceTestnetActionRequest):
-    trigger_price: Decimal = Field(gt=0)
-
-
-class HyperliquidTestnetProtectionRequest(BinanceTestnetActionRequest):
-    trigger_price: Decimal = Field(gt=0)
-    limit_price: Decimal = Field(gt=0)

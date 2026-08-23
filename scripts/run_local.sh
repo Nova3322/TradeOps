@@ -43,25 +43,16 @@ PY
 
 ensure_local_secret "$local_secret_dir/session-signing" token
 ensure_local_secret "$local_secret_dir/credential-encryption" base64-32
-ensure_local_secret "$local_secret_dir/freqtrade-password" token
 
 # Local console startup is read-only regardless of values in a shared secret file.
 export TRADING_DATABASE_URL="${TRADING_LOCAL_DATABASE_URL:-postgresql+psycopg://trading:local-trading-only@127.0.0.1:5434/trading_local}"
 export TRADING_SESSION_SIGNING_SECRET="${TRADING_SESSION_SIGNING_SECRET:-$(<"$local_secret_dir/session-signing")}"
 export TRADING_CREDENTIAL_ENCRYPTION_KEY="${TRADING_CREDENTIAL_ENCRYPTION_KEY:-$(<"$local_secret_dir/credential-encryption")}"
-export TRADING_BINANCE_LIVE_ORDER_SEND_ENABLED=false
-export TRADING_BINANCE_TESTNET_ORDER_SEND_ENABLED=false
-export TRADING_HYPERLIQUID_LIVE_ORDER_SEND_ENABLED=false
-export TRADING_HYPERLIQUID_TESTNET_ORDER_SEND_ENABLED=false
-export TRADING_FREQTRADE_LIVE_ORDER_SEND_ENABLED=false
 export TRADING_BINANCE_CAPITAL_WITHDRAW_ENABLED=false
 export TRADING_ALLOW_MOCK_IDENTITY=false
-export TRADING_EXECUTION_BACKEND=FREQTRADE
 export TRADING_API_PORT="${TRADING_API_PORT:-8014}"
 export TRADING_PUBLIC_BASE_URL="${TRADING_PUBLIC_BASE_URL:-http://127.0.0.1:${TRADING_API_PORT}}"
 export TRADING_FREQTRADE_WORKERS_ENABLED="${TRADING_LOCAL_FREQTRADE_WORKERS_ENABLED:-false}"
-export TRADING_FREQTRADE_API_USERNAME="${TRADING_FREQTRADE_API_USERNAME:-trading-control}"
-export TRADING_FREQTRADE_API_PASSWORD="${TRADING_FREQTRADE_API_PASSWORD:-$(<"$local_secret_dir/freqtrade-password")}"
 
 export TRADING_LOCAL_ADMIN_USERNAME="${TRADING_LOCAL_ADMIN_USERNAME:-trading-admin}"
 if [[ ! "$TRADING_LOCAL_ADMIN_USERNAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$ ]]; then

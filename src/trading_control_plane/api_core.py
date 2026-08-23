@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
@@ -33,6 +33,10 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import ValidationError
 
 from trading_control_plane import __version__
+from trading_control_plane.adapters.facts import FactAdapterConnectionProbe
+from trading_control_plane.adapters.hyperliquid_capital import (
+    HYPERLIQUID_BRIDGE2_ADDRESS,
+)
 from trading_control_plane.api_schemas import (
     AccountEquityFactRequest,
     AgentAccessRequest,
@@ -46,9 +50,6 @@ from trading_control_plane.api_schemas import (
     AuthorizationRequest,
     AutoAddRequest,
     AutomaticExitRequest,
-    BinanceReadOnlySyncRequest,
-    BinanceTestnetActionRequest,
-    BinanceTestnetProtectionRequest,
     CampaignTargetRequest,
     CapitalAutomationEvaluateRequest,
     CapitalAutomationPolicyRequest,
@@ -72,12 +73,10 @@ from trading_control_plane.api_schemas import (
     ExchangeCredentialRotateRequest,
     ExchangeRuntimeSyncRequest,
     ExchangeTradingEligibilityRequest,
-    FreqtradeLiveActionRequest,
+    FreqtradeActionRequest,
     FreqtradeWorkerConfigureRequest,
     FreqtradeWorkerVerifyRequest,
     FundingFactRequest,
-    HyperliquidReadOnlySyncRequest,
-    HyperliquidTestnetProtectionRequest,
     IntentReleaseRequest,
     IntentUnknownRequest,
     ManagedReductionRequest,
@@ -93,6 +92,7 @@ from trading_control_plane.api_schemas import (
     OrderIntentRequest,
     PasswordChangeRequest,
     PasswordLoginRequest,
+    PasswordStepUpRequest,
     PositionFactRequest,
     ProposalDefaultConfigRequest,
     ProtectionFactRequest,
@@ -129,18 +129,6 @@ from trading_control_plane.api_schemas import (
     WorkspaceCreateRequest,
 )
 from trading_control_plane.auth import SessionIdentity, SignedTokenService
-from trading_control_plane.binance import (
-    BinancePortfolioMarginReadOnlyClient,
-    BinanceReadOnlyClient,
-)
-from trading_control_plane.binance_capital import BinanceCapitalGateway
-from trading_control_plane.binance_execution import (
-    BinancePortfolioMarginClient,
-    BinanceTestnetClient,
-    BinanceTestnetOrder,
-    BinanceTestnetOrderCommand,
-    BinanceTestnetProtectionCommand,
-)
 from trading_control_plane.capital import MockCapitalTransferAdapter, build_direct_capital_plan
 from trading_control_plane.config import Settings, get_settings
 from trading_control_plane.connections import project_runtime_connections
@@ -163,32 +151,12 @@ from trading_control_plane.domain import (
     SignalSourceMode,
     TargetCandidate,
 )
-from trading_control_plane.exchange_connection import (
-    ExchangeConnectionVerifier,
-    ReadOnlyExchangeConnectionVerifier,
-)
 from trading_control_plane.freqtrade import (
     FreqtradeEntryCommand,
     FreqtradeExitCommand,
     FreqtradeWorkerClient,
     FreqtradeWorkerSpec,
     freqtrade_pair,
-)
-from trading_control_plane.hyperliquid import (
-    HyperliquidReadOnlyClient,
-    resolve_hyperliquid_main_account,
-)
-from trading_control_plane.hyperliquid_capital import (
-    HYPERLIQUID_BRIDGE2_ADDRESS,
-    HyperliquidCapitalGateway,
-)
-from trading_control_plane.hyperliquid_execution import (
-    HyperliquidLiveClient,
-    HyperliquidTestnetClient,
-    HyperliquidTestnetOrder,
-    HyperliquidTestnetOrderCommand,
-    HyperliquidTestnetProtectionCommand,
-    build_hyperliquid_signer,
 )
 from trading_control_plane.logging import configure_logging
 from trading_control_plane.metrics import DATABASE_READY
@@ -226,6 +194,22 @@ from trading_control_plane.telegram import (
     TelegramGateway,
     TelegramProposalReviewAction,
 )
+
+
+class ExchangeConnectionVerifier(Protocol):
+    def verify(
+        self,
+        *,
+        workspace_id: str,
+        team_id: str,
+        account_id: str,
+        venue: str,
+        environment: str,
+        account_mode: str,
+        credentials: Mapping[str, str],
+        now: datetime,
+    ) -> Any: ...
+
 
 logger = logging.getLogger(__name__)
 WEB_ROOT = Path(__file__).parent / "web"
@@ -379,7 +363,15 @@ def _domain_status(code: str) -> int:
         return status.HTTP_400_BAD_REQUEST
     if code.endswith("_NOT_FOUND"):
         return status.HTTP_404_NOT_FOUND
-    if code in {"PERPTAPE_RATE_LIMITED", "API_CLIENT_RATE_LIMITED"}:
+    if code in {
+        "PERPTAPE_RATE_LIMITED",
+        "API_CLIENT_RATE_LIMITED",
+        "BINANCE_RATE_LIMITED",
+        "BINANCE_CAPITAL_RATE_LIMITED",
+        "BINANCE_CONNECTION_RETRY_DEFERRED",
+        "BINANCE_CONNECTION_WEIGHT_HEADROOM_DEFERRED",
+        "BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED",
+    }:
         return status.HTTP_429_TOO_MANY_REQUESTS
     if code in {
         "IDEMPOTENCY_CONFLICT",
@@ -407,6 +399,7 @@ def _domain_status(code: str) -> int:
         "FREQTRADE_DISPATCH_ALREADY_STARTED",
         "API_CLIENT_NAME_CONFLICT",
         "API_CLIENT_REVOKED",
+        "BINANCE_RECEIPT_CHECK_IN_PROGRESS",
     }:
         return status.HTTP_409_CONFLICT
     if code in {
@@ -485,17 +478,6 @@ __all__ = [
     "AuthorizationRequest",
     "AutoAddRequest",
     "AutomaticExitRequest",
-    "BinanceCapitalGateway",
-    "BinancePortfolioMarginClient",
-    "BinancePortfolioMarginReadOnlyClient",
-    "BinanceReadOnlyClient",
-    "BinanceReadOnlySyncRequest",
-    "BinanceTestnetActionRequest",
-    "BinanceTestnetClient",
-    "BinanceTestnetOrder",
-    "BinanceTestnetOrderCommand",
-    "BinanceTestnetProtectionCommand",
-    "BinanceTestnetProtectionRequest",
     "CampaignNotification",
     "CampaignTargetRequest",
     "CapitalAutomationEvaluateRequest",
@@ -533,11 +515,12 @@ __all__ = [
     "ExchangeRuntimeSyncRequest",
     "ExchangeTradingEligibilityRequest",
     "ExecutionEnvironment",
+    "FactAdapterConnectionProbe",
     "FastAPI",
     "FileResponse",
+    "FreqtradeActionRequest",
     "FreqtradeEntryCommand",
     "FreqtradeExitCommand",
-    "FreqtradeLiveActionRequest",
     "FreqtradeWorkerClient",
     "FreqtradeWorkerConfigureRequest",
     "FreqtradeWorkerSpec",
@@ -545,15 +528,6 @@ __all__ = [
     "FundingFactRequest",
     "HTTPException",
     "Header",
-    "HyperliquidCapitalGateway",
-    "HyperliquidLiveClient",
-    "HyperliquidReadOnlyClient",
-    "HyperliquidReadOnlySyncRequest",
-    "HyperliquidTestnetClient",
-    "HyperliquidTestnetOrder",
-    "HyperliquidTestnetOrderCommand",
-    "HyperliquidTestnetProtectionCommand",
-    "HyperliquidTestnetProtectionRequest",
     "IntentKind",
     "IntentReleaseRequest",
     "IntentUnknownRequest",
@@ -579,6 +553,7 @@ __all__ = [
     "PasswordChangeRequest",
     "PasswordHasher",
     "PasswordLoginRequest",
+    "PasswordStepUpRequest",
     "PerptapeCandidate",
     "PerptapeClient",
     "PositionFactRequest",
@@ -590,7 +565,6 @@ __all__ = [
     "ProtectionFactRequest",
     "QuantStatsReportAdapter",
     "Query",
-    "ReadOnlyExchangeConnectionVerifier",
     "ReadinessDatabase",
     "ReconciliationReasonRequest",
     "ReconciliationRequest",
@@ -650,7 +624,6 @@ __all__ = [
     "asynccontextmanager",
     "asyncio",
     "build_direct_capital_plan",
-    "build_hyperliquid_signer",
     "configure_logging",
     "datetime",
     "freqtrade_pair",
@@ -666,7 +639,6 @@ __all__ = [
     "render_report",
     "report_engine_catalog",
     "report_metadata",
-    "resolve_hyperliquid_main_account",
     "status",
     "timedelta",
 ]

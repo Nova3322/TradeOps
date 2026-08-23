@@ -1,44 +1,32 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
+from trading_control_plane.adapters.capital import (
+    CapitalAdapterFactory,
+    build_production_capital_adapter_factory,
+)
 from trading_control_plane.api_core import (
     SESSION_COOKIE,
-    SUPPORTED_NOTILT_CHAINS,
-    UTC,
     UUID,
     WEB_ROOT,
     Any,
     ApiClientRateLimiter,
     AsyncIterator,
-    BinanceCapitalGateway,
-    BinancePortfolioMarginClient,
-    BinancePortfolioMarginReadOnlyClient,
-    BinanceReadOnlyClient,
-    BinanceTestnetClient,
-    BinanceTestnetOrder,
-    BinanceTestnetOrderCommand,
-    BinanceTestnetProtectionCommand,
     CampaignNotification,
     CapitalNotification,
     Cookie,
     Database,
-    Decimal,
     Depends,
     DomainRejected,
     ExchangeConnectionVerifier,
-    ExecutionEnvironment,
+    FactAdapterConnectionProbe,
     FastAPI,
     FileResponse,
     FreqtradeWorkerClient,
     FreqtradeWorkerSpec,
     Header,
     HTTPException,
-    HyperliquidCapitalGateway,
-    HyperliquidLiveClient,
-    HyperliquidReadOnlyClient,
-    HyperliquidTestnetClient,
-    HyperliquidTestnetOrder,
-    HyperliquidTestnetOrderCommand,
-    HyperliquidTestnetProtectionCommand,
     JSONResponse,
     LoginAttemptLimiter,
     MockCapitalTransferAdapter,
@@ -52,7 +40,6 @@ from trading_control_plane.api_core import (
     ProposalNotification,
     ProposalStatus,
     ReadinessDatabase,
-    ReadOnlyExchangeConnectionVerifier,
     Request,
     ReviewDecision,
     SafeSpendingGateway,
@@ -69,7 +56,6 @@ from trading_control_plane.api_core import (
     _domain_status,
     _now,
     asynccontextmanager,
-    build_hyperliquid_signer,
     configure_logging,
     datetime,
     get_settings,
@@ -77,8 +63,6 @@ from trading_control_plane.api_core import (
     json,
     perptape_candidate_identity_is_displayable,
     perptape_legacy_candidate_id,
-    quote,
-    resolve_hyperliquid_main_account,
     status,
     timedelta,
 )
@@ -108,10 +92,31 @@ from trading_control_plane.api_routes.risk import register_risk_routes
 from trading_control_plane.api_routes.signals import register_signals_routes
 from trading_control_plane.api_routes.system import register_system_routes
 from trading_control_plane.api_routes.workspace import register_workspace_routes
+from trading_control_plane.binance_errors import BinanceRequestState
+from trading_control_plane.binance_state import DatabaseBinanceRequestState
+from trading_control_plane.capital_application import CapitalApplicationRuntime
+from trading_control_plane.capital_configuration_use_cases import (
+    CapitalConfigurationUseCases,
+)
+from trading_control_plane.capital_direct_use_cases import CapitalDirectUseCases
+from trading_control_plane.capital_receipt_use_cases import CapitalReceiptUseCases
+from trading_control_plane.capital_transfer_use_cases import CapitalTransferUseCases
+from trading_control_plane.exchange_connection_verification import ExchangeConnectionVerification
+from trading_control_plane.notification import resolve_telegram_review_prompt
+from trading_control_plane.perptape import (
+    PERPTAPE_SOURCE_EXCHANGES,
+    PERPTAPE_VENUES,
+    PerptapeFeedSnapshot,
+    PerptapeSourceExchange,
+    bound_perptape_feed_snapshot,
+)
 from trading_control_plane.request_context import (
     ApiClientRequestContext,
     bind_api_client_context,
     reset_api_client_context,
+)
+from trading_control_plane.service_domains.proposal_automation import (
+    advance_approved_proposal,
 )
 
 
@@ -120,26 +125,23 @@ def create_app(
     database: ReadinessDatabase | None = None,
     perptape_client: PerptapeClient | None = None,
     telegram_gateway: TelegramGateway | None = None,
-    binance_client: BinanceReadOnlyClient | BinancePortfolioMarginReadOnlyClient | None = None,
-    binance_live_client: BinancePortfolioMarginClient | None = None,
-    binance_testnet_client: BinanceTestnetClient | None = None,
-    binance_testnet_reader: BinanceReadOnlyClient | None = None,
-    hyperliquid_client: HyperliquidReadOnlyClient | None = None,
-    hyperliquid_live_client: HyperliquidLiveClient | None = None,
-    hyperliquid_testnet_client: HyperliquidTestnetClient | None = None,
     freqtrade_workers: tuple[FreqtradeWorkerClient, ...] | None = None,
     capital_transfer_adapter: MockCapitalTransferAdapter | None = None,
     notilt_gateway: NoTiltGateway | None = None,
     notilt_valuator: NoTiltUsdValuator | None = None,
     safe_spending_gateway: SafeSpendingGateway | None = None,
-    hyperliquid_capital_gateway: HyperliquidCapitalGateway | None = None,
-    binance_capital_gateway: BinanceCapitalGateway | None = None,
+    capital_adapter_factory: CapitalAdapterFactory | None = None,
     exchange_connection_verifier: ExchangeConnectionVerifier | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_settings.validate_runtime_security()
     configure_logging(resolved_settings.log_level)
     resolved_database = database or Database(resolved_settings.database_url)
+    binance_request_state = (
+        DatabaseBinanceRequestState(resolved_database)
+        if isinstance(resolved_database, Database)
+        else BinanceRequestState()
+    )
     token_service = SignedTokenService(resolved_settings.session_signing_secret)
     password_hasher = PasswordHasher()
     login_limiter = LoginAttemptLimiter()
@@ -192,6 +194,23 @@ def create_app(
                     risk_tier=str(item["risk_tier"]),
                     quantity=str(item["quantity"]),
                     max_risk=str(item["max_risk"]),
+                    account_id=str(item["account_id"]),
+                    venue=str(item["venue"]),
+                    order_type="MARKET",
+                    estimated_notional=(
+                        None
+                        if item["estimated_notional"] is None
+                        else str(item["estimated_notional"])
+                    ),
+                    quote_currency=(
+                        None if item["quote_currency"] is None else str(item["quote_currency"])
+                    ),
+                    collateral_currency=(
+                        None
+                        if item["collateral_currency"] is None
+                        else str(item["collateral_currency"])
+                    ),
+                    leverage=None if item["leverage"] is None else str(item["leverage"]),
                 )
             )
         return todos
@@ -225,126 +244,7 @@ def create_app(
         )
     else:
         resolved_telegram = MockTelegramGateway()
-    resolved_binance = binance_client or (
-        BinancePortfolioMarginReadOnlyClient(
-            base_url=resolved_settings.binance_live_base_url,
-            api_key=resolved_settings.binance_api_key,
-            api_secret=resolved_settings.binance_api_secret,
-            recv_window_ms=resolved_settings.binance_recv_window_ms,
-        )
-        if resolved_settings.binance_account_mode == "PORTFOLIO_MARGIN"
-        else BinanceReadOnlyClient(
-            base_url=resolved_settings.binance_futures_base_url,
-            api_key=resolved_settings.binance_api_key,
-            api_secret=resolved_settings.binance_api_secret,
-            recv_window_ms=resolved_settings.binance_recv_window_ms,
-        )
-    )
-    direct_execution_enabled = resolved_settings.execution_backend == "DIRECT_LEGACY"
-    resolved_binance_live = binance_live_client or BinancePortfolioMarginClient(
-        base_url=resolved_settings.binance_live_base_url,
-        api_key=(resolved_settings.binance_api_key if direct_execution_enabled else None),
-        api_secret=(resolved_settings.binance_api_secret if direct_execution_enabled else None),
-        recv_window_ms=resolved_settings.binance_recv_window_ms,
-    )
-    resolved_binance_testnet = binance_testnet_client or BinanceTestnetClient(
-        base_url=resolved_settings.binance_testnet_base_url,
-        api_key=(resolved_settings.binance_testnet_api_key if direct_execution_enabled else None),
-        api_secret=(
-            resolved_settings.binance_testnet_api_secret if direct_execution_enabled else None
-        ),
-        recv_window_ms=resolved_settings.binance_recv_window_ms,
-    )
-    resolved_binance_testnet_reader = binance_testnet_reader or BinanceReadOnlyClient(
-        base_url=resolved_settings.binance_testnet_base_url,
-        api_key=resolved_settings.binance_testnet_api_key,
-        api_secret=resolved_settings.binance_testnet_api_secret,
-        recv_window_ms=resolved_settings.binance_recv_window_ms,
-    )
-    resolved_hyperliquid = hyperliquid_client or HyperliquidReadOnlyClient(
-        base_url=resolved_settings.hyperliquid_base_url,
-        account_address=(
-            resolved_settings.hyperliquid_subaccount_address
-            or resolved_settings.hyperliquid_account_address
-        ),
-        api_wallet_address=(
-            resolved_settings.hyperliquid_api_wallet_address
-            if resolved_settings.hyperliquid_read_only_enabled
-            else None
-        ),
-        dex=resolved_settings.hyperliquid_core_dex,
-        hip3_dexes=resolved_settings.hyperliquid_hip3_dexes,
-    )
-    testnet_signer = (
-        build_hyperliquid_signer(
-            resolved_settings.hyperliquid_testnet_api_wallet_private_key,
-            api_wallet_address=None,
-            active_pool=resolved_settings.hyperliquid_subaccount_address,
-            is_mainnet=False,
-        )
-        if direct_execution_enabled
-        else None
-    )
-    resolved_hyperliquid_testnet = hyperliquid_testnet_client or HyperliquidTestnetClient(
-        base_url=resolved_settings.hyperliquid_testnet_base_url,
-        account_address=resolved_settings.hyperliquid_account_address,
-        signer=testnet_signer,
-        subaccount_address=resolved_settings.hyperliquid_subaccount_address,
-        dex=resolved_settings.hyperliquid_core_dex,
-    )
-    live_signer = (
-        build_hyperliquid_signer(
-            resolved_settings.hyperliquid_api_wallet_private_key,
-            api_wallet_address=resolved_settings.hyperliquid_api_wallet_address,
-            active_pool=resolved_settings.hyperliquid_subaccount_address,
-            is_mainnet=True,
-        )
-        if direct_execution_enabled
-        else None
-    )
-    resolved_hyperliquid_live_account = resolved_settings.hyperliquid_account_address
-    if (
-        direct_execution_enabled
-        and resolved_hyperliquid_live_account is None
-        and resolved_settings.hyperliquid_api_wallet_address is not None
-    ):
-        resolved_hyperliquid_live_account = resolve_hyperliquid_main_account(
-            base_url=resolved_settings.hyperliquid_base_url,
-            account_address=None,
-            api_wallet_address=resolved_settings.hyperliquid_api_wallet_address,
-        )
-    resolved_hyperliquid_live = hyperliquid_live_client or HyperliquidLiveClient(
-        base_url=resolved_settings.hyperliquid_live_base_url,
-        account_address=resolved_hyperliquid_live_account,
-        signer=live_signer,
-        subaccount_address=resolved_settings.hyperliquid_subaccount_address,
-        dex=resolved_settings.hyperliquid_core_dex,
-    )
-    resolved_freqtrade_workers = freqtrade_workers or (
-        FreqtradeWorkerClient(
-            FreqtradeWorkerSpec(
-                name="binance-default",
-                venue="BINANCE",
-                base_url=resolved_settings.freqtrade_binance_worker_url,
-                username=resolved_settings.freqtrade_api_username,
-                password=resolved_settings.freqtrade_api_password,
-            ),
-            timeout_seconds=resolved_settings.freqtrade_timeout_seconds,
-            confirmation_timeout_seconds=(resolved_settings.freqtrade_confirmation_timeout_seconds),
-        ),
-        FreqtradeWorkerClient(
-            FreqtradeWorkerSpec(
-                name="hyperliquid-default",
-                venue="HYPERLIQUID",
-                base_url=resolved_settings.freqtrade_hyperliquid_worker_url,
-                username=resolved_settings.freqtrade_api_username,
-                password=resolved_settings.freqtrade_api_password,
-                hip3_dexes=resolved_settings.hyperliquid_hip3_dexes,
-            ),
-            timeout_seconds=resolved_settings.freqtrade_timeout_seconds,
-            confirmation_timeout_seconds=(resolved_settings.freqtrade_confirmation_timeout_seconds),
-        ),
-    )
+    resolved_freqtrade_workers = freqtrade_workers or ()
     resolved_capital_transfer = capital_transfer_adapter or MockCapitalTransferAdapter()
     resolved_notilt = notilt_gateway or NoTiltGateway(
         timeout_seconds=resolved_settings.notilt_gateway_timeout_seconds
@@ -353,18 +253,49 @@ def create_app(
     resolved_safe_spending = safe_spending_gateway or SafeSpendingGateway(
         timeout_seconds=resolved_settings.safe_spending_gateway_timeout_seconds
     )
-    resolved_hyperliquid_capital = hyperliquid_capital_gateway or HyperliquidCapitalGateway(
-        timeout_seconds=5
-    )
-    resolved_binance_capital = binance_capital_gateway or BinanceCapitalGateway(
-        base_url=resolved_settings.binance_capital_base_url,
-        api_key=resolved_settings.binance_capital_api_key,
-        api_secret=resolved_settings.binance_capital_api_secret,
-        recv_window_ms=resolved_settings.binance_recv_window_ms,
-        timeout_seconds=resolved_settings.binance_capital_timeout_seconds,
+
+    def database_capital_credentials(scope: Any) -> dict[str, str]:
+        if not isinstance(resolved_database, Database):
+            raise DomainRejected(
+                "CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY",
+                "database-backed capital credentials require the durable Trading database",
+            )
+        binding = TradingService(
+            resolved_database,
+            credential_encryption_key=resolved_settings.credential_encryption_key,
+        ).verified_capital_account_binding(
+            workspace_id=UUID(scope.workspace_id),
+            team_id=UUID(scope.team_id),
+            account_id=scope.account_id,
+            venue=scope.venue,
+            environment=scope.environment,
+        )
+        return binding.credentials
+
+    resolved_capital_adapter_factory = (
+        capital_adapter_factory
+        or build_production_capital_adapter_factory(
+            binance_account_id=resolved_settings.binance_capital_account_id,
+            binance_api_key=resolved_settings.binance_capital_api_key,
+            binance_api_secret=resolved_settings.binance_capital_api_secret,
+            binance_base_url=resolved_settings.binance_capital_base_url,
+            binance_recv_window_ms=resolved_settings.binance_recv_window_ms,
+            binance_timeout_seconds=resolved_settings.binance_capital_timeout_seconds,
+            binance_request_state=binance_request_state,
+            credential_resolver=database_capital_credentials,
+        )
     )
     resolved_exchange_connection_verifier = (
-        exchange_connection_verifier or ReadOnlyExchangeConnectionVerifier()
+        exchange_connection_verifier
+        or FactAdapterConnectionProbe(
+            bootstrap_symbols={
+                "BINANCE": resolved_settings.runtime_binance_symbol,
+                "HYPERLIQUID": resolved_settings.runtime_hyperliquid_symbol,
+                "OKX": resolved_settings.runtime_okx_symbol,
+                "BYBIT": resolved_settings.runtime_bybit_symbol,
+            },
+            binance_request_state=binance_request_state,
+        )
     )
 
     @asynccontextmanager
@@ -390,20 +321,12 @@ def create_app(
     app.state.database = resolved_database
     app.state.perptape_client = resolved_perptape
     app.state.telegram_gateway = resolved_telegram
-    app.state.binance_client = resolved_binance
-    app.state.binance_live_client = resolved_binance_live
-    app.state.binance_testnet_client = resolved_binance_testnet
-    app.state.binance_testnet_reader = resolved_binance_testnet_reader
-    app.state.hyperliquid_client = resolved_hyperliquid
-    app.state.hyperliquid_live_client = resolved_hyperliquid_live
-    app.state.hyperliquid_testnet_client = resolved_hyperliquid_testnet
     app.state.freqtrade_workers = resolved_freqtrade_workers
     app.state.capital_transfer_adapter = resolved_capital_transfer
     app.state.notilt_gateway = resolved_notilt
     app.state.notilt_valuator = resolved_notilt_valuator
     app.state.safe_spending_gateway = resolved_safe_spending
-    app.state.hyperliquid_capital_gateway = resolved_hyperliquid_capital
-    app.state.binance_capital_gateway = resolved_binance_capital
+    app.state.capital_adapter_factory = resolved_capital_adapter_factory
     app.state.exchange_connection_verifier = resolved_exchange_connection_verifier
 
     @app.exception_handler(DomainRejected)
@@ -414,6 +337,7 @@ def create_app(
                 "error": {
                     "code": exc.code,
                     "message": exc.detail,
+                    **({"details": exc.metadata} if exc.metadata is not None else {}),
                     "retryable": exc.code
                     in {
                         "PERPTAPE_UNAVAILABLE",
@@ -421,6 +345,12 @@ def create_app(
                         "PERPTAPE_CACHE_UNAVAILABLE",
                         "PERPTAPE_CACHE_STALE",
                         "BINANCE_READ_ONLY_UNAVAILABLE",
+                        "BINANCE_RATE_LIMITED",
+                        "BINANCE_CONNECTION_RETRY_DEFERRED",
+                        "BINANCE_CAPITAL_RATE_LIMITED",
+                        "BINANCE_CONNECTION_WEIGHT_HEADROOM_DEFERRED",
+                        "BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED",
+                        "BINANCE_RECEIPT_CHECK_IN_PROGRESS",
                         "BINANCE_LIVE_UNAVAILABLE",
                         "BINANCE_LIVE_OUTCOME_UNKNOWN",
                         "HYPERLIQUID_READ_ONLY_UNAVAILABLE",
@@ -446,26 +376,9 @@ def create_app(
     def queries() -> TradingQueries:
         return TradingQueries(business_database())
 
-    def authoritative_live_accounts() -> dict[str, str]:
-        return {
-            venue: account_id
-            for venue, account_id in (
-                (
-                    "BINANCE",
-                    resolved_settings.runtime_binance_account_id,
-                ),
-                (
-                    "HYPERLIQUID",
-                    resolved_settings.runtime_hyperliquid_account_id,
-                ),
-            )
-            if account_id
-        }
-
     def service() -> TradingService:
         return TradingService(
             business_database(),
-            authoritative_live_accounts=authoritative_live_accounts(),
             credential_encryption_key=resolved_settings.credential_encryption_key,
         )
 
@@ -496,6 +409,7 @@ def create_app(
                 base_url=binding.worker_url,
                 username=binding.username,
                 password=binding.password,
+                ws_token=binding.ws_token,
                 hip3_dexes=binding.hip3_dexes,
                 exchange_account_id=str(binding.exchange_account_id),
                 team_id=str(binding.team_id),
@@ -504,214 +418,6 @@ def create_app(
             timeout_seconds=resolved_settings.freqtrade_timeout_seconds,
             confirmation_timeout_seconds=(resolved_settings.freqtrade_confirmation_timeout_seconds),
         )
-
-    def effective_direct_capital_settings(
-        user_id: UUID,
-        environment: str = "LIVE",
-    ) -> tuple[Settings, dict[str, Any] | None]:
-        config = service().direct_capital_configuration(
-            user_id,
-            environment,
-            include_sensitive_addresses=True,
-        )
-        if config is None:
-            return resolved_settings, None
-        return (
-            resolved_settings.model_copy(
-                update={
-                    "capital_direct_network": config["network"],
-                    "capital_direct_asset": config["asset"],
-                    "capital_direct_treasury_provider": config["treasury_provider"],
-                    "capital_direct_vault_id": config["vault_id"],
-                    "capital_direct_vault_address": config["vault_address"],
-                    "capital_direct_owned_arbitrum_address": config["owned_arbitrum_address"],
-                    "capital_direct_binance_account_id": config["binance_account_id"],
-                    "capital_direct_binance_deposit_address": config["binance_deposit_address"],
-                    "capital_direct_binance_withdrawal_address": config[
-                        "binance_withdrawal_address"
-                    ],
-                    "capital_direct_hyperliquid_account_id": config["hyperliquid_account_id"],
-                    "capital_direct_hyperliquid_bridge_address": config[
-                        "hyperliquid_bridge_address"
-                    ],
-                    "capital_direct_safe_address": config["safe_address"],
-                    "capital_direct_safe_delegate_address": config["safe_delegate_address"],
-                    "capital_direct_max_amount": (
-                        None if config["max_amount"] is None else Decimal(str(config["max_amount"]))
-                    ),
-                    "capital_direct_max_fee": (
-                        None if config["max_fee"] is None else Decimal(str(config["max_fee"]))
-                    ),
-                }
-            ),
-            config,
-        )
-
-    def capital_snapshot(user_id: UUID) -> dict[str, Any]:
-        direct_settings, saved_config = effective_direct_capital_settings(user_id)
-        configured_chain_id: int | None
-        try:
-            configured_chain_id = notilt_chain_id_for_network(
-                direct_settings.capital_direct_network
-            )
-        except DomainRejected:
-            configured_chain_id = None
-        configured_vault = (
-            None
-            if configured_chain_id is None
-            else resolved_settings.notilt_vaults.get(configured_chain_id)
-        )
-        selected_provider = direct_settings.capital_direct_treasury_provider
-        configured_notilt_address = (
-            direct_settings.capital_direct_vault_address or configured_vault
-        )
-        configured_safe_address = direct_settings.capital_direct_safe_address
-        selected_treasury_account_id = (
-            configured_safe_address
-            if selected_provider == "SAFE_SPENDING_LIMIT"
-            else configured_notilt_address
-        )
-        safe_scope_ready = (
-            direct_settings.safe_spending_enabled
-            and direct_settings.safe_spending_arbitrum_rpc_url is not None
-            and direct_settings.capital_direct_safe_address is not None
-            and direct_settings.capital_direct_safe_delegate_address is not None
-        )
-        notilt_scope_ready = (
-            direct_settings.notilt_enabled
-            and direct_settings.notilt_agent_address is not None
-            and configured_notilt_address is not None
-        )
-        selected_scope_ready = (
-            safe_scope_ready if selected_provider == "SAFE_SPENDING_LIMIT" else notilt_scope_ready
-        )
-        onchain_probe: dict[str, Any] = {
-            "provider": selected_provider,
-            "status": "NOT_ATTEMPTED" if selected_scope_ready else "BLOCKED",
-            "error_code": (
-                "SAFE_SPENDING_LIMIT_NOT_CONFIGURED"
-                if selected_provider == "SAFE_SPENDING_LIMIT" and not safe_scope_ready
-                else "NOTILT_VAULT_NOT_CONFIGURED"
-                if selected_provider == "NOTILT_VAULT" and not notilt_scope_ready
-                else None
-            ),
-        }
-        if selected_provider == "SAFE_SPENDING_LIMIT" and safe_scope_ready:
-            safe_rpc_url = direct_settings.safe_spending_arbitrum_rpc_url
-            safe_address = direct_settings.capital_direct_safe_address
-            safe_delegate = direct_settings.capital_direct_safe_delegate_address
-            assert safe_rpc_url is not None
-            assert safe_address is not None
-            assert safe_delegate is not None
-            try:
-                safe_fact = resolved_safe_spending.read_limit(
-                    rpc_url=safe_rpc_url,
-                    safe=safe_address,
-                    delegate=safe_delegate,
-                )
-                scale = Decimal(10) ** 6
-                observed_at = datetime.fromtimestamp(int(str(safe_fact["blockTimestamp"])), UTC)
-                service().record_safe_spending_snapshot(
-                    actor_id=user_id,
-                    safe_address=safe_address,
-                    asset="USDC",
-                    balance=Decimal(str(safe_fact["balance"])) / scale,
-                    available_limit=Decimal(str(safe_fact["available"])) / scale,
-                    module_enabled=bool(safe_fact["moduleEnabled"]),
-                    observed_at=observed_at,
-                    now=_now(),
-                )
-            except DomainRejected as exc:
-                onchain_probe.update(status="FAILED", error_code=exc.code)
-            except (KeyError, TypeError, ValueError, ArithmeticError):
-                onchain_probe.update(status="FAILED", error_code="SAFE_RESPONSE_INVALID")
-            else:
-                onchain_probe.update(status="SUCCESS", error_code=None)
-        snapshot = queries().capital_center(
-            user_id,
-            authoritative_live_accounts=authoritative_live_accounts(),
-            authoritative_live_treasury_account_id=selected_treasury_account_id,
-            require_authoritative_live_treasury=True,
-        )
-        expected_interval = resolved_settings.runtime_sync_interval_seconds
-        snapshot["net_worth"]["history_expected_interval_seconds"] = expected_interval
-        snapshot["net_worth"]["history_gap_tolerance_seconds"] = max(
-            180,
-            expected_interval * 3,
-        )
-        snapshot["net_worth"]["onchain_provider"] = selected_provider
-        snapshot["net_worth"]["onchain_probe"] = onchain_probe
-        snapshot["direct_configuration"] = {
-            "single_account_mode": False,
-            "source": "VERSIONED_DATABASE" if saved_config is not None else "ENVIRONMENT",
-            "version": None if saved_config is None else saved_config["version"],
-            "effective_at": None if saved_config is None else saved_config["effective_at"],
-            "updated_by_username": (
-                None if saved_config is None else saved_config["updated_by_username"]
-            ),
-            "can_manage": service().can_user(user_id, "access.manage"),
-            "asset": direct_settings.capital_direct_asset,
-            "network": direct_settings.capital_direct_network,
-            "treasury_provider": direct_settings.capital_direct_treasury_provider,
-            "configured_providers": [
-                provider
-                for provider, configured in (
-                    ("NOTILT_VAULT", configured_notilt_address is not None),
-                    ("SAFE_SPENDING_LIMIT", configured_safe_address is not None),
-                )
-                if configured
-            ],
-            "selected_onchain_account_configured": selected_treasury_account_id is not None,
-            "vault_id_configured": direct_settings.capital_direct_vault_id is not None,
-            "vault_address_configured": (direct_settings.capital_direct_vault_address is not None),
-            "owned_arbitrum_address_configured": (
-                direct_settings.capital_direct_owned_arbitrum_address is not None
-            ),
-            "binance_account_configured": (
-                direct_settings.capital_direct_binance_account_id is not None
-            ),
-            "binance_whitelist_destination_configured": (
-                direct_settings.capital_direct_binance_deposit_address is not None
-            ),
-            "binance_withdrawal_destination_configured": (
-                direct_settings.capital_direct_binance_withdrawal_address is not None
-            ),
-            "binance_capital_credentials_configured": resolved_binance_capital.configured,
-            "binance_capital_submission_enabled": (
-                direct_settings.binance_capital_withdraw_enabled
-            ),
-            "hyperliquid_account_configured": (
-                direct_settings.capital_direct_hyperliquid_account_id is not None
-            ),
-            "hyperliquid_contract_configured": (
-                direct_settings.capital_direct_hyperliquid_bridge_address is not None
-            ),
-            "limits_configured": (
-                direct_settings.capital_direct_max_amount is not None
-                and direct_settings.capital_direct_max_fee is not None
-            ),
-            "notilt_sdk_available": resolved_notilt.available,
-            "notilt_scope_configured": (
-                resolved_settings.notilt_enabled
-                and configured_notilt_address is not None
-                and resolved_settings.notilt_agent_address is not None
-            ),
-            "safe_spending_enabled": direct_settings.safe_spending_enabled,
-            "safe_gateway_available": resolved_safe_spending.available,
-            "safe_spending_scope_configured": (
-                direct_settings.safe_spending_enabled
-                and direct_settings.safe_spending_arbitrum_rpc_url is not None
-                and direct_settings.capital_direct_safe_address is not None
-                and direct_settings.capital_direct_safe_delegate_address is not None
-            ),
-            "safe_address_configured": direct_settings.capital_direct_safe_address is not None,
-            "safe_delegate_configured": (
-                direct_settings.capital_direct_safe_delegate_address is not None
-            ),
-            "signing": False,
-            "broadcast": False,
-        }
-        return snapshot
 
     def require_capability(
         identity: SessionIdentity,
@@ -735,53 +441,8 @@ def create_app(
         if not allowed:
             raise DomainRejected("RBAC_DENIED", f"{action} is not assigned to this user")
 
-    def configured_risk_scopes() -> tuple[tuple[str, str, str], ...]:
-        scopes: set[tuple[str, str, str]] = set()
-        if (
-            resolved_settings.binance_read_only_enabled
-            and resolved_settings.binance_fact_environment == "LIVE"
-            and resolved_settings.runtime_binance_account_id
-        ):
-            scopes.add(("LIVE", resolved_settings.runtime_binance_account_id, "BINANCE"))
-        if (
-            resolved_settings.hyperliquid_read_only_enabled
-            and resolved_settings.hyperliquid_fact_environment == "LIVE"
-            and resolved_settings.runtime_hyperliquid_account_id
-        ):
-            scopes.add(("LIVE", resolved_settings.runtime_hyperliquid_account_id, "HYPERLIQUID"))
-        return tuple(sorted(scopes))
-
-    def require_default_venue_account(account_id: str, venue: str) -> None:
-        expected = (
-            resolved_settings.runtime_binance_account_id
-            if venue == "BINANCE"
-            else resolved_settings.runtime_hyperliquid_account_id
-        )
-        if expected is None:
-            raise DomainRejected(
-                "DEFAULT_ACCOUNT_NOT_CONFIGURED",
-                f"{venue} production facts require a configured default account",
-            )
-        if account_id != expected:
-            raise DomainRejected(
-                "DEFAULT_ACCOUNT_REQUIRED",
-                f"{venue} production facts are restricted to the configured default account",
-            )
-
-    def require_registered_or_default_venue_account(
-        identity: SessionIdentity,
-        account_id: str,
-        venue: str,
-    ) -> None:
-        registry = queries().exchange_accounts(identity.user_id)
-        registered = any(
-            item["account_id"] == account_id and item["venue"] == venue for item in registry["data"]
-        )
-        if not registered:
-            # Preserve the legacy single-account boundary until this venue is
-            # represented by the database-backed account registry.
-            require_default_venue_account(account_id, venue)
-        require_capability(identity, "venue.view", account_id, venue)
+    def configured_risk_scopes(actor_id: UUID) -> tuple[tuple[str, str, str], ...]:
+        return queries().configured_risk_scopes(actor_id)
 
     async def current_identity(
         trading_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
@@ -855,41 +516,9 @@ def create_app(
     def notify_reviewers(
         proposal_id: UUID, proposal_version: int, environment: str = "TESTNET"
     ) -> None:
-        for reviewer in queries().reviewers_for_proposal(proposal_id):
-            detail = queries().proposal_detail(reviewer.user_id, proposal_id)
-            code = token_service.issue_review_reference(
-                user_id=reviewer.user_id,
-                object_id=proposal_id,
-                object_version=proposal_version,
-                now=_now(),
-                ttl=timedelta(seconds=resolved_settings.action_token_ttl_seconds),
-            )
-            review_url = (
-                f"{resolved_settings.public_base_url.rstrip('/')}/proposals/{proposal_id}"
-                f"?review_code={quote(code)}"
-            )
-            notification_key = f"{proposal_id}:{proposal_version}:{reviewer.user_id}"
-            resolved_telegram.send(
-                ProposalNotification(
-                    notification_id="tg_"
-                    + hashlib.sha256(notification_key.encode()).hexdigest()[:20],
-                    reviewer_id=reviewer.user_id,
-                    proposal_id=proposal_id,
-                    proposal_version=proposal_version,
-                    environment=environment,
-                    summary="提案正在等待人工审核；完整冻结语义仅在 Web 中展示。",  # noqa: RUF001
-                    review_code=code,
-                    review_url=review_url,
-                    created_at=_now(),
-                    status=str(detail["status"]),
-                    expires_at=str(detail["expires_at"]),
-                    symbol=None if detail["symbol"] is None else str(detail["symbol"]),
-                    direction=str(detail["direction"]),
-                    risk_tier=str(detail["risk_tier"]),
-                    quantity=str(detail["quantity"]),
-                    max_risk=str(detail["max_risk"]),
-                )
-            )
+        # Proposal submission already freezes and enqueues the subscribed Team routes
+        # in the same transaction. This compatibility hook must never create a second path.
+        del proposal_id, proposal_version, environment
 
     def notify_capital(
         *,
@@ -937,31 +566,110 @@ def create_app(
                 )
             )
 
+    def persisted_perptape_venue_snapshots(
+        *,
+        user_id: UUID,
+        now: datetime,
+    ) -> tuple[
+        dict[PerptapeSourceExchange, PerptapeFeedSnapshot],
+        dict[str, dict[str, Any]],
+    ]:
+        feeds = queries().perptape_feeds(user_id)
+        health = queries().perptape_polling_health(user_id)
+        grace = timedelta(
+            seconds=(
+                resolved_settings.runtime_sync_interval_seconds
+                + int(resolved_settings.perptape_timeout_seconds)
+                + 30
+            )
+        )
+        states: dict[str, dict[str, Any]] = {}
+        for source_exchange in PERPTAPE_SOURCE_EXCHANGES:
+            venue = PERPTAPE_VENUES[source_exchange]
+            feed = feeds.get(source_exchange)
+            venue_health = health.get(source_exchange, {})
+            data_status = (
+                "UNKNOWN"
+                if feed is None
+                else "CURRENT"
+                if feed.contract_version == resolved_settings.perptape_contract_version
+                and now <= feed.next_allowed_at + grace
+                else "STALE"
+            )
+            retry_at = venue_health.get("retry_at")
+            rate_limited = (
+                venue_health.get("status") == "FAILED"
+                and "RATE_LIMITED" in str(venue_health.get("error_code") or "")
+                and isinstance(retry_at, datetime)
+                and now < retry_at
+            )
+            states[venue] = {
+                "source_exchange": source_exchange,
+                "status": "RATE_LIMITED" if rate_limited else data_status,
+                "data_status": data_status,
+                "candidate_count": 0 if feed is None else len(feed.candidates),
+                "contract_version": None if feed is None else feed.contract_version,
+                "generated_at": None if feed is None else feed.generated_at.isoformat(),
+                "fetched_at": None if feed is None else feed.fetched_at.isoformat(),
+                "next_allowed_at": None if feed is None else feed.next_allowed_at.isoformat(),
+                "retry_at": None if retry_at is None else retry_at.isoformat(),
+                "error_code": venue_health.get("error_code"),
+            }
+        return feeds, states
+
+    def current_persisted_perptape_feed(
+        *, user_id: UUID, now: datetime
+    ) -> PerptapeFeedSnapshot | None:
+        feeds, states = persisted_perptape_venue_snapshots(user_id=user_id, now=now)
+        current = {
+            source_exchange: feed
+            for source_exchange, feed in feeds.items()
+            if states[PERPTAPE_VENUES[source_exchange]]["data_status"] == "CURRENT"
+        }
+        if not current:
+            return None
+        newest = max(current.values(), key=lambda value: value.fetched_at)
+        return bound_perptape_feed_snapshot(
+            PerptapeFeedSnapshot(
+                contract_version=newest.contract_version,
+                generated_at=max(feed.generated_at for feed in current.values()),
+                fetched_at=max(feed.fetched_at for feed in current.values()),
+                next_allowed_at=max(feed.next_allowed_at for feed in current.values()),
+                candidates=tuple(
+                    candidate
+                    for source_exchange in PERPTAPE_SOURCE_EXCHANGES
+                    if source_exchange in current
+                    for candidate in current[source_exchange].candidates
+                ),
+            )
+        )
+
     def current_perptape_candidates(*, user_id: UUID, now: datetime) -> list[PerptapeCandidate]:
         runtime = service().perptape_source_runtime(user_id)
-        if resolved_settings.runtime_sync_enabled:
-            feed = queries().perptape_feed(user_id)
-            if feed is None:
-                raise DomainRejected(
-                    "PERPTAPE_CACHE_UNAVAILABLE",
-                    "runtime sync has not recorded a Perptape feed",
-                )
-            grace = timedelta(
-                seconds=(
-                    resolved_settings.runtime_sync_interval_seconds
-                    + int(resolved_settings.perptape_timeout_seconds)
-                    + 30
-                )
+        feeds, states = persisted_perptape_venue_snapshots(user_id=user_id, now=now)
+        if feeds:
+            combined = PerptapeFeedSnapshot(
+                contract_version=max(
+                    feeds.values(), key=lambda value: value.fetched_at
+                ).contract_version,
+                generated_at=max(feed.generated_at for feed in feeds.values()),
+                fetched_at=max(feed.fetched_at for feed in feeds.values()),
+                next_allowed_at=max(feed.next_allowed_at for feed in feeds.values()),
+                candidates=tuple(
+                    candidate
+                    if states[PERPTAPE_VENUES[source_exchange]]["data_status"] == "CURRENT"
+                    else replace(candidate, data_health="STALE")
+                    for source_exchange in PERPTAPE_SOURCE_EXCHANGES
+                    if source_exchange in feeds
+                    for candidate in feeds[source_exchange].candidates
+                ),
             )
-            if (
-                feed.contract_version != resolved_settings.perptape_contract_version
-                or now > feed.next_allowed_at + grace
-            ):
-                raise DomainRejected(
-                    "PERPTAPE_CACHE_STALE",
-                    "runtime Perptape feed is stale or uses another contract version",
-                )
-            return list(feed.candidates)
+            return list(bound_perptape_feed_snapshot(combined).candidates)
+        if resolved_settings.runtime_sync_enabled:
+            raise DomainRejected(
+                "PERPTAPE_CACHE_UNAVAILABLE",
+                "runtime sync has not recorded a Perptape feed",
+            )
         team_api_key = runtime["api_key"]
         if team_api_key is not None:
             cache_key = (UUID(str(runtime["signal_source_id"])), int(runtime["version"]))
@@ -1003,7 +711,11 @@ def create_app(
             for candidate in source_candidates
             if perptape_candidate_identity_is_displayable(candidate)
         ]
-        feed = queries().perptape_feed(user_id) if resolved_settings.runtime_sync_enabled else None
+        feed = current_persisted_perptape_feed(user_id=user_id, now=now)
+        _venue_feeds, venue_states = persisted_perptape_venue_snapshots(
+            user_id=user_id,
+            now=now,
+        )
         active_instrument_keys = queries().active_instrument_keys(
             {
                 (candidate.venue, candidate.symbol)
@@ -1077,6 +789,7 @@ def create_app(
             "retry_at": None if feed is None else feed.next_allowed_at.isoformat(),
             "as_of": now.isoformat(),
             "discarded_candidate_count": len(source_candidates) - len(candidates),
+            "venues": venue_states,
             "data": data,
         }
 
@@ -1108,312 +821,61 @@ def create_app(
             )
         )
 
-    def require_binance_live() -> None:
-        if resolved_settings.execution_backend != "DIRECT_LEGACY":
+    def require_freqtrade_enabled() -> None:
+        if not resolved_settings.freqtrade_workers_enabled:
             raise DomainRejected(
-                "DIRECT_EXECUTION_RETIRED",
-                "direct Binance sending is retired; execution belongs to the Freqtrade worker",
-            )
-        if not resolved_settings.binance_live_order_send_enabled:
-            raise DomainRejected(
-                "BINANCE_LIVE_DISABLED", "Binance LIVE order send is explicitly disabled"
-            )
-        if not resolved_binance_live.configured:
-            raise DomainRejected(
-                "BINANCE_LIVE_NOT_CONFIGURED",
-                "Binance Unified Account credentials are not configured",
+                "FREQTRADE_EXECUTION_DISABLED",
+                "Freqtrade execution is explicitly disabled",
             )
 
-    def require_binance_testnet() -> None:
-        if not resolved_settings.binance_testnet_order_send_enabled:
-            raise DomainRejected(
-                "BINANCE_TESTNET_DISABLED", "Binance testnet order send is explicitly disabled"
-            )
-        if binance_testnet_client is not None and not resolved_binance_testnet.configured:
-            raise DomainRejected(
-                "BINANCE_TESTNET_NOT_CONFIGURED", "Binance testnet credentials are not configured"
-            )
-
-    def require_hyperliquid_live() -> None:
-        if resolved_settings.execution_backend != "DIRECT_LEGACY":
-            raise DomainRejected(
-                "DIRECT_EXECUTION_RETIRED",
-                "direct Hyperliquid sending is retired; execution belongs to the Freqtrade worker",
-            )
-        if not resolved_settings.hyperliquid_live_order_send_enabled:
-            raise DomainRejected(
-                "HYPERLIQUID_LIVE_DISABLED",
-                "Hyperliquid LIVE order send is explicitly disabled",
-            )
-        if not resolved_hyperliquid_live.configured:
-            raise DomainRejected(
-                "HYPERLIQUID_LIVE_NOT_CONFIGURED",
-                "Hyperliquid LIVE requires the main account and API wallet signer",
-            )
-
-    def require_hyperliquid_testnet() -> None:
-        if not resolved_settings.hyperliquid_testnet_order_send_enabled:
-            raise DomainRejected(
-                "HYPERLIQUID_TESTNET_DISABLED",
-                "Hyperliquid Core testnet order send is explicitly disabled",
-            )
-        if hyperliquid_testnet_client is not None and not resolved_hyperliquid_testnet.configured:
-            raise DomainRejected(
-                "HYPERLIQUID_TESTNET_NOT_CONFIGURED",
-                "Hyperliquid testnet account and injected signer are not configured",
-            )
-
-    def database_bound_venue_facts(
-        venue: str,
-        account_id: str,
-        identity: SessionIdentity,
-    ) -> dict[str, Any]:
-        require_capability(identity, "venue.view", account_id, venue)
-        return {
-            "mode": "DATABASE_BOUND_READ_ONLY",
-            "domain": "USDT_LINEAR_PERPETUALS",
-            "data": queries().venue_facts(
-                identity.user_id,
-                account_id,
-                venue,
-                ExecutionEnvironment.LIVE.value,
-            ),
-            "as_of": _now().isoformat(),
-        }
-
-    def rejected_testnet_order(
-        command: BinanceTestnetOrderCommand, now: datetime
-    ) -> BinanceTestnetOrder:
-        return BinanceTestnetOrder(
-            order_id=f"REJECTED:{command.client_order_id}",
-            client_order_id=command.client_order_id,
-            status="REJECTED",
-            side=command.side,
-            order_type="MARKET",
-            ordered_quantity=command.quantity,
-            filled_quantity=Decimal(0),
-            stop_price=Decimal(0),
-            reduce_only=command.reduce_only,
-            close_position=False,
-            observed_at=now,
-        )
-
-    def unknown_testnet_protection(
-        command: BinanceTestnetProtectionCommand, now: datetime
-    ) -> BinanceTestnetOrder:
-        return BinanceTestnetOrder(
-            order_id=f"UNKNOWN:{command.client_order_id}",
-            client_order_id=command.client_order_id,
-            status="UNKNOWN",
-            side=command.side,
-            order_type="STOP_MARKET",
-            ordered_quantity=Decimal(0),
-            filled_quantity=Decimal(0),
-            stop_price=command.trigger_price,
-            reduce_only=False,
-            close_position=True,
-            observed_at=now,
-        )
-
-    def rejected_hyperliquid_order(
-        command: HyperliquidTestnetOrderCommand, now: datetime
-    ) -> HyperliquidTestnetOrder:
-        return HyperliquidTestnetOrder(
-            order_id=f"REJECTED:{command.client_order_id}",
-            client_order_id=command.client_order_id,
-            status="REJECTED",
-            side=command.side,
-            order_type="IOC_LIMIT",
-            ordered_quantity=command.quantity,
-            filled_quantity=Decimal(0),
-            limit_price=command.limit_price,
-            stop_price=Decimal(0),
-            reduce_only=command.reduce_only,
-            close_position=False,
-            observed_at=now,
-        )
-
-    def unknown_hyperliquid_protection(
-        command: HyperliquidTestnetProtectionCommand, now: datetime
-    ) -> HyperliquidTestnetOrder:
-        return HyperliquidTestnetOrder(
-            order_id=f"UNKNOWN:{command.client_order_id}",
-            client_order_id=command.client_order_id,
-            status="UNKNOWN",
-            side=command.side,
-            order_type="TRIGGER_MARKET",
-            ordered_quantity=command.quantity,
-            filled_quantity=Decimal(0),
-            limit_price=command.limit_price,
-            stop_price=command.trigger_price,
-            reduce_only=True,
-            close_position=False,
-            observed_at=now,
-        )
-
-    def configured_notilt_scope(chain_id: int) -> tuple[str, str]:
-        if chain_id not in SUPPORTED_NOTILT_CHAINS:
-            raise DomainRejected(
-                "NOTILT_CHAIN_UNSUPPORTED",
-                "NoTilt only supports Ethereum, BNB Smart Chain, and Arbitrum One",
-            )
-        if not resolved_settings.notilt_enabled:
-            raise DomainRejected("NOTILT_DISABLED", "NoTilt read-only integration is disabled")
-        agent = resolved_settings.notilt_agent_address
-        vault = resolved_settings.notilt_vaults.get(chain_id)
-        if agent is None:
-            raise DomainRejected(
-                "NOTILT_NOT_CONFIGURED",
-                "NoTilt public whitelist agent address is not configured",
-            )
-        if vault is None:
-            raise DomainRejected(
-                "NOTILT_VAULT_NOT_CONFIGURED",
-                f"NoTilt {SUPPORTED_NOTILT_CHAINS[chain_id]} Vault is not configured",
-            )
-        return agent, vault
-
-    def notilt_chain_id_for_network(network: str) -> int:
-        normalized = network.upper().replace("-", "_").replace(" ", "_")
-        chain_id = {
-            "ETH": 1,
-            "ETHEREUM": 1,
-            "BNB": 56,
-            "BSC": 56,
-            "BNB_SMART_CHAIN": 56,
-            "ARB": 42161,
-            "ARBITRUM": 42161,
-            "ARBITRUM_ONE": 42161,
-        }.get(normalized)
-        if chain_id is None:
-            raise DomainRejected(
-                "NOTILT_CHAIN_UNSUPPORTED",
-                "NoTilt network must be Ethereum, BNB Smart Chain, or Arbitrum One",
-            )
-        return chain_id
-
-    def verify_live_notilt_release_budget(
-        *,
-        chain_id: int,
-        vault: str,
-        agent: str,
-        asset: str,
-        amount: Decimal,
-        max_fact_age_seconds: int,
-        now: datetime,
-    ) -> None:
-        snapshot = resolved_notilt.read_vault(chain_id, vault, agent)
-        budget = next(
-            (item for item in snapshot.budgets if item.asset == asset.upper()),
-            None,
-        )
-        if budget is None:
-            raise DomainRejected(
-                "NOTILT_RELEASE_BUDGET_MISSING",
-                "NoTilt release requires a live budget for the configured asset",
-            )
-        if (
-            snapshot.vault.lower() != vault.lower()
-            or snapshot.agent.lower() != agent.lower()
-            or budget.vault.lower() != vault.lower()
-            or budget.agent.lower() != agent.lower()
-        ):
-            raise DomainRejected(
-                "NOTILT_RELEASE_SCOPE_MISMATCH",
-                "NoTilt live budget does not match the configured Vault and Agent scope",
-            )
-        if not budget.is_official_vault:
-            raise DomainRejected(
-                "NOTILT_VAULT_UNTRUSTED",
-                "NoTilt release requires an official Vault from the trusted deployment catalog",
-            )
-        if (
-            not budget.is_active_whitelist
-            or budget.assigned_whitelist_vault.lower() != vault.lower()
-        ):
-            raise DomainRejected(
-                "NOTILT_WHITELIST_INACTIVE",
-                "NoTilt release requires an active whitelist assigned to the configured Vault",
-            )
-        if budget.owner.lower() == agent.lower():
-            raise DomainRejected(
-                "NOTILT_AGENT_OWNER_FORBIDDEN",
-                "NoTilt Agent budget cannot use the Vault owner identity",
-            )
-        if budget.panic_locked:
-            raise DomainRejected("NOTILT_PANIC_LOCKED", "NoTilt Vault is panic locked")
-        fact_age = now - budget.block_timestamp
-        if fact_age < timedelta(0) or fact_age > timedelta(seconds=max_fact_age_seconds):
-            raise DomainRejected(
-                "NOTILT_FACT_STALE",
-                "NoTilt live budget is outside the active production freshness window",
-            )
-        if amount > budget.max_release_net:
-            raise DomainRejected(
-                "NOTILT_RELEASE_LIMIT_EXCEEDED",
-                "NoTilt release amount exceeds the current live maxReleaseNet allowance",
-            )
-
-    def sync_configured_notilt_vault(
-        chain_id: int,
-        actor_id: UUID,
-        *,
-        now: datetime,
-    ) -> tuple[int, dict[str, Any]]:
-        agent, vault = configured_notilt_scope(chain_id)
-        snapshot = resolved_notilt.read_vault(chain_id, vault, agent)
-        valuations = {
-            budget.asset: resolved_notilt_valuator.value(
-                budget.asset,
-                budget.balance,
-                now=now,
-            )
-            for budget in snapshot.budgets
-        }
-        fact_ids = service().record_notilt_vault_snapshot(
-            actor_id=actor_id,
-            snapshot=snapshot,
-            valuations=valuations,
-            now=now,
-        )
-        return len(fact_ids), capital_snapshot(actor_id)
-
-    def require_freqtrade_live_enabled() -> None:
-        if (
-            resolved_settings.execution_backend != "FREQTRADE"
-            or not resolved_settings.freqtrade_workers_enabled
-            or not resolved_settings.freqtrade_live_order_send_enabled
-        ):
-            raise DomainRejected(
-                "FREQTRADE_LIVE_DISABLED",
-                "Freqtrade LIVE order send is explicitly disabled",
-            )
-
-    def require_freqtrade_live_worker(
+    def require_freqtrade_worker(
         binding: PreparedFreqtradeWorkerBinding,
     ) -> FreqtradeWorkerClient:
-        require_freqtrade_live_enabled()
+        require_freqtrade_enabled()
         return freqtrade_client_for_binding(binding)
 
     def handle_real_telegram_action(
         action: TelegramProposalReviewAction,
         update_id: int,
     ) -> str:
-        del update_id
+        now = _now()
         decision = (
             ReviewDecision.APPROVE if action.action == "APPROVE_PROPOSAL" else ReviewDecision.REJECT
         )
+        workflow_service = service()
         try:
-            result = service().review_proposal(
+            result = workflow_service.review_proposal(
                 action.proposal_id,
                 action.recipient_id,
                 decision,
-                "Telegram private-chat review after explicit two-step confirmation",
+                (
+                    "Telegram private-chat review after explicit two-step confirmation;"
+                    f"delivery={action.delivery_id};route_version={action.route_version};"
+                    f"update={update_id}"
+                ),
                 expected_version=action.proposal_version,
-                now=_now(),
+                automatic_risk_service_username=(
+                    resolved_settings.runtime_sync_service_username
+                    if decision is ReviewDecision.APPROVE
+                    else None
+                ),
+                now=now,
             )
         except DomainRejected as exc:
             return f"未执行: {exc.code}"
+        automation: dict[str, str | None] | None = None
+        if result is ProposalStatus.APPROVED:
+            try:
+                automation = advance_approved_proposal(
+                    workflow_service,
+                    proposal_id=action.proposal_id,
+                    fallback_service_username=(
+                        resolved_settings.runtime_sync_service_username
+                    ),
+                    now=now,
+                )
+            except DomainRejected as exc:
+                automation = {"status": "BLOCKED", "error_code": exc.code}
         if result is ProposalStatus.PENDING_REVIEW:
             detail = queries().proposal_detail(action.recipient_id, action.proposal_id)
             notify_reviewers(
@@ -1421,7 +883,23 @@ def create_app(
                 int(detail["version"]),
                 str(detail["environment"]),
             )
-        return f"审核已记录: {result.value}。未创建授权、订单或资金动作。"
+        detail = queries().proposal_detail(action.recipient_id, action.proposal_id)
+        risk = detail.get("risk_decision")
+        risk_copy = ""
+        if result is ProposalStatus.APPROVED and isinstance(risk, dict):
+            risk_copy = f" 系统风控已自动运行: {risk['result']}。"
+        workflow_copy = ""
+        if automation is not None and automation.get("status") == "READY":
+            workflow_copy = " 已自动签发短期授权、预留风险并创建受控交易任务。"
+        elif automation is not None and automation.get("status") == "RISK_DENIED":
+            workflow_copy = " 风控拒绝, 未创建授权或交易任务。"
+        elif automation is not None:
+            workflow_copy = f" 自动流程已安全阻断: {automation.get('error_code')}。"
+        return (
+            f"审核已记录: {result.value}。{risk_copy}{workflow_copy} "
+            "交易所发送仅由受控执行进程在 Gate、租约与幂等边界内自动推进; "
+            "审核 Bot 本身不直接发送订单或资金动作。"
+        )
 
     authenticated_dependencies = AuthenticatedRouteDependencies(
         identity=identity_dependency,
@@ -1429,6 +907,19 @@ def create_app(
         service=service,
         settings=resolved_settings,
         require_capability=require_capability,
+    )
+    capital_runtime = CapitalApplicationRuntime(
+        settings=resolved_settings,
+        queries=queries,
+        service=service,
+        clock=_now,
+        notify_capital=notify_capital,
+        token_service=token_service,
+        adapter_resolver=resolved_capital_adapter_factory,
+        transfer_adapter=resolved_capital_transfer,
+        notilt=resolved_notilt,
+        notilt_valuator=resolved_notilt_valuator,
+        safe_spending=resolved_safe_spending,
     )
     route_context = ApiRouteContext(
         app=app,
@@ -1444,21 +935,10 @@ def create_app(
         ),
         accounts=AccountRouteDependencies(
             common=authenticated_dependencies,
-            database_bound_venue_facts=database_bound_venue_facts,
             freqtrade_client_for_binding=freqtrade_client_for_binding,
-            require_binance_testnet=require_binance_testnet,
-            require_default_venue_account=require_default_venue_account,
-            require_registered_or_default_venue_account=(
-                require_registered_or_default_venue_account
+            connection_verification=ExchangeConnectionVerification(
+                resolved_exchange_connection_verifier
             ),
-            binance=resolved_binance,
-            binance_live=resolved_binance_live,
-            binance_testnet=resolved_binance_testnet,
-            binance_testnet_reader=resolved_binance_testnet_reader,
-            exchange_connection_verifier=resolved_exchange_connection_verifier,
-            hyperliquid=resolved_hyperliquid,
-            hyperliquid_live=resolved_hyperliquid_live,
-            hyperliquid_testnet=resolved_hyperliquid_testnet,
         ),
         signals=SignalRouteDependencies(
             common=authenticated_dependencies,
@@ -1483,42 +963,18 @@ def create_app(
             current_perptape_candidate=current_perptape_candidate,
             current_perptape_candidates=current_perptape_candidates,
             notify_campaign=notify_campaign,
-            rejected_hyperliquid_order=rejected_hyperliquid_order,
-            rejected_testnet_order=rejected_testnet_order,
-            require_binance_live=require_binance_live,
-            require_binance_testnet=require_binance_testnet,
-            require_freqtrade_live_enabled=require_freqtrade_live_enabled,
-            require_freqtrade_live_worker=require_freqtrade_live_worker,
-            require_hyperliquid_live=require_hyperliquid_live,
-            require_hyperliquid_testnet=require_hyperliquid_testnet,
-            binance_live=resolved_binance_live,
-            binance_testnet=resolved_binance_testnet,
-            binance_testnet_uses_database_credentials=(binance_testnet_client is None),
+            require_freqtrade_enabled=require_freqtrade_enabled,
+            require_freqtrade_worker=require_freqtrade_worker,
             freqtrade_workers=resolved_freqtrade_workers,
-            hyperliquid=resolved_hyperliquid,
-            hyperliquid_live=resolved_hyperliquid_live,
-            hyperliquid_testnet=resolved_hyperliquid_testnet,
-            hyperliquid_testnet_uses_database_credentials=(hyperliquid_testnet_client is None),
             notilt=resolved_notilt,
             telegram=resolved_telegram,
-            unknown_hyperliquid_protection=unknown_hyperliquid_protection,
-            unknown_testnet_protection=unknown_testnet_protection,
         ),
         capital=CapitalRouteDependencies(
             common=authenticated_dependencies,
-            capital_snapshot=capital_snapshot,
-            configured_notilt_scope=configured_notilt_scope,
-            effective_direct_capital_settings=effective_direct_capital_settings,
-            notify_capital=notify_capital,
-            notilt_chain_id_for_network=notilt_chain_id_for_network,
-            binance_capital=resolved_binance_capital,
-            capital_transfer=resolved_capital_transfer,
-            hyperliquid_capital=resolved_hyperliquid_capital,
-            notilt=resolved_notilt,
-            safe_spending=resolved_safe_spending,
-            sync_configured_notilt_vault=sync_configured_notilt_vault,
-            token_service=token_service,
-            verify_live_notilt_release_budget=verify_live_notilt_release_budget,
+            configuration=CapitalConfigurationUseCases(capital_runtime),
+            direct=CapitalDirectUseCases(capital_runtime),
+            receipts=CapitalReceiptUseCases(capital_runtime),
+            transfers=CapitalTransferUseCases(capital_runtime),
         ),
     )
     register_system_routes(route_context)
@@ -1532,6 +988,14 @@ def create_app(
 
     if isinstance(resolved_telegram, TelegramBotGateway):
         resolved_telegram.set_action_handler(handle_real_telegram_action)
+        resolved_telegram.set_action_resolver(
+            lambda callback_key: resolve_telegram_review_prompt(
+                resolved_database,
+                callback_key,
+                public_base_url=resolved_settings.public_base_url,
+                now=_now(),
+            )
+        )
 
     if WEB_ROOT.exists():
         app.mount("/assets", StaticFiles(directory=WEB_ROOT), name="web-assets")
@@ -1571,6 +1035,7 @@ def create_app(
         @app.get("/campaigns", include_in_schema=False)
         @app.get("/campaigns/alerts", include_in_schema=False)
         @app.get("/positions", include_in_schema=False)
+        @app.get("/system", include_in_schema=False)
         @app.get("/orders", include_in_schema=False)
         @app.get("/risk", include_in_schema=False)
         @app.get("/exceptions", include_in_schema=False)

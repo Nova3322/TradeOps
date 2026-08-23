@@ -1,10 +1,20 @@
 from __future__ import annotations
 
-from trading_control_plane.service_component import ServiceComponent
+from datetime import datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import UUID, uuid4
 
-# The domain implementation intentionally consumes the explicit service_core export surface.
-# ruff: noqa: F403, F405
-from trading_control_plane.service_core import *
+from sqlalchemy import func, select, text
+
+from trading_control_plane import capital, domain, idempotency, models, rejections
+from trading_control_plane import execution_scope as scope_rules
+from trading_control_plane.service_component import ServiceComponent
+from trading_control_plane.service_domains.accounts import ensure_exchange_account_reference
+from trading_control_plane.service_domains.capital_reconciliation import (
+    assert_capital_scope_flat,
+    capital_balance,
+)
 
 
 class AutomationCapitalService(ServiceComponent):
@@ -12,7 +22,7 @@ class AutomationCapitalService(ServiceComponent):
         self,
         *,
         actor_id: UUID,
-        environment: ExecutionEnvironment,
+        environment: domain.ExecutionEnvironment,
         account_id: str,
         venue: str,
         vault_id: str,
@@ -30,12 +40,12 @@ class AutomationCapitalService(ServiceComponent):
         idempotency_key: str,
         now: datetime,
     ) -> UUID:
-        if environment is ExecutionEnvironment.LIVE:
-            _reject(
+        if environment is domain.ExecutionEnvironment.LIVE:
+            rejections.reject(
                 "CAPITAL_AUTOMATION_LIVE_DISABLED",
                 "LIVE automation requires approved external capital parameters",
             )
-        evaluate_capital_automation(
+        capital.evaluate_capital_automation(
             purpose="AUTO_PROFIT_SWEEP",
             venue_available=Decimal(0),
             venue_withdrawable=Decimal(0),
@@ -68,8 +78,8 @@ class AutomationCapitalService(ServiceComponent):
         }
         operation = "capital.policy.manage"
         with self.database.session_factory.begin() as session:
-            team = self.transactions._require_role(session, actor_id, operation, account_id, venue)
-            self._ensure_exchange_account_reference(
+            team = self.transactions.require_role(session, actor_id, operation, account_id, venue)
+            ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
@@ -78,7 +88,7 @@ class AutomationCapitalService(ServiceComponent):
                 environment=environment.value,
                 now=now,
             )
-            digest, response = self.transactions._idempotency(
+            digest, response = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -86,20 +96,20 @@ class AutomationCapitalService(ServiceComponent):
                 payload=payload,
             )
             if response is not None:
-                return _as_uuid(str(response["policy_id"]))
+                return UUID(str(response["policy_id"]))
             policy = session.scalar(
-                select(CapitalAutomationPolicy)
+                select(models.CapitalAutomationPolicy)
                 .where(
-                    CapitalAutomationPolicy.team_id == team.team_id,
-                    CapitalAutomationPolicy.environment == environment.value,
-                    CapitalAutomationPolicy.account_id == account_id,
-                    CapitalAutomationPolicy.venue == venue,
-                    CapitalAutomationPolicy.asset == asset,
+                    models.CapitalAutomationPolicy.team_id == team.team_id,
+                    models.CapitalAutomationPolicy.environment == environment.value,
+                    models.CapitalAutomationPolicy.account_id == account_id,
+                    models.CapitalAutomationPolicy.venue == venue,
+                    models.CapitalAutomationPolicy.asset == asset,
                 )
                 .with_for_update()
             )
             if policy is None:
-                policy = CapitalAutomationPolicy(
+                policy = models.CapitalAutomationPolicy(
                     team_id=team.team_id,
                     environment=environment.value,
                     account_id=account_id,
@@ -141,7 +151,7 @@ class AutomationCapitalService(ServiceComponent):
                 policy.version += 1
                 policy.updated_at = now
             result = {"policy_id": str(policy.policy_id)}
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -150,7 +160,7 @@ class AutomationCapitalService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="CAPITAL_AUTOMATION_POLICY_SET",
@@ -177,14 +187,16 @@ class AutomationCapitalService(ServiceComponent):
         now: datetime,
     ) -> tuple[UUID | None, str]:
         if purpose not in {"AUTO_PROFIT_SWEEP", "AUTO_OPERATING_REFILL"}:
-            _reject("CAPITAL_AUTOMATION_PURPOSE_INVALID", "unknown capital automation")
+            rejections.reject("CAPITAL_AUTOMATION_PURPOSE_INVALID", "unknown capital automation")
         operation = "capital.automation.evaluate"
         payload = {"policy_id": str(policy_id), "purpose": purpose}
         with self.database.session_factory.begin() as session:
-            policy = session.get(CapitalAutomationPolicy, policy_id, with_for_update=True)
+            policy = session.get(models.CapitalAutomationPolicy, policy_id, with_for_update=True)
             if policy is None:
-                _reject("CAPITAL_AUTOMATION_POLICY_NOT_FOUND", "capital policy is missing")
-            team = self.transactions._require_role(
+                rejections.reject(
+                    "CAPITAL_AUTOMATION_POLICY_NOT_FOUND", "capital policy is missing"
+                )
+            team = self.transactions.require_role(
                 session,
                 actor_id,
                 operation,
@@ -192,7 +204,7 @@ class AutomationCapitalService(ServiceComponent):
                 policy.venue,
                 team_id=policy.team_id,
             )
-            digest, response = self.transactions._idempotency(
+            digest, response = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -202,25 +214,27 @@ class AutomationCapitalService(ServiceComponent):
             if response is not None:
                 proposal_id = response.get("transfer_proposal_id")
                 return (
-                    None if proposal_id is None else _as_uuid(str(proposal_id)),
+                    None if proposal_id is None else UUID(str(proposal_id)),
                     str(response["reason"]),
                 )
-            gate = session.get(CapabilityGate, purpose)
-            if gate is None or gate.status != CapabilityStatus.ENABLED.value:
-                _reject("CAPITAL_AUTOMATION_DISABLED", f"{purpose} is disabled")
+            gate = session.get(models.CapabilityGate, purpose)
+            if gate is None or gate.status != domain.CapabilityStatus.ENABLED.value:
+                rejections.reject("CAPITAL_AUTOMATION_DISABLED", f"{purpose} is disabled")
             if not policy.active:
-                _reject("CAPITAL_AUTOMATION_POLICY_INACTIVE", "capital policy is inactive")
+                rejections.reject(
+                    "CAPITAL_AUTOMATION_POLICY_INACTIVE", "capital policy is inactive"
+                )
             session.execute(
                 text("SELECT pg_advisory_xact_lock(:key)"),
                 {
-                    "key": _advisory_lock_key(
+                    "key": scope_rules.advisory_lock_key(
                         str(team.team_id),
                         "capital-automation",
                         f"{policy.environment}:{policy.account_id}:{policy.venue}:{policy.asset}",
                     )
                 },
             )
-            self._assert_capital_scope_flat(
+            assert_capital_scope_flat(
                 session,
                 team_id=team.team_id,
                 environment=policy.environment,
@@ -229,82 +243,86 @@ class AutomationCapitalService(ServiceComponent):
                 now=now,
             )
             risk_policy = session.scalar(
-                select(RiskPolicy).where(
-                    RiskPolicy.team_id == team.team_id,
-                    RiskPolicy.active,
+                select(models.RiskPolicy).where(
+                    models.RiskPolicy.team_id == team.team_id,
+                    models.RiskPolicy.active,
                 )
             )
             if risk_policy is None:
-                _reject("RISK_POLICY_MISSING", "capital automation requires an active risk policy")
-            latest_match = session.scalar(
-                select(ReconciliationRun)
-                .where(
-                    ReconciliationRun.team_id == team.team_id,
-                    ReconciliationRun.execution_scope
-                    == _scope_key(policy.environment, policy.account_id, policy.venue),
+                rejections.reject(
+                    "RISK_POLICY_MISSING", "capital automation requires an active risk policy"
                 )
-                .order_by(ReconciliationRun.completed_at.desc())
+            latest_match = session.scalar(
+                select(models.ReconciliationRun)
+                .where(
+                    models.ReconciliationRun.team_id == team.team_id,
+                    models.ReconciliationRun.execution_scope
+                    == scope_rules.scope_key(policy.environment, policy.account_id, policy.venue),
+                )
+                .order_by(models.ReconciliationRun.completed_at.desc())
                 .limit(1)
             )
             if (
                 latest_match is None
-                or latest_match.status != ReconciliationStatus.MATCH.value
+                or latest_match.status != domain.ReconciliationStatus.MATCH.value
                 or not latest_match.is_computed
                 or latest_match.completed_at
                 < now - timedelta(seconds=risk_policy.max_fact_age_seconds)
             ):
-                _reject(
+                rejections.reject(
                     "CAPITAL_AUTOMATION_RECONCILIATION_REQUIRED",
                     "fresh computed MATCH is required",
                 )
             campaigns = session.scalars(
-                select(Campaign).where(
-                    Campaign.team_id == team.team_id,
-                    Campaign.environment == policy.environment,
-                    Campaign.account_id == policy.account_id,
-                    Campaign.venue == policy.venue,
+                select(models.Campaign).where(
+                    models.Campaign.team_id == team.team_id,
+                    models.Campaign.environment == policy.environment,
+                    models.Campaign.account_id == policy.account_id,
+                    models.Campaign.venue == policy.venue,
                 )
             ).all()
-            if any(item.status != CampaignStatus.CLOSED.value for item in campaigns):
-                _reject(
+            if any(item.status != domain.CampaignStatus.CLOSED.value for item in campaigns):
+                rejections.reject(
                     "CAPITAL_AUTOMATION_ACTIVE_CYCLE",
                     "automation only prepares the next flat trading cycle",
                 )
             active_transfer = session.scalar(
-                select(CapitalTransfer.capital_transfer_id)
+                select(models.CapitalTransfer.capital_transfer_id)
                 .where(
-                    CapitalTransfer.team_id == team.team_id,
-                    CapitalTransfer.environment == policy.environment,
-                    CapitalTransfer.account_id == policy.account_id,
-                    CapitalTransfer.venue == policy.venue,
-                    CapitalTransfer.status.in_(OCCUPIED_CAPITAL_STATUSES),
+                    models.CapitalTransfer.team_id == team.team_id,
+                    models.CapitalTransfer.environment == policy.environment,
+                    models.CapitalTransfer.account_id == policy.account_id,
+                    models.CapitalTransfer.venue == policy.venue,
+                    models.CapitalTransfer.status.in_(scope_rules.OCCUPIED_CAPITAL_STATUSES),
                 )
                 .limit(1)
             )
             active_proposal = session.scalar(
-                select(TransferProposal.transfer_proposal_id)
+                select(models.TransferProposal.transfer_proposal_id)
                 .where(
-                    TransferProposal.team_id == team.team_id,
-                    TransferProposal.environment == policy.environment,
-                    TransferProposal.account_id == policy.account_id,
-                    TransferProposal.venue == policy.venue,
-                    TransferProposal.purpose.in_({"AUTO_PROFIT_SWEEP", "AUTO_OPERATING_REFILL"}),
-                    TransferProposal.status.in_(
+                    models.TransferProposal.team_id == team.team_id,
+                    models.TransferProposal.environment == policy.environment,
+                    models.TransferProposal.account_id == policy.account_id,
+                    models.TransferProposal.venue == policy.venue,
+                    models.TransferProposal.purpose.in_(
+                        {"AUTO_PROFIT_SWEEP", "AUTO_OPERATING_REFILL"}
+                    ),
+                    models.TransferProposal.status.in_(
                         {
-                            ProposalStatus.DRAFT.value,
-                            ProposalStatus.PENDING_REVIEW.value,
-                            ProposalStatus.APPROVED.value,
+                            domain.ProposalStatus.DRAFT.value,
+                            domain.ProposalStatus.PENDING_REVIEW.value,
+                            domain.ProposalStatus.APPROVED.value,
                         }
                     ),
                 )
                 .limit(1)
             )
             if active_transfer is not None or active_proposal is not None:
-                _reject(
+                rejections.reject(
                     "CAPITAL_AUTOMATION_ALREADY_PENDING",
                     "another capital operation owns this scope",
                 )
-            venue_fact = self._capital_balance(
+            venue_fact = capital_balance(
                 session,
                 team_id=team.team_id,
                 environment=policy.environment,
@@ -314,7 +332,7 @@ class AutomationCapitalService(ServiceComponent):
                 asset=policy.asset,
                 lock=True,
             )
-            vault_fact = self._capital_balance(
+            vault_fact = capital_balance(
                 session,
                 team_id=team.team_id,
                 environment=policy.environment,
@@ -331,27 +349,30 @@ class AutomationCapitalService(ServiceComponent):
                 or venue_fact.deposit_status != "READY"
                 or vault_fact.control_status != "CONTROLLED"
             ):
-                _reject("CAPITAL_FACT_UNKNOWN", "fresh controlled capital facts are required")
+                rejections.reject(
+                    "CAPITAL_FACT_UNKNOWN", "fresh controlled capital facts are required"
+                )
             realized_pnl = sum((item.final_pnl for item in campaigns), Decimal(0))
             already_swept = session.scalar(
-                select(func.coalesce(func.sum(CapitalTransfer.gross_amount), 0))
+                select(func.coalesce(func.sum(models.CapitalTransfer.gross_amount), 0))
                 .join(
-                    TransferAuthorization,
-                    TransferAuthorization.transfer_authorization_id
-                    == CapitalTransfer.transfer_authorization_id,
+                    models.TransferAuthorization,
+                    models.TransferAuthorization.transfer_authorization_id
+                    == models.CapitalTransfer.transfer_authorization_id,
                 )
                 .where(
-                    CapitalTransfer.team_id == team.team_id,
-                    TransferAuthorization.team_id == team.team_id,
-                    CapitalTransfer.environment == policy.environment,
-                    CapitalTransfer.account_id == policy.account_id,
-                    CapitalTransfer.venue == policy.venue,
-                    TransferAuthorization.purpose == "AUTO_PROFIT_SWEEP",
-                    CapitalTransfer.status != CapitalTransferStatus.FAILED_SOURCE_RESTORED.value,
+                    models.CapitalTransfer.team_id == team.team_id,
+                    models.TransferAuthorization.team_id == team.team_id,
+                    models.CapitalTransfer.environment == policy.environment,
+                    models.CapitalTransfer.account_id == policy.account_id,
+                    models.CapitalTransfer.venue == policy.venue,
+                    models.TransferAuthorization.purpose == "AUTO_PROFIT_SWEEP",
+                    models.CapitalTransfer.status
+                    != domain.CapitalTransferStatus.FAILED_SOURCE_RESTORED.value,
                 )
             )
             confirmed_profit = max(Decimal(0), realized_pnl - Decimal(already_swept or 0))
-            decision = evaluate_capital_automation(
+            decision = capital.evaluate_capital_automation(
                 purpose=purpose,
                 venue_available=venue_fact.available_balance,
                 venue_withdrawable=(
@@ -385,18 +406,18 @@ class AutomationCapitalService(ServiceComponent):
                 object_version = policy.version
             else:
                 direction = (
-                    CapitalDirection.VENUE_TO_VAULT
+                    domain.CapitalDirection.VENUE_TO_VAULT
                     if purpose == "AUTO_PROFIT_SWEEP"
-                    else CapitalDirection.VAULT_TO_VENUE
+                    else domain.CapitalDirection.VAULT_TO_VENUE
                 )
                 source_type, source_id, destination_type, destination_id = (
                     ("VENUE", policy.account_id, "VAULT", policy.vault_id)
-                    if direction is CapitalDirection.VENUE_TO_VAULT
+                    if direction is domain.CapitalDirection.VENUE_TO_VAULT
                     else ("VAULT", policy.vault_id, "VENUE", policy.account_id)
                 )
                 destination_reference = (
                     policy.vault_destination_reference
-                    if direction is CapitalDirection.VENUE_TO_VAULT
+                    if direction is domain.CapitalDirection.VENUE_TO_VAULT
                     else policy.venue_destination_reference
                 )
                 frozen_payload = {
@@ -420,13 +441,13 @@ class AutomationCapitalService(ServiceComponent):
                     "vault_observed_at": vault_fact.observed_at.isoformat(),
                     "reconciliation_id": str(latest_match.reconciliation_id),
                 }
-                proposal = TransferProposal(
+                proposal = models.TransferProposal(
                     team_id=team.team_id,
                     proposer_id=actor_id,
                     environment=policy.environment,
                     direction=direction.value,
                     purpose=purpose,
-                    status=ProposalStatus.PENDING_REVIEW.value,
+                    status=domain.ProposalStatus.PENDING_REVIEW.value,
                     version=1,
                     account_id=policy.account_id,
                     venue=policy.venue,
@@ -446,7 +467,7 @@ class AutomationCapitalService(ServiceComponent):
                         else "flat next-cycle operating balance below low"
                     ),
                     frozen_payload=frozen_payload,
-                    semantic_hash=_semantic_hash(frozen_payload),
+                    semantic_hash=idempotency.semantic_hash(frozen_payload),
                     frozen_at=now,
                     expires_at=now + timedelta(hours=2),
                     correlation_id=uuid4(),
@@ -462,7 +483,7 @@ class AutomationCapitalService(ServiceComponent):
                 event_type = "CAPITAL_AUTOMATION_CANDIDATE_CREATED"
                 object_id = proposal.transfer_proposal_id
                 object_version = proposal.version
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -471,7 +492,7 @@ class AutomationCapitalService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type=event_type,
@@ -493,30 +514,30 @@ class AutomationCapitalService(ServiceComponent):
             return (
                 None
                 if result["transfer_proposal_id"] is None
-                else _as_uuid(str(result["transfer_proposal_id"])),
+                else UUID(str(result["transfer_proposal_id"])),
                 decision.reason,
             )
 
     def set_capability_gate(
         self,
         capability_key: str,
-        status: CapabilityStatus,
+        status: domain.CapabilityStatus,
         reason: str,
         actor_id: UUID,
         *,
         now: datetime,
     ) -> None:
         with self.database.session_factory.begin() as session:
-            self.transactions._require_role(session, actor_id, "capability.manage")
-            gate = session.get(CapabilityGate, capability_key, with_for_update=True)
+            self.transactions.require_role(session, actor_id, "capability.manage")
+            gate = session.get(models.CapabilityGate, capability_key, with_for_update=True)
             if gate is None:
-                _reject("CAPABILITY_GATE_NOT_FOUND", "unknown capability")
+                rejections.reject("CAPABILITY_GATE_NOT_FOUND", "unknown capability")
             if (
                 capability_key == "AUTO_ADD"
-                and status is CapabilityStatus.ENABLED
-                and gate.status != CapabilityStatus.ENABLED.value
+                and status is domain.CapabilityStatus.ENABLED
+                and gate.status != domain.CapabilityStatus.ENABLED.value
             ):
-                _reject(
+                rejections.reject(
                     "REVIEWED_RESTORE_REQUIRED",
                     "AUTO_ADD may only be enabled through reviewed restore",
                 )
@@ -525,7 +546,7 @@ class AutomationCapitalService(ServiceComponent):
             gate.operator_id = str(actor_id)
             gate.version += 1
             gate.updated_at = now
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="CAPABILITY_GATE_UPDATED",

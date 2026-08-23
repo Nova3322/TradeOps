@@ -5,7 +5,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from conftest import add_exchange_account_fixture, set_test_team_environment
 from fastapi import FastAPI
@@ -14,23 +14,43 @@ from sqlalchemy import func, select
 from workflow_builder import ActorSpec, WorkflowFixture
 
 from trading_control_plane.api import create_app
-from trading_control_plane.binance import BinanceInstrument
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
+    Direction,
+    ExecutionEnvironment,
     ProposalSource,
+    ReviewDecision,
     RiskTier,
     Role,
+    SystemRiskState,
 )
 from trading_control_plane.models import (
+    AccountEquity,
     AuditEvent,
+    Campaign,
     Instrument,
+    OrderIntent,
+    Position,
     Proposal,
+    RiskDecision,
+    RiskReservation,
+    TradingAuthorization,
+    VenueOrder,
 )
-from trading_control_plane.perptape import PerptapeClient, perptape_legacy_candidate_id
+from trading_control_plane.perptape import (
+    PerptapeClient,
+    PerptapeFeedSnapshot,
+    perptape_legacy_candidate_id,
+)
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
+from trading_control_plane.service_domains.proposal_automation import (
+    advance_approved_proposal,
+    refresh_approved_proposal_risk,
+)
 from trading_control_plane.telegram import MockTelegramGateway
+from trading_control_plane.venue_read_only import VenueInstrument
 
 
 def seed(service: TradingService) -> dict[str, UUID]:
@@ -178,13 +198,15 @@ def perptape_hip3_client() -> PerptapeClient:
             ],
         }
 
-    return PerptapeClient(
+    client = PerptapeClient(
         base_url="https://perptape.com",
         api_key="test-key",
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
         fetcher=fetch,
     )
+    client.refresh(now=datetime.now(UTC), source_exchange="HL")
+    return client
 
 
 def app(
@@ -300,6 +322,142 @@ async def logout(client: AsyncClient) -> None:
     assert response.status_code == 200
 
 
+def test_api_process_prefers_fresh_persisted_perptape_feed(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    feed = perptape_client().refresh(now=now, force=True)
+    service.record_perptape_feed(
+        ids["admin"],
+        feed,
+        now=now,
+        base_snapshot=None,
+    )
+    direct_fetches = 0
+
+    def unexpected_fetch(
+        _url: str, _headers: dict[str, str], _timeout: float
+    ) -> dict[str, Any]:
+        nonlocal direct_fetches
+        direct_fetches += 1
+        raise AssertionError("fresh runtime feed must prevent a direct Perptape request")
+
+    direct_client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="test-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(minutes=1),
+        fetcher=unexpected_fetch,
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(
+                app=app(database, MockTelegramGateway(), direct_client)
+            ),
+            base_url="http://test",
+        ) as http:
+            await login(http, "proposer")
+            response = await http.get("/api/opportunities")
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert len(payload["data"]) == 1
+            assert payload["snapshot_generated_at"] == feed.generated_at.isoformat()
+            assert payload["retry_at"] == feed.next_allowed_at.isoformat()
+            assert payload["venues"]["BINANCE"]["data_status"] == "CURRENT"
+            assert payload["venues"]["HYPERLIQUID"]["data_status"] == "UNKNOWN"
+
+    asyncio.run(scenario())
+    assert direct_fetches == 0
+
+
+def test_opportunities_merge_venue_feeds_and_stale_only_blocks_its_venue(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    stale_at = now - timedelta(minutes=10)
+    client = perptape_client()
+    binance = client.refresh(now=now, force=True, source_exchange="BN")
+    hyperliquid_candidate = client.parse_stream_alert(
+        {
+            "id": "hl-stale-opportunity",
+            "ex": "HL",
+            "s": "xyz:TSLA",
+            "cs": "TSLA",
+            "dir": "HH",
+            "p": 325.19,
+            "th": 320,
+            "tf": "4h",
+            "t": int(stale_at.timestamp() * 1_000),
+            "u": int(stale_at.timestamp() * 1_000),
+            "kr": {"status": "ready"},
+            "vq24": 20_000,
+            "oi": 10_000,
+        },
+        event_time=stale_at,
+    )
+    hyperliquid = PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=stale_at,
+        fetched_at=stale_at,
+        next_allowed_at=stale_at,
+        candidates=(hyperliquid_candidate,),
+        source_exchange="HL",
+    )
+    service.record_perptape_feed(
+        ids["admin"],
+        binance,
+        now=now,
+        base_snapshot=None,
+        feed_key="BREAKOUTS:BN",
+    )
+    service.record_perptape_feed(
+        ids["admin"],
+        hyperliquid,
+        now=now,
+        base_snapshot=None,
+        feed_key="BREAKOUTS:HL",
+    )
+    service.register_instrument(
+        actor_id=ids["admin"],
+        venue="HYPERLIQUID",
+        symbol="xyz:TSLA",
+        tick_size=Decimal("0.001"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("10"),
+        contract_multiplier=Decimal(1),
+        quote_currency="USDC",
+        collateral_currency="USDC",
+        protection_supported=True,
+        now=now,
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, MockTelegramGateway())),
+            base_url="http://test",
+        ) as http:
+            await login(http, "proposer")
+            response = await http.get("/api/opportunities")
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            by_venue = {item["venue"]: item for item in payload["data"]}
+            assert set(by_venue) == {"BINANCE", "HYPERLIQUID"}
+            assert by_venue["BINANCE"]["proposal_eligible"] is True
+            assert by_venue["BINANCE"]["proposal_blocker"] is None
+            assert by_venue["HYPERLIQUID"]["proposal_eligible"] is False
+            assert (
+                by_venue["HYPERLIQUID"]["proposal_blocker"]
+                == "PERPTAPE_CANDIDATE_NOT_CURRENT"
+            )
+            assert payload["venues"]["BINANCE"]["data_status"] == "CURRENT"
+            assert payload["venues"]["HYPERLIQUID"]["data_status"] == "STALE"
+
+    asyncio.run(scenario())
+
+
 def test_freqtrade_backend_status_is_explicit_and_order_send_remains_closed(
     database: Database, service: TradingService
 ) -> None:
@@ -317,12 +475,17 @@ def test_freqtrade_backend_status_is_explicit_and_order_send_remains_closed(
             assert payload["backend"] == "FREQTRADE"
             assert payload["workers_enabled"] is False
             assert payload["direct_venue_send"] is False
-            assert payload["live_order_send"] is False
-            assert [(item["venue"], item["status"]) for item in payload["workers"]] == [
-                ("BINANCE", "DISABLED"),
-                ("HYPERLIQUID", "DISABLED"),
-            ]
-            assert payload["workers"][1]["hip3_dexes"] == ["xyz"]
+            assert payload["live_order_send"] == "DISABLED"
+            assert payload["gate_source"] == "DATABASE"
+            assert payload["execution_worker"]["status"] == "UNKNOWN"
+            assert payload["workers"] == []
+            assert len(payload["account_bindings"]) == 1
+            binding = payload["account_bindings"][0]
+            assert binding["account_id"] == "acct-1"
+            assert binding["mode"] == "UNCONFIGURED"
+            assert binding["status"] == "UNCONFIGURED"
+            assert binding["endpoint"] is None
+            assert binding["order_send"] is False
 
     asyncio.run(scenario())
 
@@ -422,7 +585,7 @@ def test_official_catalog_sync_activates_current_contracts_and_deactivates_absen
         account_id="acct-1",
         venue="BINANCE",
         instruments=(
-            BinanceInstrument(
+            VenueInstrument(
                 symbol="BTCUSDT",
                 tick_size=Decimal("0.1"),
                 lot_size=Decimal("0.001"),
@@ -431,7 +594,7 @@ def test_official_catalog_sync_activates_current_contracts_and_deactivates_absen
                 collateral_currency="USDT",
                 active=True,
             ),
-            BinanceInstrument(
+            VenueInstrument(
                 symbol="TUTUSDT",
                 tick_size=Decimal("0.00001"),
                 lot_size=Decimal("1"),
@@ -456,7 +619,7 @@ def test_official_catalog_sync_activates_current_contracts_and_deactivates_absen
         account_id="acct-1",
         venue="BINANCE",
         instruments=(
-            BinanceInstrument(
+            VenueInstrument(
                 symbol="TUTUSDT",
                 tick_size=Decimal("0.00001"),
                 lot_size=Decimal("1"),
@@ -671,7 +834,7 @@ def test_api_reuses_exact_legacy_proposal_without_deduplicating_another_contract
         "account_id": "acct-1",
         "risk_tier": "LOW",
         "quantity": "1",
-        "max_risk": "40",
+        "max_risk": "2000",
         "expires_in_minutes": 480,
         "invalidation_price": "118000",
         "rationale": "review Perptape breakout",
@@ -685,7 +848,7 @@ def test_api_reuses_exact_legacy_proposal_without_deduplicating_another_contract
         instrument_id=ids["instrument"],
         direction=candidate.direction,
         quantity=Decimal("1"),
-        max_risk=Decimal("40"),
+        max_risk=Decimal("2000"),
         expires_at=now + timedelta(minutes=120),
         idempotency_key=f"perptape:{legacy_candidate_id}",
         strategy_id="perptape",
@@ -709,7 +872,7 @@ def test_api_reuses_exact_legacy_proposal_without_deduplicating_another_contract
             "risk_tier": "LOW",
             "quantity": "1",
             "initial_quantity": None,
-            "max_risk": "40",
+            "max_risk": "2000",
             "expires_in_minutes": 480,
             "invalidation_price": "118000",
             "allow_auto_add": False,
@@ -785,7 +948,7 @@ def test_perptape_candidate_can_start_as_explicit_live_proposal(
                     "account_id": live_account_id,
                     "risk_tier": "LOW",
                     "quantity": "0.001",
-                    "max_risk": "1",
+                    "max_risk": "2",
                     "expires_in_minutes": 480,
                     "invalidation_price": "118000",
                     "rationale": "explicit live proposal still requires review and risk",
@@ -794,6 +957,19 @@ def test_perptape_candidate_can_start_as_explicit_live_proposal(
             assert created.status_code == 200, created.text
             assert created.json()["environment"] == "LIVE"
             assert created.json()["status"] == "PENDING_REVIEW"
+            detail = await client.get(f"/api/proposals/{created.json()['proposal_id']}")
+            assert detail.status_code == 200, detail.text
+            assert detail.json()["execution_preview"] == {
+                "account_id": live_account_id,
+                "venue": "BINANCE",
+                "symbol": "BTCUSDT",
+                "side": "BUY",
+                "order_type": "MARKET",
+                "quantity": "0.001000000000000000",
+                "estimated_notional": "120.000000000000000000",
+                "quote_currency": "USDT",
+                "leverage": "3.000000000000000000",
+            }
 
     asyncio.run(scenario())
 
@@ -821,7 +997,7 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
                     "direction": "LONG",
                     "risk_tier": "HIGH",
                     "quantity": "0.001",
-                    "max_risk": "1",
+                    "max_risk": "2",
                     "expires_in_minutes": 480,
                     "trigger_price": "120000",
                     "invalidation_price": "118000",
@@ -839,21 +1015,13 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
 
             await logout(client)
             await login(client, "reviewer-1")
-            first_grant = await client.post(
-                "/api/auth/mock/step-up",
-                json={
-                    "action": "proposal.approve",
-                    "object_id": proposal_id,
-                    "object_version": first_version,
-                },
-            )
             first_review = await client.post(
                 f"/api/proposals/{proposal_id}/reviews",
                 json={
                     "decision": "APPROVE",
                     "reason": "first independent review",
                     "expected_version": first_version,
-                    "action_grant": first_grant.json()["action_grant"],
+                    "idempotency_key": "high-risk-first-review",
                 },
             )
             assert first_review.status_code == 200, first_review.text
@@ -874,28 +1042,490 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
 
             await logout(client)
             await login(client, "reviewer-2")
-            second_grant = await client.post(
-                "/api/auth/mock/step-up",
-                json={
-                    "action": "proposal.approve",
-                    "object_id": proposal_id,
-                    "object_version": current_version,
-                },
-            )
             second_review = await client.post(
                 f"/api/proposals/{proposal_id}/reviews",
                 json={
                     "decision": "APPROVE",
                     "reason": "second independent review",
                     "expected_version": current_version,
-                    "action_grant": second_grant.json()["action_grant"],
+                    "idempotency_key": "high-risk-second-review",
                 },
             )
             assert second_review.status_code == 200, second_review.text
             assert second_review.json()["status"] == "APPROVED"
+            assert second_review.json()["detail"]["risk_decision"] is not None
+            assert second_review.json()["detail"]["risk_decision"]["result"] == "DENY"
+            assert second_review.json()["detail"]["risk_decision"]["reasons"] == [
+                "READ_ONLY_SOURCE_UNAVAILABLE"
+            ]
             assert len(telegram.notifications()) == 3
 
     asyncio.run(scenario())
+
+
+def test_session_review_keeps_auth_rbac_scope_version_and_identity_fail_closed(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    scoped_account_id = "scope-acct-2"
+    add_exchange_account_fixture(
+        database,
+        ids["admin"],
+        scoped_account_id,
+        "BINANCE",
+        environment="TESTNET",
+    )
+    service.assign_role(
+        ids["proposer"],
+        Role.PROPOSER,
+        ids["admin"],
+        scoped_account_id,
+        "BINANCE",
+        now=now,
+    )
+    scope_proposal_id = service.create_proposal(
+        actor_id=ids["proposer"],
+        source=ProposalSource.MANUAL,
+        risk_tier=RiskTier.LOW,
+        account_id=scoped_account_id,
+        venue="BINANCE",
+        instrument_id=ids["instrument"],
+        direction=Direction.LONG,
+        quantity=Decimal("0.001"),
+        max_risk=Decimal("1"),
+        expires_at=now + timedelta(hours=2),
+        idempotency_key="scope-mismatch-proposal",
+        environment=ExecutionEnvironment.TESTNET,
+        details={"trigger_price": "120000"},
+        now=now,
+    )
+    service.submit_proposal(scope_proposal_id, ids["proposer"], now=now)
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, MockTelegramGateway())),
+            base_url="http://test",
+        ) as client:
+            await login(client, "proposer")
+            created = await client.post(
+                "/api/proposals/manual",
+                json={
+                    "environment": "TESTNET",
+                    "account_id": "acct-1",
+                    "venue": "BINANCE",
+                    "instrument_id": str(ids["instrument"]),
+                    "direction": "LONG",
+                    "risk_tier": "HIGH",
+                    "quantity": "0.001",
+                    "max_risk": "2",
+                    "expires_in_minutes": 480,
+                    "trigger_price": "120000",
+                    "invalidation_price": "118000",
+                    "rationale": "exercise session review fail-closed boundaries",
+                    "idempotency_key": "session-review-boundaries",
+                },
+            )
+            assert created.status_code == 200, created.text
+            proposal_id = created.json()["proposal_id"]
+            original_version = created.json()["version"]
+            payload = {
+                "decision": "APPROVE",
+                "reason": "independent session review",
+                "expected_version": original_version,
+                "idempotency_key": "unauthenticated-review",
+            }
+
+            await logout(client)
+            unauthenticated = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json=payload,
+            )
+            assert unauthenticated.status_code == 401, unauthenticated.text
+
+            await login(client, "proposer")
+            self_review = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={**payload, "idempotency_key": "self-review"},
+            )
+            assert self_review.status_code == 403, self_review.text
+            assert self_review.json()["error"]["code"] == "SELF_REVIEW_FORBIDDEN"
+
+            await logout(client)
+            await login(client, "operator")
+            insufficient_role = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={**payload, "idempotency_key": "operator-review"},
+            )
+            assert insufficient_role.status_code == 403, insufficient_role.text
+            assert insufficient_role.json()["error"]["code"] == "RBAC_DENIED"
+
+            await logout(client)
+            await login(client, "reviewer-1")
+            scope_mismatch = await client.post(
+                f"/api/proposals/{scope_proposal_id}/reviews",
+                json={
+                    "decision": "REJECT",
+                    "reason": "must not cross the exact account scope",
+                    "expected_version": 2,
+                    "idempotency_key": "scope-mismatch-review",
+                },
+            )
+            assert scope_mismatch.status_code == 403, scope_mismatch.text
+            assert scope_mismatch.json()["error"]["code"] == "RBAC_DENIED"
+
+            first = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={**payload, "idempotency_key": "first-session-review"},
+            )
+            assert first.status_code == 200, first.text
+            assert first.json()["status"] == "PENDING_REVIEW"
+            current_version = first.json()["detail"]["version"]
+
+            duplicate = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={
+                    **payload,
+                    "expected_version": current_version,
+                    "idempotency_key": "duplicate-session-review",
+                },
+            )
+            assert duplicate.status_code == 409, duplicate.text
+            assert duplicate.json()["error"]["code"] == "REVIEW_ALREADY_RECORDED"
+
+            await logout(client)
+            await login(client, "reviewer-2")
+            stale = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={**payload, "idempotency_key": "stale-session-review"},
+            )
+            assert stale.status_code == 409, stale.text
+            assert stale.json()["error"]["code"] == "VERSION_CONFLICT"
+
+            second = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={
+                    **payload,
+                    "expected_version": current_version,
+                    "idempotency_key": "second-session-review",
+                },
+            )
+            assert second.status_code == 200, second.text
+            assert second.json()["status"] == "APPROVED"
+
+        with database.session_factory() as session:
+            reviewers = session.scalars(
+                select(AuditEvent.actor_id).where(
+                    AuditEvent.event_type == "PROPOSAL_REVIEWED",
+                    AuditEvent.object_id == proposal_id,
+                )
+            ).all()
+            assert len(reviewers) == 2
+            assert set(reviewers) == {
+                str(ids["reviewer_one"]),
+                str(ids["reviewer_two"]),
+            }
+
+    asyncio.run(scenario())
+
+
+def test_authenticated_reviewer_approves_without_password_step_up(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    reviewer_password = "reviewer-one-password"  # noqa: S105
+    service.ensure_local_human_password(
+        "reviewer-1",
+        reviewer_password,
+        now=datetime.now(UTC),
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, MockTelegramGateway())),
+            base_url="http://test",
+        ) as client:
+            await login(client, "proposer")
+            created = await client.post(
+                "/api/proposals/manual",
+                json={
+                    "environment": "TESTNET",
+                    "account_id": "acct-1",
+                    "venue": "BINANCE",
+                    "instrument_id": str(ids["instrument"]),
+                    "direction": "LONG",
+                    "risk_tier": "LOW",
+                    "quantity": "0.001",
+                    "max_risk": "2",
+                    "expires_in_minutes": 480,
+                    "trigger_price": "120000",
+                    "invalidation_price": "118000",
+                    "rationale": "verify the authenticated reviewer session is sufficient",
+                    "idempotency_key": "session-review-proposal",
+                },
+            )
+            assert created.status_code == 200, created.text
+            proposal_id = created.json()["proposal_id"]
+            version = created.json()["version"]
+            await logout(client)
+
+            password_login = await client.post(
+                "/api/auth/login",
+                json={"username": "reviewer-1", "password": reviewer_password},
+            )
+            assert password_login.status_code == 200, password_login.text
+            reviewed = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={
+                    "decision": "APPROVE",
+                    "reason": "session-authenticated independent review",
+                    "expected_version": version,
+                    "idempotency_key": "session-authenticated-review",
+                },
+            )
+            assert reviewed.status_code == 200, reviewed.text
+            assert reviewed.json()["status"] == "APPROVED"
+            assert reviewed.json()["detail"]["risk_decision"]["result"] == "ALLOW"
+            assert reviewed.json()["automation"]["status"] == "READY"
+            assert reviewed.json()["detail"]["authorization"] is not None
+            assert reviewed.json()["detail"]["initial_entry"]["intent_status"] == "READY"
+            replay = advance_approved_proposal(
+                service,
+                proposal_id=UUID(proposal_id),
+                fallback_service_username="runtime-sync",
+                now=datetime.now(UTC),
+            )
+            assert replay["status"] == "READY"
+            assert replay["authorization_id"] == reviewed.json()["automation"][
+                "authorization_id"
+            ]
+            assert replay["intent_id"] == reviewed.json()["automation"]["intent_id"]
+
+        with database.session_factory() as session:
+            assert session.scalar(select(func.count()).select_from(TradingAuthorization)) == 1
+            assert session.scalar(select(func.count()).select_from(Campaign)) == 1
+            assert session.scalar(select(func.count()).select_from(RiskReservation)) == 1
+            assert session.scalar(select(func.count()).select_from(OrderIntent)) == 1
+            assert session.scalar(select(func.count()).select_from(VenueOrder)) == 0
+            authorization = session.scalar(select(TradingAuthorization))
+            intent = session.scalar(select(OrderIntent))
+            assert authorization is not None
+            assert intent is not None
+            assert authorization.actor_id == str(ids["runtime_sync"])
+            assert intent.actor_id == str(ids["runtime_sync"])
+
+    asyncio.run(scenario())
+
+
+def test_approved_proposal_rechecks_denied_risk_only_after_new_facts(
+    database: Database,
+    service: TradingService,
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    stale_at = now - timedelta(minutes=10)
+    with database.session_factory.begin() as session:
+        team_id = session.scalar(
+            select(Position.team_id).where(
+                Position.account_id == "acct-1",
+                Position.venue == "BINANCE",
+                Position.environment == "TESTNET",
+            )
+        )
+        assert team_id is not None
+        session.add(
+            AccountEquity(
+                account_equity_id=uuid4(),
+                team_id=team_id,
+                account_id="vault-1",
+                venue="VAULT",
+                environment="TESTNET",
+                equity=Decimal("100"),
+                available_balance=Decimal("100"),
+                withdrawable_balance=Decimal("100"),
+                currency="USDT",
+                location_type="VAULT",
+                control_status="CONTROLLED",
+                deposit_status="READY",
+                network="test",
+                address_reference=None,
+                valuation_currency="USD",
+                valuation_price=Decimal(1),
+                valuation_equity=Decimal("100"),
+                valuation_observed_at=stale_at,
+                fact_status="KNOWN",
+                observed_at=stale_at,
+                updated_at=stale_at,
+            )
+        )
+        for position in session.scalars(
+            select(Position).where(
+                Position.account_id == "acct-1",
+                Position.venue == "BINANCE",
+                Position.environment == "TESTNET",
+            )
+        ):
+            position.observed_at = stale_at
+            position.updated_at = stale_at
+        for equity in session.scalars(
+            select(AccountEquity).where(
+                AccountEquity.account_id == "acct-1",
+                AccountEquity.venue == "BINANCE",
+                AccountEquity.environment == "TESTNET",
+            )
+        ):
+            equity.observed_at = stale_at
+            equity.updated_at = stale_at
+
+    proposal_id = service.create_proposal(
+        actor_id=ids["proposer"],
+        source=ProposalSource.MANUAL,
+        risk_tier=RiskTier.LOW,
+        account_id="acct-1",
+        venue="BINANCE",
+        instrument_id=ids["instrument"],
+        direction=Direction.LONG,
+        quantity=Decimal("0.001"),
+        max_risk=Decimal(1),
+        expires_at=now + timedelta(hours=8),
+        idempotency_key="automatic-risk-retry-proposal",
+        environment=ExecutionEnvironment.TESTNET,
+        details={"trigger_price": "120000"},
+        submit_for_review=True,
+        now=now,
+    )
+    assert (
+        service.review_proposal(
+            proposal_id,
+            ids["reviewer_one"],
+            ReviewDecision.APPROVE,
+            "approve frozen testnet proposal",
+            automatic_risk_service_username="runtime-sync",
+            now=now,
+        ).value
+        == "APPROVED"
+    )
+    with database.session_factory() as session:
+        first = session.scalar(
+            select(RiskDecision)
+            .where(RiskDecision.proposal_id == proposal_id)
+            .order_by(RiskDecision.created_at.desc())
+        )
+        assert first is not None
+        assert first.result == "DENY"
+        assert first.reasons == ["STALE_FACTS"]
+        assert (
+            session.scalar(
+                select(func.count()).select_from(RiskDecision).where(
+                    RiskDecision.proposal_id == proposal_id
+                )
+            )
+            == 1
+        )
+
+    assert not refresh_approved_proposal_risk(
+        service,
+        proposal_id=proposal_id,
+        fallback_service_username="runtime-sync",
+        now=now + timedelta(seconds=1),
+    )
+
+    refreshed_at = now + timedelta(seconds=2)
+    with database.session_factory.begin() as session:
+        for position in session.scalars(
+            select(Position).where(
+                Position.account_id == "acct-1",
+                Position.venue == "BINANCE",
+                Position.environment == "TESTNET",
+            )
+        ):
+            position.observed_at = refreshed_at
+            position.updated_at = refreshed_at
+        for equity in session.scalars(
+            select(AccountEquity).where(
+                AccountEquity.account_id == "acct-1",
+                AccountEquity.venue == "BINANCE",
+                AccountEquity.environment == "TESTNET",
+            )
+        ):
+            equity.observed_at = refreshed_at
+            equity.updated_at = refreshed_at
+
+    for offset in range(3, 8):
+        assert not refresh_approved_proposal_risk(
+            service,
+            proposal_id=proposal_id,
+            fallback_service_username="runtime-sync",
+            now=now + timedelta(seconds=offset),
+        )
+    with database.session_factory() as session:
+        assert (
+            session.scalar(
+                select(func.count()).select_from(RiskDecision).where(
+                    RiskDecision.proposal_id == proposal_id
+                )
+            )
+            == 1
+        )
+
+    vault_refreshed_at = now + timedelta(seconds=8)
+    with database.session_factory.begin() as session:
+        vault = session.scalar(
+            select(AccountEquity).where(
+                AccountEquity.account_id == "vault-1",
+                AccountEquity.venue == "VAULT",
+                AccountEquity.environment == "TESTNET",
+            )
+        )
+        assert vault is not None
+        vault.observed_at = vault_refreshed_at
+        vault.valuation_observed_at = vault_refreshed_at
+        vault.updated_at = vault_refreshed_at
+
+    assert refresh_approved_proposal_risk(
+        service,
+        proposal_id=proposal_id,
+        fallback_service_username="runtime-sync",
+        now=now + timedelta(seconds=9),
+    )
+    assert not refresh_approved_proposal_risk(
+        service,
+        proposal_id=proposal_id,
+        fallback_service_username="runtime-sync",
+        now=now + timedelta(seconds=10),
+    )
+    service.set_risk_policy(
+        actor_id=ids["admin"],
+        version="m1-risk-v2",
+        system_state=SystemRiskState.NORMAL,
+        max_total_risk=Decimal(100),
+        max_account_risk=Decimal(100),
+        max_single_loss=Decimal(100),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
+        max_fact_age=timedelta(minutes=5),
+        now=now + timedelta(seconds=11),
+    )
+    assert refresh_approved_proposal_risk(
+        service,
+        proposal_id=proposal_id,
+        fallback_service_username="runtime-sync",
+        now=now + timedelta(seconds=12),
+    )
+    assert not refresh_approved_proposal_risk(
+        service,
+        proposal_id=proposal_id,
+        fallback_service_username="runtime-sync",
+        now=now + timedelta(seconds=13),
+    )
+    with database.session_factory() as session:
+        decisions = session.scalars(
+            select(RiskDecision)
+            .where(RiskDecision.proposal_id == proposal_id)
+            .order_by(RiskDecision.created_at)
+        ).all()
+        assert [item.result for item in decisions] == ["DENY", "ALLOW", "ALLOW"]
+        assert decisions[-1].actor_id == str(ids["runtime_sync"])
 
 
 def test_manual_proposal_accepts_u_margin_amount_and_resolves_frozen_quantity(

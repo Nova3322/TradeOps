@@ -1,26 +1,43 @@
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
+from datetime import datetime
+from uuid import UUID, uuid4
+
+from sqlalchemy import delete, func, select
+
+from trading_control_plane import credentials, domain, models, rejections
+from trading_control_plane.passwords import PasswordHasher
 from trading_control_plane.service_component import ServiceComponent
 
-# The domain implementation intentionally consumes the explicit service_core export surface.
-# ruff: noqa: F403, F405
-from trading_control_plane.service_core import *
+PASSWORD_HASHER = PasswordHasher()
+SCOPE_SLUG_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
+
+
+def normalize_venue_scope(venue_scope: str | None) -> str | None:
+    if venue_scope is None:
+        return None
+    normalized = venue_scope.strip().upper()
+    if normalized not in credentials.SUPPORTED_EXCHANGE_VENUES:
+        rejections.reject("VENUE_SCOPE_UNSUPPORTED", "venue scope is unsupported")
+    return normalized
 
 
 class WorkspaceService(ServiceComponent):
     def bootstrap_admin(self, username: str, *, now: datetime) -> UUID:
         with self.database.session_factory.begin() as session:
-            if session.scalar(select(func.count()).select_from(User)) != 0:
-                _reject("BOOTSTRAP_CLOSED", "an administrator already exists")
-            user = User(
+            if session.scalar(select(func.count()).select_from(models.User)) != 0:
+                rejections.reject("BOOTSTRAP_CLOSED", "an administrator already exists")
+            user = models.User(
                 username=username,
-                principal_type=PrincipalType.HUMAN.value,
+                principal_type=domain.PrincipalType.HUMAN.value,
                 active=True,
                 created_at=now,
             )
             session.add(user)
             session.flush()
-            workspace = Workspace(
+            workspace = models.Workspace(
                 name="Default Workspace",
                 slug="default",
                 created_by=user.user_id,
@@ -31,14 +48,14 @@ class WorkspaceService(ServiceComponent):
             )
             session.add(workspace)
             session.flush()
-            team = Team(
+            team = models.Team(
                 workspace_id=workspace.workspace_id,
                 name="Default Team",
                 slug="default",
                 created_by=user.user_id,
                 active=True,
                 trading_enabled=True,
-                execution_mode=TeamExecutionMode.LIVE.value,
+                execution_mode=domain.TeamExecutionMode.LIVE.value,
                 execution_mode_locked_at=now,
                 version=1,
                 created_at=now,
@@ -49,10 +66,10 @@ class WorkspaceService(ServiceComponent):
             user.active_workspace_id = workspace.workspace_id
             user.active_team_id = team.team_id
             session.add(
-                WorkspaceMembership(
+                models.WorkspaceMembership(
                     workspace_id=workspace.workspace_id,
                     user_id=user.user_id,
-                    role=WorkspaceRole.ADMIN.value,
+                    role=domain.WorkspaceRole.ADMIN.value,
                     active=True,
                     invited_by=None,
                     created_at=now,
@@ -60,7 +77,7 @@ class WorkspaceService(ServiceComponent):
                 )
             )
             session.add(
-                TeamMembership(
+                models.TeamMembership(
                     team_id=team.team_id,
                     user_id=user.user_id,
                     active=True,
@@ -70,20 +87,20 @@ class WorkspaceService(ServiceComponent):
                 )
             )
             session.add(
-                RoleAssignment(
+                models.RoleAssignment(
                     user_id=user.user_id,
                     team_id=team.team_id,
-                    role=Role.SYSTEM_ADMIN.value,
+                    role=domain.Role.SYSTEM_ADMIN.value,
                     account_scope=None,
                     venue_scope=None,
                     created_at=now,
                 )
             )
             session.add(
-                TeamSignalSource(
+                models.TeamSignalSource(
                     team_id=team.team_id,
                     name="Perptape",
-                    mode=SignalSourceMode.PERPTAPE.value,
+                    mode=domain.SignalSourceMode.PERPTAPE.value,
                     enabled=True,
                     credential_ciphertext=None,
                     credential_metadata={
@@ -106,7 +123,7 @@ class WorkspaceService(ServiceComponent):
                     deleted_by=None,
                 )
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id="bootstrap",
                 event_type="USER_BOOTSTRAPPED",
@@ -126,9 +143,11 @@ class WorkspaceService(ServiceComponent):
         normalized_name = " ".join(name.strip().split())
         normalized_slug = (slug or normalized_name.lower().replace(" ", "-")).strip("-")
         if not normalized_name or len(normalized_name) > 120:
-            _reject("SCOPE_NAME_INVALID", "workspace and team names must contain 1-120 characters")
+            rejections.reject(
+                "SCOPE_NAME_INVALID", "workspace and team names must contain 1-120 characters"
+            )
         if not SCOPE_SLUG_PATTERN.fullmatch(normalized_slug):
-            _reject(
+            rejections.reject(
                 "SCOPE_SLUG_INVALID",
                 "scope slug must use lowercase letters, digits, or hyphens",
             )
@@ -146,10 +165,10 @@ class WorkspaceService(ServiceComponent):
         normalized_name, normalized_slug = self._scope_slug(name, slug)
         payload = {"name": normalized_name, "slug": normalized_slug}
         with self.database.session_factory.begin() as session:
-            actor = session.get(User, actor_id)
+            actor = session.get(models.User, actor_id)
             if actor is None or not actor.active:
-                _reject("USER_NOT_AUTHORIZED", "user is missing or inactive")
-            digest, replay = self.transactions._idempotency(
+                rejections.reject("USER_NOT_AUTHORIZED", "user is missing or inactive")
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=str(actor_id),
                 operation="workspace.create",
@@ -158,9 +177,11 @@ class WorkspaceService(ServiceComponent):
             )
             if replay is not None:
                 return UUID(str(replay["workspace_id"]))
-            if session.scalar(select(Workspace).where(Workspace.slug == normalized_slug)):
-                _reject("WORKSPACE_SLUG_CONFLICT", "workspace slug already exists")
-            workspace = Workspace(
+            if session.scalar(
+                select(models.Workspace).where(models.Workspace.slug == normalized_slug)
+            ):
+                rejections.reject("WORKSPACE_SLUG_CONFLICT", "workspace slug already exists")
+            workspace = models.Workspace(
                 name=normalized_name,
                 slug=normalized_slug,
                 created_by=actor_id,
@@ -172,24 +193,24 @@ class WorkspaceService(ServiceComponent):
             session.add(workspace)
             session.flush()
             session.add(
-                WorkspaceMembership(
+                models.WorkspaceMembership(
                     workspace_id=workspace.workspace_id,
                     user_id=actor_id,
-                    role=WorkspaceRole.ADMIN.value,
+                    role=domain.WorkspaceRole.ADMIN.value,
                     active=True,
                     invited_by=None,
                     created_at=now,
                     updated_at=now,
                 )
             )
-            team = Team(
+            team = models.Team(
                 workspace_id=workspace.workspace_id,
                 name=normalized_name,
                 slug="default",
                 created_by=actor_id,
                 active=True,
                 trading_enabled=False,
-                execution_mode=TeamExecutionMode.SETUP.value,
+                execution_mode=domain.TeamExecutionMode.SETUP.value,
                 version=1,
                 created_at=now,
                 updated_at=now,
@@ -198,7 +219,7 @@ class WorkspaceService(ServiceComponent):
             session.flush()
             session.add_all(
                 [
-                    TeamMembership(
+                    models.TeamMembership(
                         team_id=team.team_id,
                         user_id=actor_id,
                         active=True,
@@ -206,10 +227,10 @@ class WorkspaceService(ServiceComponent):
                         created_at=now,
                         updated_at=now,
                     ),
-                    RoleAssignment(
+                    models.RoleAssignment(
                         user_id=actor_id,
                         team_id=team.team_id,
-                        role=Role.SYSTEM_ADMIN.value,
+                        role=domain.Role.SYSTEM_ADMIN.value,
                         account_scope=None,
                         venue_scope=None,
                         created_at=now,
@@ -222,7 +243,7 @@ class WorkspaceService(ServiceComponent):
                 "workspace_id": str(workspace.workspace_id),
                 "team_id": str(team.team_id),
             }
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="WORKSPACE_CREATED",
@@ -235,7 +256,7 @@ class WorkspaceService(ServiceComponent):
                 workspace_id=workspace.workspace_id,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="TEAM_CREATED",
@@ -249,7 +270,7 @@ class WorkspaceService(ServiceComponent):
                 team_id=team.team_id,
                 now=now,
             )
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=str(actor_id),
                 operation="workspace.create",
@@ -271,14 +292,14 @@ class WorkspaceService(ServiceComponent):
     ) -> UUID:
         normalized_name, normalized_slug = self._scope_slug(name, slug)
         with self.database.session_factory.begin() as session:
-            actor, workspace = self.transactions._require_workspace_admin(session, actor_id)
+            actor, workspace = self.transactions.require_workspace_admin(session, actor_id)
             payload = {
                 "workspace_id": str(workspace.workspace_id),
                 "name": normalized_name,
                 "slug": normalized_slug,
             }
             caller = f"{actor_id}:{workspace.workspace_id}"
-            digest, replay = self.transactions._idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=caller,
                 operation="team.create",
@@ -288,21 +309,23 @@ class WorkspaceService(ServiceComponent):
             if replay is not None:
                 return UUID(str(replay["team_id"]))
             existing = session.scalar(
-                select(Team).where(
-                    Team.workspace_id == workspace.workspace_id,
-                    Team.slug == normalized_slug,
+                select(models.Team).where(
+                    models.Team.workspace_id == workspace.workspace_id,
+                    models.Team.slug == normalized_slug,
                 )
             )
             if existing is not None:
-                _reject("TEAM_SLUG_CONFLICT", "team slug already exists in this workspace")
-            team = Team(
+                rejections.reject(
+                    "TEAM_SLUG_CONFLICT", "team slug already exists in this workspace"
+                )
+            team = models.Team(
                 workspace_id=workspace.workspace_id,
                 name=normalized_name,
                 slug=normalized_slug,
                 created_by=actor_id,
                 active=True,
                 trading_enabled=False,
-                execution_mode=TeamExecutionMode.SETUP.value,
+                execution_mode=domain.TeamExecutionMode.SETUP.value,
                 version=1,
                 created_at=now,
                 updated_at=now,
@@ -310,7 +333,7 @@ class WorkspaceService(ServiceComponent):
             session.add(team)
             session.flush()
             session.add(
-                TeamMembership(
+                models.TeamMembership(
                     team_id=team.team_id,
                     user_id=actor_id,
                     active=True,
@@ -320,10 +343,10 @@ class WorkspaceService(ServiceComponent):
                 )
             )
             session.add(
-                RoleAssignment(
+                models.RoleAssignment(
                     user_id=actor_id,
                     team_id=team.team_id,
-                    role=Role.SYSTEM_ADMIN.value,
+                    role=domain.Role.SYSTEM_ADMIN.value,
                     account_scope=None,
                     venue_scope=None,
                     created_at=now,
@@ -331,7 +354,7 @@ class WorkspaceService(ServiceComponent):
             )
             actor.active_team_id = team.team_id
             response = {"team_id": str(team.team_id)}
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="TEAM_CREATED",
@@ -345,7 +368,7 @@ class WorkspaceService(ServiceComponent):
                 team_id=team.team_id,
                 now=now,
             )
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=caller,
                 operation="team.create",
@@ -370,10 +393,10 @@ class WorkspaceService(ServiceComponent):
             "team_id": None if team_id is None else str(team_id),
         }
         with self.database.session_factory.begin() as session:
-            actor = session.get(User, actor_id, with_for_update=True)
+            actor = session.get(models.User, actor_id, with_for_update=True)
             if actor is None or not actor.active:
-                _reject("USER_NOT_AUTHORIZED", "user is missing or inactive")
-            digest, replay = self.transactions._idempotency(
+                rejections.reject("USER_NOT_AUTHORIZED", "user is missing or inactive")
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=str(actor_id),
                 operation="scope.select",
@@ -383,22 +406,24 @@ class WorkspaceService(ServiceComponent):
             if replay is not None:
                 return
             workspace_membership = session.scalar(
-                select(WorkspaceMembership).where(
-                    WorkspaceMembership.workspace_id == workspace_id,
-                    WorkspaceMembership.user_id == actor_id,
-                    WorkspaceMembership.active,
+                select(models.WorkspaceMembership).where(
+                    models.WorkspaceMembership.workspace_id == workspace_id,
+                    models.WorkspaceMembership.user_id == actor_id,
+                    models.WorkspaceMembership.active,
                 )
             )
-            workspace = session.get(Workspace, workspace_id)
+            workspace = session.get(models.Workspace, workspace_id)
             if workspace is None or not workspace.active or workspace_membership is None:
-                _reject("WORKSPACE_ACCESS_DENIED", "workspace membership is missing or inactive")
+                rejections.reject(
+                    "WORKSPACE_ACCESS_DENIED", "workspace membership is missing or inactive"
+                )
             if team_id is not None:
-                team = session.get(Team, team_id)
+                team = session.get(models.Team, team_id)
                 team_membership = session.scalar(
-                    select(TeamMembership).where(
-                        TeamMembership.team_id == team_id,
-                        TeamMembership.user_id == actor_id,
-                        TeamMembership.active,
+                    select(models.TeamMembership).where(
+                        models.TeamMembership.team_id == team_id,
+                        models.TeamMembership.user_id == actor_id,
+                        models.TeamMembership.active,
                     )
                 )
                 if (
@@ -407,10 +432,12 @@ class WorkspaceService(ServiceComponent):
                     or team.workspace_id != workspace_id
                     or team_membership is None
                 ):
-                    _reject("TEAM_ACCESS_DENIED", "team membership is missing or inactive")
+                    rejections.reject(
+                        "TEAM_ACCESS_DENIED", "team membership is missing or inactive"
+                    )
             actor.active_workspace_id = workspace_id
             actor.active_team_id = team_id
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="SCOPE_SELECTED",
@@ -424,7 +451,7 @@ class WorkspaceService(ServiceComponent):
                 team_id=team_id,
                 now=now,
             )
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=str(actor_id),
                 operation="scope.select",
@@ -436,14 +463,14 @@ class WorkspaceService(ServiceComponent):
 
     def create_user(self, username: str, actor_id: UUID, *, now: datetime) -> UUID:
         with self.database.session_factory.begin() as session:
-            self.transactions._require_role(session, actor_id, "user.manage")
-            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
+            self.transactions.require_role(session, actor_id, "user.manage")
+            _actor, workspace, team = self.transactions.active_scope(session, actor_id)
             assert team is not None
-            user = User(
+            user = models.User(
                 username=username,
                 active_workspace_id=workspace.workspace_id,
                 active_team_id=team.team_id,
-                principal_type=PrincipalType.HUMAN.value,
+                principal_type=domain.PrincipalType.HUMAN.value,
                 active=True,
                 created_at=now,
             )
@@ -451,16 +478,16 @@ class WorkspaceService(ServiceComponent):
             session.flush()
             session.add_all(
                 [
-                    WorkspaceMembership(
+                    models.WorkspaceMembership(
                         workspace_id=workspace.workspace_id,
                         user_id=user.user_id,
-                        role=WorkspaceRole.MEMBER.value,
+                        role=domain.WorkspaceRole.MEMBER.value,
                         active=True,
                         invited_by=actor_id,
                         created_at=now,
                         updated_at=now,
                     ),
-                    TeamMembership(
+                    models.TeamMembership(
                         team_id=team.team_id,
                         user_id=user.user_id,
                         active=True,
@@ -470,7 +497,7 @@ class WorkspaceService(ServiceComponent):
                     ),
                 ]
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="USER_CREATED",
@@ -486,7 +513,7 @@ class WorkspaceService(ServiceComponent):
     def create_managed_user(
         self,
         username: str,
-        roles: Sequence[Role],
+        roles: Sequence[domain.Role],
         actor_id: UUID,
         account_scope: str | None = None,
         venue_scope: str | None = None,
@@ -496,22 +523,27 @@ class WorkspaceService(ServiceComponent):
     ) -> UUID:
         normalized_username = username.strip()
         normalized_roles = tuple(dict.fromkeys(roles))
-        normalized_venue_scope = _normalize_venue_scope(venue_scope)
+        normalized_venue_scope = normalize_venue_scope(venue_scope)
         if not normalized_username or not normalized_roles:
-            _reject("USER_ACCESS_INVALID", "an active user requires a username and role")
+            rejections.reject("USER_ACCESS_INVALID", "an active user requires a username and role")
         with self.database.session_factory.begin() as session:
-            self.transactions._require_role(session, actor_id, "user.manage")
-            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
+            self.transactions.require_role(session, actor_id, "user.manage")
+            _actor, workspace, team = self.transactions.active_scope(session, actor_id)
             assert team is not None
-            if session.scalar(select(User).where(User.username == normalized_username)) is not None:
-                _reject("USERNAME_CONFLICT", "the internal username already exists")
-            user = User(
+            if (
+                session.scalar(
+                    select(models.User).where(models.User.username == normalized_username)
+                )
+                is not None
+            ):
+                rejections.reject("USERNAME_CONFLICT", "the internal username already exists")
+            user = models.User(
                 username=normalized_username,
                 password_hash=(PASSWORD_HASHER.hash(password) if password is not None else None),
                 password_changed_at=(now if password is not None else None),
                 active_workspace_id=workspace.workspace_id,
                 active_team_id=team.team_id,
-                principal_type=PrincipalType.HUMAN.value,
+                principal_type=domain.PrincipalType.HUMAN.value,
                 active=True,
                 created_at=now,
             )
@@ -519,16 +551,16 @@ class WorkspaceService(ServiceComponent):
             session.flush()
             session.add_all(
                 [
-                    WorkspaceMembership(
+                    models.WorkspaceMembership(
                         workspace_id=workspace.workspace_id,
                         user_id=user.user_id,
-                        role=WorkspaceRole.MEMBER.value,
+                        role=domain.WorkspaceRole.MEMBER.value,
                         active=True,
                         invited_by=actor_id,
                         created_at=now,
                         updated_at=now,
                     ),
-                    TeamMembership(
+                    models.TeamMembership(
                         team_id=team.team_id,
                         user_id=user.user_id,
                         active=True,
@@ -540,16 +572,18 @@ class WorkspaceService(ServiceComponent):
             )
             for role in normalized_roles:
                 session.add(
-                    RoleAssignment(
+                    models.RoleAssignment(
                         user_id=user.user_id,
                         team_id=team.team_id,
                         role=role.value,
-                        account_scope=None if role is Role.SYSTEM_ADMIN else account_scope,
-                        venue_scope=(None if role is Role.SYSTEM_ADMIN else normalized_venue_scope),
+                        account_scope=None if role is domain.Role.SYSTEM_ADMIN else account_scope,
+                        venue_scope=(
+                            None if role is domain.Role.SYSTEM_ADMIN else normalized_venue_scope
+                        ),
                         created_at=now,
                     )
                 )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="USER_ACCESS_CREATED",
@@ -566,7 +600,7 @@ class WorkspaceService(ServiceComponent):
         self,
         *,
         username: str,
-        roles: Sequence[Role],
+        roles: Sequence[domain.Role],
         actor_id: UUID,
         account_scope: str | None,
         venue_scope: str | None,
@@ -575,12 +609,14 @@ class WorkspaceService(ServiceComponent):
     ) -> UUID:
         normalized_username = username.strip()
         normalized_roles = tuple(dict.fromkeys(roles))
-        normalized_venue_scope = _normalize_venue_scope(venue_scope)
+        normalized_venue_scope = normalize_venue_scope(venue_scope)
         if not normalized_username or not normalized_roles:
-            _reject("TEAM_INVITE_INVALID", "a team invitation requires a username and role")
+            rejections.reject(
+                "TEAM_INVITE_INVALID", "a team invitation requires a username and role"
+            )
         with self.database.session_factory.begin() as session:
-            self.transactions._require_role(session, actor_id, "user.manage")
-            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
+            self.transactions.require_role(session, actor_id, "user.manage")
+            _actor, workspace, team = self.transactions.active_scope(session, actor_id)
             assert team is not None
             payload = {
                 "workspace_id": str(workspace.workspace_id),
@@ -591,7 +627,7 @@ class WorkspaceService(ServiceComponent):
                 "venue_scope": normalized_venue_scope,
             }
             caller = f"{actor_id}:{workspace.workspace_id}:{team.team_id}"
-            digest, replay = self.transactions._idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=caller,
                 operation="team.member.add",
@@ -601,34 +637,34 @@ class WorkspaceService(ServiceComponent):
             if replay is not None:
                 return UUID(str(replay["user_id"]))
             user = session.scalar(
-                select(User).where(
-                    User.username == normalized_username,
-                    User.principal_type == PrincipalType.HUMAN.value,
-                    User.active,
+                select(models.User).where(
+                    models.User.username == normalized_username,
+                    models.User.principal_type == domain.PrincipalType.HUMAN.value,
+                    models.User.active,
                 )
             )
             if user is None:
-                _reject("USER_NOT_FOUND", "invitee must already have an active account")
+                rejections.reject("USER_NOT_FOUND", "invitee must already have an active account")
             team_membership = session.scalar(
-                select(TeamMembership).where(
-                    TeamMembership.team_id == team.team_id,
-                    TeamMembership.user_id == user.user_id,
+                select(models.TeamMembership).where(
+                    models.TeamMembership.team_id == team.team_id,
+                    models.TeamMembership.user_id == user.user_id,
                 )
             )
             if team_membership is not None and team_membership.active:
-                _reject("TEAM_MEMBERSHIP_CONFLICT", "user is already active in this team")
+                rejections.reject("TEAM_MEMBERSHIP_CONFLICT", "user is already active in this team")
             workspace_membership = session.scalar(
-                select(WorkspaceMembership).where(
-                    WorkspaceMembership.workspace_id == workspace.workspace_id,
-                    WorkspaceMembership.user_id == user.user_id,
+                select(models.WorkspaceMembership).where(
+                    models.WorkspaceMembership.workspace_id == workspace.workspace_id,
+                    models.WorkspaceMembership.user_id == user.user_id,
                 )
             )
             if workspace_membership is None:
                 session.add(
-                    WorkspaceMembership(
+                    models.WorkspaceMembership(
                         workspace_id=workspace.workspace_id,
                         user_id=user.user_id,
-                        role=WorkspaceRole.MEMBER.value,
+                        role=domain.WorkspaceRole.MEMBER.value,
                         active=True,
                         invited_by=actor_id,
                         created_at=now,
@@ -636,12 +672,12 @@ class WorkspaceService(ServiceComponent):
                     )
                 )
             elif not workspace_membership.active:
-                _reject(
+                rejections.reject(
                     "WORKSPACE_MEMBERSHIP_INACTIVE",
                     "workspace membership must be restored by a workspace administrator",
                 )
             if team_membership is None:
-                team_membership = TeamMembership(
+                team_membership = models.TeamMembership(
                     team_id=team.team_id,
                     user_id=user.user_id,
                     active=True,
@@ -655,25 +691,27 @@ class WorkspaceService(ServiceComponent):
                 team_membership.invited_by = actor_id
                 team_membership.updated_at = now
             session.execute(
-                delete(RoleAssignment).where(
-                    RoleAssignment.user_id == user.user_id,
-                    RoleAssignment.team_id == team.team_id,
+                delete(models.RoleAssignment).where(
+                    models.RoleAssignment.user_id == user.user_id,
+                    models.RoleAssignment.team_id == team.team_id,
                 )
             )
             for role in normalized_roles:
                 session.add(
-                    RoleAssignment(
+                    models.RoleAssignment(
                         user_id=user.user_id,
                         team_id=team.team_id,
                         role=role.value,
-                        account_scope=None if role is Role.SYSTEM_ADMIN else account_scope,
-                        venue_scope=(None if role is Role.SYSTEM_ADMIN else normalized_venue_scope),
+                        account_scope=None if role is domain.Role.SYSTEM_ADMIN else account_scope,
+                        venue_scope=(
+                            None if role is domain.Role.SYSTEM_ADMIN else normalized_venue_scope
+                        ),
                         created_at=now,
                     )
                 )
             session.flush()
             response = {"user_id": str(user.user_id)}
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="TEAM_MEMBER_ADDED",
@@ -689,7 +727,7 @@ class WorkspaceService(ServiceComponent):
                 team_id=team.team_id,
                 now=now,
             )
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=caller,
                 operation="team.member.add",
@@ -703,7 +741,7 @@ class WorkspaceService(ServiceComponent):
     def update_managed_user_access(
         self,
         user_id: UUID,
-        roles: Sequence[Role],
+        roles: Sequence[domain.Role],
         active: bool,
         actor_id: UUID,
         account_scope: str | None = None,
@@ -713,77 +751,83 @@ class WorkspaceService(ServiceComponent):
         now: datetime,
     ) -> None:
         normalized_roles = tuple(dict.fromkeys(roles))
-        normalized_venue_scope = _normalize_venue_scope(venue_scope)
+        normalized_venue_scope = normalize_venue_scope(venue_scope)
         if active and not normalized_roles:
-            _reject("USER_ACCESS_INVALID", "an active user requires at least one role")
+            rejections.reject("USER_ACCESS_INVALID", "an active user requires at least one role")
         if user_id == actor_id:
-            _reject(
+            rejections.reject(
                 "SELF_ACCESS_CHANGE_DENIED",
                 "manage your own access through another system administrator",
             )
         with self.database.session_factory.begin() as session:
-            self.transactions._require_role(session, actor_id, "user.manage")
-            _actor, _workspace, team = self.transactions._active_scope(session, actor_id)
+            self.transactions.require_role(session, actor_id, "user.manage")
+            _actor, _workspace, team = self.transactions.active_scope(session, actor_id)
             assert team is not None
-            user = session.get(User, user_id, with_for_update=True)
-            if user is None or user.principal_type != PrincipalType.HUMAN.value:
-                _reject("USER_NOT_FOUND", "the managed human user does not exist")
+            user = session.get(models.User, user_id, with_for_update=True)
+            if user is None or user.principal_type != domain.PrincipalType.HUMAN.value:
+                rejections.reject("USER_NOT_FOUND", "the managed human user does not exist")
             membership = session.scalar(
-                select(TeamMembership)
+                select(models.TeamMembership)
                 .where(
-                    TeamMembership.team_id == team.team_id,
-                    TeamMembership.user_id == user_id,
+                    models.TeamMembership.team_id == team.team_id,
+                    models.TeamMembership.user_id == user_id,
                 )
                 .with_for_update()
             )
             if membership is None:
-                _reject("TEAM_MEMBER_NOT_FOUND", "the user is not a member of the active team")
+                rejections.reject(
+                    "TEAM_MEMBER_NOT_FOUND", "the user is not a member of the active team"
+                )
             current_assignments = session.scalars(
-                select(RoleAssignment).where(
-                    RoleAssignment.user_id == user_id,
-                    RoleAssignment.team_id == team.team_id,
+                select(models.RoleAssignment).where(
+                    models.RoleAssignment.user_id == user_id,
+                    models.RoleAssignment.team_id == team.team_id,
                 )
             ).all()
-            current_roles = {Role(item.role) for item in current_assignments}
-            removing_admin = Role.SYSTEM_ADMIN in current_roles and (
-                Role.SYSTEM_ADMIN not in normalized_roles or not active
+            current_roles = {domain.Role(item.role) for item in current_assignments}
+            removing_admin = domain.Role.SYSTEM_ADMIN in current_roles and (
+                domain.Role.SYSTEM_ADMIN not in normalized_roles or not active
             )
             if removing_admin:
                 active_admins = session.scalar(
-                    select(func.count(func.distinct(User.user_id)))
-                    .select_from(User)
-                    .join(RoleAssignment, RoleAssignment.user_id == User.user_id)
+                    select(func.count(func.distinct(models.User.user_id)))
+                    .select_from(models.User)
                     .join(
-                        TeamMembership,
-                        (TeamMembership.user_id == User.user_id)
-                        & (TeamMembership.team_id == RoleAssignment.team_id),
+                        models.RoleAssignment, models.RoleAssignment.user_id == models.User.user_id
+                    )
+                    .join(
+                        models.TeamMembership,
+                        (models.TeamMembership.user_id == models.User.user_id)
+                        & (models.TeamMembership.team_id == models.RoleAssignment.team_id),
                     )
                     .where(
-                        User.active,
-                        TeamMembership.active,
-                        RoleAssignment.team_id == team.team_id,
-                        RoleAssignment.role == Role.SYSTEM_ADMIN.value,
+                        models.User.active,
+                        models.TeamMembership.active,
+                        models.RoleAssignment.team_id == team.team_id,
+                        models.RoleAssignment.role == domain.Role.SYSTEM_ADMIN.value,
                     )
                 )
                 if int(active_admins or 0) <= 1:
-                    _reject(
+                    rejections.reject(
                         "LAST_SYSTEM_ADMIN_REQUIRED",
                         "the last active system administrator cannot be removed or disabled",
                     )
             session.execute(
-                delete(RoleAssignment).where(
-                    RoleAssignment.user_id == user_id,
-                    RoleAssignment.team_id == team.team_id,
+                delete(models.RoleAssignment).where(
+                    models.RoleAssignment.user_id == user_id,
+                    models.RoleAssignment.team_id == team.team_id,
                 )
             )
             for role in normalized_roles:
                 session.add(
-                    RoleAssignment(
+                    models.RoleAssignment(
                         user_id=user_id,
                         team_id=team.team_id,
                         role=role.value,
-                        account_scope=None if role is Role.SYSTEM_ADMIN else account_scope,
-                        venue_scope=(None if role is Role.SYSTEM_ADMIN else normalized_venue_scope),
+                        account_scope=None if role is domain.Role.SYSTEM_ADMIN else account_scope,
+                        venue_scope=(
+                            None if role is domain.Role.SYSTEM_ADMIN else normalized_venue_scope
+                        ),
                         created_at=now,
                     )
                 )
@@ -796,7 +840,7 @@ class WorkspaceService(ServiceComponent):
                 user.password_hash = PASSWORD_HASHER.hash(new_password)
                 user.password_changed_at = now
                 user.auth_version += 1
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="USER_ACCESS_UPDATED",
@@ -823,17 +867,17 @@ class WorkspaceService(ServiceComponent):
         """Remove one human from the active team without deleting their identity or other teams."""
 
         if user_id == actor_id:
-            _reject(
+            rejections.reject(
                 "SELF_ACCESS_CHANGE_DENIED",
                 "a system administrator cannot remove their own active team membership",
             )
         with self.database.session_factory.begin() as session:
-            self.transactions._require_role(session, actor_id, "user.manage")
-            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
+            self.transactions.require_role(session, actor_id, "user.manage")
+            _actor, workspace, team = self.transactions.active_scope(session, actor_id)
             assert workspace is not None and team is not None
             caller = f"{actor_id}:{team.team_id}"
             payload = {"team_id": str(team.team_id), "user_id": str(user_id)}
-            digest, replay = self.transactions._idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=caller,
                 operation="team.member.remove",
@@ -842,54 +886,58 @@ class WorkspaceService(ServiceComponent):
             )
             if replay is not None:
                 return {key: str(value) for key, value in replay.items()}
-            user = session.get(User, user_id, with_for_update=True)
-            if user is None or user.principal_type != PrincipalType.HUMAN.value:
-                _reject("USER_NOT_FOUND", "the managed human user does not exist")
+            user = session.get(models.User, user_id, with_for_update=True)
+            if user is None or user.principal_type != domain.PrincipalType.HUMAN.value:
+                rejections.reject("USER_NOT_FOUND", "the managed human user does not exist")
             membership = session.scalar(
-                select(TeamMembership)
+                select(models.TeamMembership)
                 .where(
-                    TeamMembership.team_id == team.team_id,
-                    TeamMembership.user_id == user_id,
+                    models.TeamMembership.team_id == team.team_id,
+                    models.TeamMembership.user_id == user_id,
                 )
                 .with_for_update()
             )
             if membership is None:
-                _reject("TEAM_MEMBER_NOT_FOUND", "the user is not a member of the active team")
+                rejections.reject(
+                    "TEAM_MEMBER_NOT_FOUND", "the user is not a member of the active team"
+                )
             current_roles = {
-                Role(item.role)
+                domain.Role(item.role)
                 for item in session.scalars(
-                    select(RoleAssignment).where(
-                        RoleAssignment.user_id == user_id,
-                        RoleAssignment.team_id == team.team_id,
+                    select(models.RoleAssignment).where(
+                        models.RoleAssignment.user_id == user_id,
+                        models.RoleAssignment.team_id == team.team_id,
                     )
                 ).all()
             }
-            if Role.SYSTEM_ADMIN in current_roles:
+            if domain.Role.SYSTEM_ADMIN in current_roles:
                 active_admins = session.scalar(
-                    select(func.count(func.distinct(User.user_id)))
-                    .select_from(User)
-                    .join(RoleAssignment, RoleAssignment.user_id == User.user_id)
+                    select(func.count(func.distinct(models.User.user_id)))
+                    .select_from(models.User)
                     .join(
-                        TeamMembership,
-                        (TeamMembership.user_id == User.user_id)
-                        & (TeamMembership.team_id == RoleAssignment.team_id),
+                        models.RoleAssignment, models.RoleAssignment.user_id == models.User.user_id
+                    )
+                    .join(
+                        models.TeamMembership,
+                        (models.TeamMembership.user_id == models.User.user_id)
+                        & (models.TeamMembership.team_id == models.RoleAssignment.team_id),
                     )
                     .where(
-                        User.active,
-                        TeamMembership.active,
-                        RoleAssignment.team_id == team.team_id,
-                        RoleAssignment.role == Role.SYSTEM_ADMIN.value,
+                        models.User.active,
+                        models.TeamMembership.active,
+                        models.RoleAssignment.team_id == team.team_id,
+                        models.RoleAssignment.role == domain.Role.SYSTEM_ADMIN.value,
                     )
                 )
                 if int(active_admins or 0) <= 1:
-                    _reject(
+                    rejections.reject(
                         "LAST_SYSTEM_ADMIN_REQUIRED",
                         "the last active system administrator cannot be removed",
                     )
             session.execute(
-                delete(RoleAssignment).where(
-                    RoleAssignment.user_id == user_id,
-                    RoleAssignment.team_id == team.team_id,
+                delete(models.RoleAssignment).where(
+                    models.RoleAssignment.user_id == user_id,
+                    models.RoleAssignment.team_id == team.team_id,
                 )
             )
             membership_id = membership.membership_id
@@ -901,7 +949,7 @@ class WorkspaceService(ServiceComponent):
                 "team_id": str(team.team_id),
                 "status": "REMOVED",
             }
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="TEAM_MEMBER_REMOVED",
@@ -915,7 +963,7 @@ class WorkspaceService(ServiceComponent):
                 team_id=team.team_id,
                 now=now,
             )
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=caller,
                 operation="team.member.remove",
@@ -939,20 +987,22 @@ class WorkspaceService(ServiceComponent):
         """Rotate the authenticated human's password and revoke older sessions."""
 
         with self.database.session_factory.begin() as session:
-            user = session.get(User, actor_id, with_for_update=True)
+            user = session.get(models.User, actor_id, with_for_update=True)
             if (
                 user is None
                 or not user.active
-                or user.principal_type != PrincipalType.HUMAN.value
+                or user.principal_type != domain.PrincipalType.HUMAN.value
                 or user.password_hash is None
             ):
-                _reject("PASSWORD_CHANGE_DENIED", "an active password identity is required")
+                rejections.reject(
+                    "PASSWORD_CHANGE_DENIED", "an active password identity is required"
+                )
             payload = {
                 "user_id": str(actor_id),
                 "expected_auth_version": expected_auth_version,
                 "new_password_length": len(new_password),
             }
-            digest, replay = self.transactions._idempotency(
+            digest, replay = self.transactions.idempotency(
                 session,
                 caller_id=str(actor_id),
                 operation="user.password.change",
@@ -962,19 +1012,21 @@ class WorkspaceService(ServiceComponent):
             if replay is not None:
                 return int(replay["auth_version"])
             if user.auth_version != expected_auth_version:
-                _reject(
+                rejections.reject(
                     "AUTH_VERSION_CONFLICT",
                     "the login identity changed before password update",
                 )
             if not PASSWORD_HASHER.verify(current_password, user.password_hash):
-                _reject("CURRENT_PASSWORD_INVALID", "the current password is incorrect")
+                rejections.reject("CURRENT_PASSWORD_INVALID", "the current password is incorrect")
             if PASSWORD_HASHER.verify(new_password, user.password_hash):
-                _reject("PASSWORD_UNCHANGED", "the new password must differ from the current one")
+                rejections.reject(
+                    "PASSWORD_UNCHANGED", "the new password must differ from the current one"
+                )
             user.password_hash = PASSWORD_HASHER.hash(new_password)
             user.password_changed_at = now
             user.auth_version += 1
             response = {"auth_version": user.auth_version}
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="USER_PASSWORD_CHANGED",
@@ -988,7 +1040,7 @@ class WorkspaceService(ServiceComponent):
                 team_id=user.active_team_id,
                 now=now,
             )
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=str(actor_id),
                 operation="user.password.change",
@@ -1010,14 +1062,14 @@ class WorkspaceService(ServiceComponent):
 
         with self.database.session_factory.begin() as session:
             user = session.scalar(
-                select(User).where(
-                    User.username == username,
-                    User.principal_type == PrincipalType.HUMAN.value,
-                    User.active,
+                select(models.User).where(
+                    models.User.username == username,
+                    models.User.principal_type == domain.PrincipalType.HUMAN.value,
+                    models.User.active,
                 )
             )
             if user is None:
-                _reject("USER_NOT_FOUND", "the local human user does not exist")
+                rejections.reject("USER_NOT_FOUND", "the local human user does not exist")
             if user.password_hash is not None and PASSWORD_HASHER.verify(
                 password, user.password_hash
             ):
@@ -1025,7 +1077,7 @@ class WorkspaceService(ServiceComponent):
             user.password_hash = PASSWORD_HASHER.hash(password)
             user.password_changed_at = now
             user.auth_version += 1
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id="local-setup",
                 event_type="USER_PASSWORD_CONFIGURED",
@@ -1054,34 +1106,34 @@ class WorkspaceService(ServiceComponent):
 
         with self.database.session_factory.begin() as session:
             user = session.scalar(
-                select(User).where(
-                    User.username == internal_username,
-                    User.principal_type == PrincipalType.HUMAN.value,
-                    User.active,
+                select(models.User).where(
+                    models.User.username == internal_username,
+                    models.User.principal_type == domain.PrincipalType.HUMAN.value,
+                    models.User.active,
                 )
             )
             if user is None:
-                _reject(
+                rejections.reject(
                     "TELEGRAM_INTERNAL_USER_NOT_FOUND",
                     "the configured internal Telegram user is missing or inactive",
                 )
             bound_to_chat = session.scalar(
-                select(User).where(User.telegram_chat_id == telegram_chat_id)
+                select(models.User).where(models.User.telegram_chat_id == telegram_chat_id)
             )
             if bound_to_chat is not None and bound_to_chat.user_id != user.user_id:
-                _reject(
+                rejections.reject(
                     "TELEGRAM_BINDING_CONFLICT",
                     "the Telegram private chat is already bound to another internal user",
                 )
             if user.telegram_chat_id is not None and user.telegram_chat_id != telegram_chat_id:
-                _reject(
+                rejections.reject(
                     "TELEGRAM_BINDING_CONFLICT",
                     "the internal user already has another Telegram private chat",
                 )
             if user.telegram_chat_id == telegram_chat_id:
                 return user.username
             user.telegram_chat_id = telegram_chat_id
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(user.user_id),
                 event_type="TELEGRAM_PRIVATE_CHAT_BOUND",
@@ -1096,15 +1148,15 @@ class WorkspaceService(ServiceComponent):
 
     def create_service_principal(self, username: str, actor_id: UUID, *, now: datetime) -> UUID:
         with self.database.session_factory.begin() as session:
-            self.transactions._require_role(session, actor_id, "user.manage")
-            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
+            self.transactions.require_role(session, actor_id, "user.manage")
+            _actor, workspace, team = self.transactions.active_scope(session, actor_id)
             assert team is not None
-            principal = User(
+            principal = models.User(
                 username=username,
                 active_workspace_id=workspace.workspace_id,
                 active_team_id=team.team_id,
-                principal_type=PrincipalType.SERVICE.value,
-                service_kind=ServicePrincipalKind.INTERNAL.value,
+                principal_type=domain.PrincipalType.SERVICE.value,
+                service_kind=domain.ServicePrincipalKind.INTERNAL.value,
                 active=True,
                 created_at=now,
             )
@@ -1112,16 +1164,16 @@ class WorkspaceService(ServiceComponent):
             session.flush()
             session.add_all(
                 [
-                    WorkspaceMembership(
+                    models.WorkspaceMembership(
                         workspace_id=workspace.workspace_id,
                         user_id=principal.user_id,
-                        role=WorkspaceRole.MEMBER.value,
+                        role=domain.WorkspaceRole.MEMBER.value,
                         active=True,
                         invited_by=actor_id,
                         created_at=now,
                         updated_at=now,
                     ),
-                    TeamMembership(
+                    models.TeamMembership(
                         team_id=team.team_id,
                         user_id=principal.user_id,
                         active=True,
@@ -1131,7 +1183,7 @@ class WorkspaceService(ServiceComponent):
                     ),
                 ]
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="SERVICE_PRINCIPAL_CREATED",
@@ -1147,7 +1199,7 @@ class WorkspaceService(ServiceComponent):
     def assign_role(
         self,
         user_id: UUID,
-        role: Role,
+        role: domain.Role,
         actor_id: UUID,
         account_scope: str | None = None,
         venue_scope: str | None = None,
@@ -1155,21 +1207,21 @@ class WorkspaceService(ServiceComponent):
         now: datetime,
     ) -> UUID:
         with self.database.session_factory.begin() as session:
-            self.transactions._require_role(session, actor_id, "role.manage")
-            _actor, _workspace, team = self.transactions._active_scope(session, actor_id)
+            self.transactions.require_role(session, actor_id, "role.manage")
+            _actor, _workspace, team = self.transactions.active_scope(session, actor_id)
             assert team is not None
-            if session.get(User, user_id) is None:
-                _reject("USER_NOT_FOUND", "role target does not exist")
+            if session.get(models.User, user_id) is None:
+                rejections.reject("USER_NOT_FOUND", "role target does not exist")
             membership = session.scalar(
-                select(TeamMembership).where(
-                    TeamMembership.team_id == team.team_id,
-                    TeamMembership.user_id == user_id,
-                    TeamMembership.active,
+                select(models.TeamMembership).where(
+                    models.TeamMembership.team_id == team.team_id,
+                    models.TeamMembership.user_id == user_id,
+                    models.TeamMembership.active,
                 )
             )
             if membership is None:
-                _reject("TEAM_MEMBER_NOT_FOUND", "role target is not active in this team")
-            assignment = RoleAssignment(
+                rejections.reject("TEAM_MEMBER_NOT_FOUND", "role target is not active in this team")
+            assignment = models.RoleAssignment(
                 user_id=user_id,
                 team_id=team.team_id,
                 role=role.value,
@@ -1179,7 +1231,7 @@ class WorkspaceService(ServiceComponent):
             )
             session.add(assignment)
             session.flush()
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="ROLE_ASSIGNED",

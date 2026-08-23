@@ -1,31 +1,31 @@
 from __future__ import annotations
 
-from trading_control_plane.query_component import QueryComponent
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID
 
-# ruff: noqa: F403, F405
-from trading_control_plane.query_core import *
+from sqlalchemy import and_, func, select
+
+from trading_control_plane import domain, models, notification, request_context
+from trading_control_plane.query_component import QueryComponent, iso_datetime
 
 
 class WorkspaceQueries(QueryComponent):
-    def _active_scope_ids(self, user_id: UUID) -> tuple[UUID, UUID]:
-        context = self.user_context(user_id)
-        workspace = context.get("active_workspace")
-        team = context.get("active_team")
-        if not isinstance(workspace, dict) or not isinstance(team, dict):
-            raise DomainRejected("TEAM_CONTEXT_REQUIRED", "select an active team")
-        return UUID(str(workspace["workspace_id"])), UUID(str(team["team_id"]))
-
-    def user_by_username(self, username: str) -> User:
+    def user_by_username(self, username: str) -> models.User:
         with self.database.session_factory() as session:
-            user = session.scalar(select(User).where(User.username == username))
-            if user is None or not user.active or user.principal_type != PrincipalType.HUMAN.value:
-                raise DomainRejected("LOGIN_DENIED", "internal user is missing or inactive")
+            user = session.scalar(select(models.User).where(models.User.username == username))
+            if (
+                user is None
+                or not user.active
+                or user.principal_type != domain.PrincipalType.HUMAN.value
+            ):
+                raise domain.DomainRejected("LOGIN_DENIED", "internal user is missing or inactive")
             session.expunge(user)
             return user
 
     def password_credential(self, username: str) -> dict[str, Any] | None:
         with self.database.session_factory() as session:
-            user = session.scalar(select(User).where(User.username == username))
+            user = session.scalar(select(models.User).where(models.User.username == username))
             if user is None:
                 return None
             return {
@@ -37,15 +37,15 @@ class WorkspaceQueries(QueryComponent):
                 "principal_type": user.principal_type,
             }
 
-    def service_principal_by_username(self, username: str) -> User:
+    def service_principal_by_username(self, username: str) -> models.User:
         with self.database.session_factory() as session:
-            user = session.scalar(select(User).where(User.username == username))
+            user = session.scalar(select(models.User).where(models.User.username == username))
             if (
                 user is None
                 or not user.active
-                or user.principal_type != PrincipalType.SERVICE.value
+                or user.principal_type != domain.PrincipalType.SERVICE.value
             ):
-                raise DomainRejected(
+                raise domain.DomainRejected(
                     "SERVICE_PRINCIPAL_MISSING",
                     "configured service principal is missing or inactive",
                 )
@@ -54,31 +54,36 @@ class WorkspaceQueries(QueryComponent):
 
     def user_context(self, user_id: UUID) -> dict[str, Any]:
         with self.database.session_factory() as session:
-            user = session.get(User, user_id)
+            user = session.get(models.User, user_id)
             if user is None or not user.active:
-                raise DomainRejected("SESSION_REVOKED", "internal user is inactive or missing")
-            api_context = current_api_client_context()
-            if api_context is not None and api_context.owner_user_id != user_id:
-                raise DomainRejected("API_CLIENT_SCOPE_DENIED", "API Key owner mismatch")
-            workspace_memberships = session.execute(
-                select(WorkspaceMembership, Workspace)
-                .join(Workspace, Workspace.workspace_id == WorkspaceMembership.workspace_id)
-                .where(
-                    WorkspaceMembership.user_id == user_id,
-                    WorkspaceMembership.active,
-                    Workspace.active,
+                raise domain.DomainRejected(
+                    "SESSION_REVOKED", "internal user is inactive or missing"
                 )
-                .order_by(Workspace.name, Workspace.workspace_id)
+            api_context = request_context.current_api_client_context()
+            if api_context is not None and api_context.owner_user_id != user_id:
+                raise domain.DomainRejected("API_CLIENT_SCOPE_DENIED", "API Key owner mismatch")
+            workspace_memberships = session.execute(
+                select(models.WorkspaceMembership, models.Workspace)
+                .join(
+                    models.Workspace,
+                    models.Workspace.workspace_id == models.WorkspaceMembership.workspace_id,
+                )
+                .where(
+                    models.WorkspaceMembership.user_id == user_id,
+                    models.WorkspaceMembership.active,
+                    models.Workspace.active,
+                )
+                .order_by(models.Workspace.name, models.Workspace.workspace_id)
             ).all()
             team_memberships = session.execute(
-                select(TeamMembership, Team)
-                .join(Team, Team.team_id == TeamMembership.team_id)
+                select(models.TeamMembership, models.Team)
+                .join(models.Team, models.Team.team_id == models.TeamMembership.team_id)
                 .where(
-                    TeamMembership.user_id == user_id,
-                    TeamMembership.active,
-                    Team.active,
+                    models.TeamMembership.user_id == user_id,
+                    models.TeamMembership.active,
+                    models.Team.active,
                 )
-                .order_by(Team.name, Team.team_id)
+                .order_by(models.Team.name, models.Team.team_id)
             ).all()
             if api_context is not None:
                 workspace_memberships = [
@@ -98,32 +103,32 @@ class WorkspaceQueries(QueryComponent):
             if workspace_ids:
                 count_rows = session.execute(
                     select(
-                        WorkspaceMembership.workspace_id,
-                        User.principal_type,
-                        func.count(User.user_id),
+                        models.WorkspaceMembership.workspace_id,
+                        models.User.principal_type,
+                        func.count(models.User.user_id),
                     )
-                    .join(User, User.user_id == WorkspaceMembership.user_id)
+                    .join(models.User, models.User.user_id == models.WorkspaceMembership.user_id)
                     .where(
-                        WorkspaceMembership.workspace_id.in_(workspace_ids),
-                        WorkspaceMembership.active,
-                        User.active,
+                        models.WorkspaceMembership.workspace_id.in_(workspace_ids),
+                        models.WorkspaceMembership.active,
+                        models.User.active,
                     )
-                    .group_by(WorkspaceMembership.workspace_id, User.principal_type)
+                    .group_by(models.WorkspaceMembership.workspace_id, models.User.principal_type)
                 ).all()
                 for workspace_id, principal_type, count in count_rows:
-                    key = "human" if principal_type == PrincipalType.HUMAN.value else "agent"
+                    key = "human" if principal_type == domain.PrincipalType.HUMAN.value else "agent"
                     workspace_principal_counts[workspace_id][key] = int(count)
-            accessible_teams_by_workspace: dict[UUID, list[Team]] = {}
+            accessible_teams_by_workspace: dict[UUID, list[models.Team]] = {}
             for _membership, team in team_memberships:
                 accessible_teams_by_workspace.setdefault(team.workspace_id, []).append(team)
             roles = session.scalars(
-                select(RoleAssignment)
+                select(models.RoleAssignment)
                 .where(
-                    RoleAssignment.user_id == user_id,
-                    RoleAssignment.team_id
+                    models.RoleAssignment.user_id == user_id,
+                    models.RoleAssignment.team_id
                     == (api_context.team_id if api_context is not None else user.active_team_id),
                 )
-                .order_by(RoleAssignment.role)
+                .order_by(models.RoleAssignment.role)
             ).all()
             active_workspace = next(
                 (
@@ -245,33 +250,35 @@ class WorkspaceQueries(QueryComponent):
             }
 
     def managed_users(self, actor_id: UUID) -> list[dict[str, Any]]:
-        if not self.service.can_user(actor_id, "user.manage"):
-            raise DomainRejected("RBAC_DENIED", "user access management requires SYSTEM_ADMIN")
+        if not self.can_user(actor_id, "user.manage"):
+            raise domain.DomainRejected(
+                "RBAC_DENIED", "user access management requires SYSTEM_ADMIN"
+            )
         with self.database.session_factory() as session:
-            actor = session.get(User, actor_id)
+            actor = session.get(models.User, actor_id)
             if actor is None or actor.active_team_id is None:
-                raise DomainRejected("TEAM_CONTEXT_REQUIRED", "select an active team")
+                raise domain.DomainRejected("TEAM_CONTEXT_REQUIRED", "select an active team")
             users = session.scalars(
-                select(User)
-                .join(TeamMembership, TeamMembership.user_id == User.user_id)
-                .where(User.principal_type == PrincipalType.HUMAN.value)
-                .where(TeamMembership.team_id == actor.active_team_id)
-                .order_by(User.username)
+                select(models.User)
+                .join(models.TeamMembership, models.TeamMembership.user_id == models.User.user_id)
+                .where(models.User.principal_type == domain.PrincipalType.HUMAN.value)
+                .where(models.TeamMembership.team_id == actor.active_team_id)
+                .order_by(models.User.username)
             ).all()
             assignments = session.scalars(
-                select(RoleAssignment)
+                select(models.RoleAssignment)
                 .where(
-                    RoleAssignment.user_id.in_([item.user_id for item in users]),
-                    RoleAssignment.team_id == actor.active_team_id,
+                    models.RoleAssignment.user_id.in_([item.user_id for item in users]),
+                    models.RoleAssignment.team_id == actor.active_team_id,
                 )
-                .order_by(RoleAssignment.role)
+                .order_by(models.RoleAssignment.role)
             ).all()
             memberships = {
                 item.user_id: item
                 for item in session.scalars(
-                    select(TeamMembership).where(
-                        TeamMembership.team_id == actor.active_team_id,
-                        TeamMembership.user_id.in_([item.user_id for item in users]),
+                    select(models.TeamMembership).where(
+                        models.TeamMembership.team_id == actor.active_team_id,
+                        models.TeamMembership.user_id.in_([item.user_id for item in users]),
                     )
                 )
             }
@@ -294,7 +301,7 @@ class WorkspaceQueries(QueryComponent):
                     "workspace_id": str(actor.active_workspace_id),
                     "team_id": str(actor.active_team_id),
                     "roles": by_user[user.user_id],
-                    "created_at": _iso(user.created_at),
+                    "created_at": iso_datetime(user.created_at),
                     "is_current_user": user.user_id == actor_id,
                 }
                 for user in users
@@ -306,50 +313,52 @@ class WorkspaceQueries(QueryComponent):
         *,
         now: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        if current_api_client_context() is not None:
-            raise DomainRejected(
+        if request_context.current_api_client_context() is not None:
+            raise domain.DomainRejected(
                 "HUMAN_WEB_CONFIRMATION_REQUIRED",
                 "API Key inventory is available only in an interactive HUMAN session",
             )
         observed_at = datetime.now(UTC) if now is None else now
         with self.database.session_factory() as session:
-            owner = session.get(User, owner_id)
+            owner = session.get(models.User, owner_id)
             if (
                 owner is None
                 or not owner.active
-                or owner.principal_type != PrincipalType.HUMAN.value
+                or owner.principal_type != domain.PrincipalType.HUMAN.value
             ):
-                raise DomainRejected("SESSION_REVOKED", "internal user is inactive or missing")
+                raise domain.DomainRejected(
+                    "SESSION_REVOKED", "internal user is inactive or missing"
+                )
             clients = session.scalars(
-                select(ApiClient)
-                .where(ApiClient.owner_user_id == owner_id)
-                .order_by(ApiClient.created_at.desc(), ApiClient.api_client_id)
+                select(models.ApiClient)
+                .where(models.ApiClient.owner_user_id == owner_id)
+                .order_by(models.ApiClient.created_at.desc(), models.ApiClient.api_client_id)
             ).all()
             result: list[dict[str, Any]] = []
             for client in clients:
-                workspace = session.get(Workspace, client.workspace_id)
-                team = session.get(Team, client.team_id)
+                workspace = session.get(models.Workspace, client.workspace_id)
+                team = session.get(models.Team, client.team_id)
                 workspace_membership = session.scalar(
-                    select(WorkspaceMembership).where(
-                        WorkspaceMembership.workspace_id == client.workspace_id,
-                        WorkspaceMembership.user_id == owner_id,
-                        WorkspaceMembership.active,
+                    select(models.WorkspaceMembership).where(
+                        models.WorkspaceMembership.workspace_id == client.workspace_id,
+                        models.WorkspaceMembership.user_id == owner_id,
+                        models.WorkspaceMembership.active,
                     )
                 )
                 team_membership = session.scalar(
-                    select(TeamMembership).where(
-                        TeamMembership.team_id == client.team_id,
-                        TeamMembership.user_id == owner_id,
-                        TeamMembership.active,
+                    select(models.TeamMembership).where(
+                        models.TeamMembership.team_id == client.team_id,
+                        models.TeamMembership.user_id == owner_id,
+                        models.TeamMembership.active,
                     )
                 )
                 assignments = session.scalars(
-                    select(RoleAssignment)
+                    select(models.RoleAssignment)
                     .where(
-                        RoleAssignment.user_id == owner_id,
-                        RoleAssignment.team_id == client.team_id,
+                        models.RoleAssignment.user_id == owner_id,
+                        models.RoleAssignment.team_id == client.team_id,
                     )
-                    .order_by(RoleAssignment.role)
+                    .order_by(models.RoleAssignment.role)
                 ).all()
                 effective_roles = sorted({assignment.role for assignment in assignments})
                 access_status = (
@@ -363,9 +372,9 @@ class WorkspaceQueries(QueryComponent):
                 )
                 token_status = (
                     "REVOKED"
-                    if client.state == ApiClientState.REVOKED.value
+                    if client.state == domain.ApiClientState.REVOKED.value
                     else "DISABLED"
-                    if client.state == ApiClientState.DISABLED.value
+                    if client.state == domain.ApiClientState.DISABLED.value
                     else "EXPIRED"
                     if client.token_expires_at <= observed_at
                     else "BLOCKED"
@@ -398,58 +407,60 @@ class WorkspaceQueries(QueryComponent):
                             "status": token_status,
                             "hint": client.token_hint,
                             "version": client.token_version,
-                            "created_at": _iso(client.token_created_at),
-                            "expires_at": _iso(client.token_expires_at),
-                            "last_used_at": _iso(client.token_last_used_at),
+                            "created_at": iso_datetime(client.token_created_at),
+                            "expires_at": iso_datetime(client.token_expires_at),
+                            "last_used_at": iso_datetime(client.token_last_used_at),
                         },
-                        "revoked_at": _iso(client.revoked_at),
-                        "created_at": _iso(client.created_at),
-                        "updated_at": _iso(client.updated_at),
+                        "revoked_at": iso_datetime(client.revoked_at),
+                        "created_at": iso_datetime(client.created_at),
+                        "updated_at": iso_datetime(client.updated_at),
                     }
                 )
             return result
 
     def api_client_scopes(self, owner_id: UUID) -> list[dict[str, Any]]:
-        if current_api_client_context() is not None:
-            raise DomainRejected(
+        if request_context.current_api_client_context() is not None:
+            raise domain.DomainRejected(
                 "HUMAN_WEB_CONFIRMATION_REQUIRED",
                 "API Key Team selection requires an interactive HUMAN session",
             )
         with self.database.session_factory() as session:
-            owner = session.get(User, owner_id)
+            owner = session.get(models.User, owner_id)
             if owner is None or not owner.active:
-                raise DomainRejected("SESSION_REVOKED", "internal user is inactive or missing")
+                raise domain.DomainRejected(
+                    "SESSION_REVOKED", "internal user is inactive or missing"
+                )
             rows = session.execute(
-                select(Team, Workspace)
-                .join(Workspace, Workspace.workspace_id == Team.workspace_id)
+                select(models.Team, models.Workspace)
+                .join(models.Workspace, models.Workspace.workspace_id == models.Team.workspace_id)
                 .join(
-                    TeamMembership,
+                    models.TeamMembership,
                     and_(
-                        TeamMembership.team_id == Team.team_id,
-                        TeamMembership.user_id == owner_id,
-                        TeamMembership.active,
+                        models.TeamMembership.team_id == models.Team.team_id,
+                        models.TeamMembership.user_id == owner_id,
+                        models.TeamMembership.active,
                     ),
                 )
                 .join(
-                    WorkspaceMembership,
+                    models.WorkspaceMembership,
                     and_(
-                        WorkspaceMembership.workspace_id == Workspace.workspace_id,
-                        WorkspaceMembership.user_id == owner_id,
-                        WorkspaceMembership.active,
+                        models.WorkspaceMembership.workspace_id == models.Workspace.workspace_id,
+                        models.WorkspaceMembership.user_id == owner_id,
+                        models.WorkspaceMembership.active,
                     ),
                 )
                 .where(
-                    Team.active,
-                    Workspace.active,
+                    models.Team.active,
+                    models.Workspace.active,
                 )
-                .order_by(Workspace.name, Team.name, Team.team_id)
+                .order_by(models.Workspace.name, models.Team.name, models.Team.team_id)
             ).all()
             result: list[dict[str, Any]] = []
             for team, workspace in rows:
                 assignments = session.scalars(
-                    select(RoleAssignment).where(
-                        RoleAssignment.user_id == owner_id,
-                        RoleAssignment.team_id == team.team_id,
+                    select(models.RoleAssignment).where(
+                        models.RoleAssignment.user_id == owner_id,
+                        models.RoleAssignment.team_id == team.team_id,
                     )
                 ).all()
                 if not assignments:
@@ -470,18 +481,22 @@ class WorkspaceQueries(QueryComponent):
 
     def telegram_chat_id(self, user_id: UUID) -> str | None:
         with self.database.session_factory() as session:
-            user = session.get(User, user_id)
-            if user is None or not user.active or user.principal_type != PrincipalType.HUMAN.value:
+            user = session.get(models.User, user_id)
+            if (
+                user is None
+                or not user.active
+                or user.principal_type != domain.PrincipalType.HUMAN.value
+            ):
                 return None
             return user.telegram_chat_id
 
     def telegram_user_id(self, chat_id: str) -> UUID | None:
         with self.database.session_factory() as session:
             user = session.scalar(
-                select(User).where(
-                    User.telegram_chat_id == chat_id,
-                    User.active,
-                    User.principal_type == PrincipalType.HUMAN.value,
+                select(models.User).where(
+                    models.User.telegram_chat_id == chat_id,
+                    models.User.active,
+                    models.User.principal_type == domain.PrincipalType.HUMAN.value,
                 )
             )
             return None if user is None else user.user_id
@@ -492,30 +507,32 @@ class WorkspaceQueries(QueryComponent):
         *,
         limit: int = 100,
     ) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(user_id)
-        if not self.service.can_user(user_id, "notification.view"):
-            raise DomainRejected(
+        workspace_id, team_id = self.active_scope_ids(user_id)
+        if not self.can_user(user_id, "notification.view"):
+            raise domain.DomainRejected(
                 "RBAC_DENIED",
                 "notification.view is not allowed in the active team",
             )
         bounded_limit = min(max(limit, 1), 200)
-        can_manage = self.service.can_user(user_id, "notification.manage")
+        can_manage = self.can_user(user_id, "notification.manage")
         with self.database.session_factory() as session:
-            team = session.get(Team, team_id)
+            team = session.get(models.Team, team_id)
             routes = session.scalars(
-                select(NotificationRoute)
+                select(models.NotificationRoute)
                 .where(
-                    NotificationRoute.team_id == team_id,
-                    NotificationRoute.deleted_at.is_(None),
+                    models.NotificationRoute.team_id == team_id,
+                    models.NotificationRoute.deleted_at.is_(None),
                 )
-                .order_by(NotificationRoute.name, NotificationRoute.notification_route_id)
+                .order_by(
+                    models.NotificationRoute.name, models.NotificationRoute.notification_route_id
+                )
             ).all()
             deliveries = session.scalars(
-                select(NotificationDelivery)
-                .where(NotificationDelivery.team_id == team_id)
+                select(models.NotificationDelivery)
+                .where(models.NotificationDelivery.team_id == team_id)
                 .order_by(
-                    NotificationDelivery.created_at.desc(),
-                    NotificationDelivery.notification_delivery_id.desc(),
+                    models.NotificationDelivery.created_at.desc(),
+                    models.NotificationDelivery.notification_delivery_id.desc(),
                 )
                 .limit(bounded_limit)
             ).all()
@@ -523,11 +540,11 @@ class WorkspaceQueries(QueryComponent):
                 str(status): int(count)
                 for status, count in session.execute(
                     select(
-                        NotificationDelivery.status,
-                        func.count(NotificationDelivery.notification_delivery_id),
+                        models.NotificationDelivery.status,
+                        func.count(models.NotificationDelivery.notification_delivery_id),
                     )
-                    .where(NotificationDelivery.team_id == team_id)
-                    .group_by(NotificationDelivery.status)
+                    .where(models.NotificationDelivery.team_id == team_id)
+                    .group_by(models.NotificationDelivery.status)
                 )
             }
             return {
@@ -551,16 +568,16 @@ class WorkspaceQueries(QueryComponent):
                         "title": template.title,
                         "integration_status": (
                             "ACTIVE"
-                            if template.event_type in ROUTABLE_NOTIFICATION_EVENT_TYPES
+                            if template.event_type in notification.ROUTABLE_NOTIFICATION_EVENT_TYPES
                             else "SCOPE_MIGRATION_REQUIRED"
                         ),
                         "blocker": (
                             None
-                            if template.event_type in ROUTABLE_NOTIFICATION_EVENT_TYPES
+                            if template.event_type in notification.ROUTABLE_NOTIFICATION_EVENT_TYPES
                             else ("团队资金真源尚未迁移完成; 不会把旧资金对象猜测映射到团队。")
                         ),
                     }
-                    for template in NOTIFICATION_TEMPLATES.values()
+                    for template in notification.NOTIFICATION_TEMPLATES.values()
                     if template.event_type != "TEST_NOTIFICATION"
                 ],
                 "routes": [
@@ -577,7 +594,7 @@ class WorkspaceQueries(QueryComponent):
                         "configuration_metadata": route.configuration_metadata,
                         "credential_version": route.credential_version,
                         "version": route.version,
-                        "updated_at": _iso(route.updated_at),
+                        "updated_at": iso_datetime(route.updated_at),
                     }
                     for route in routes
                 ],
@@ -602,12 +619,12 @@ class WorkspaceQueries(QueryComponent):
                         "status": delivery.status,
                         "attempt_count": delivery.attempt_count,
                         "max_attempts": delivery.max_attempts,
-                        "next_attempt_at": _iso(delivery.next_attempt_at),
-                        "last_attempt_at": _iso(delivery.last_attempt_at),
-                        "sent_at": _iso(delivery.sent_at),
+                        "next_attempt_at": iso_datetime(delivery.next_attempt_at),
+                        "last_attempt_at": iso_datetime(delivery.last_attempt_at),
+                        "sent_at": iso_datetime(delivery.sent_at),
                         "last_error_code": delivery.last_error_code,
-                        "created_at": _iso(delivery.created_at),
-                        "updated_at": _iso(delivery.updated_at),
+                        "created_at": iso_datetime(delivery.created_at),
+                        "updated_at": iso_datetime(delivery.updated_at),
                     }
                     for delivery in deliveries
                 ],

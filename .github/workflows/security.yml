@@ -3,7 +3,7 @@ name: Security
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, codex/trading-production-validation]
   schedule:
     - cron: "17 3 * * 1"
 

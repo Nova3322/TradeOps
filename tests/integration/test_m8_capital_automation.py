@@ -84,6 +84,10 @@ def close_profitable_testnet_campaign(
         expires_at=now + timedelta(hours=2),
         idempotency_key="m8-trade-proposal",
         environment=ExecutionEnvironment.TESTNET,
+        details={
+            "trigger_price": "100",
+            "invalidation_price": "90",
+        },
         now=now,
     )
     service.submit_proposal(proposal_id, proposer, now=now)

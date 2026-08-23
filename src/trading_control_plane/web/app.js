@@ -1,12 +1,10 @@
 function navigate(path) { focusNextRouteHeading = true; history.pushState({}, '', path); route(); }
 function updateActiveNav() {
-  const proposalSource = new URLSearchParams(location.search).get('from');
   document.querySelectorAll('#sidebar nav a').forEach((link) => {
     const href = link.getAttribute('href');
     const active = location.pathname === href
       || (href === '/venues' && location.pathname.startsWith('/venues/'))
-      || (href === '/reviews' && location.pathname.startsWith('/proposals/') && proposalSource === 'reviews')
-      || (href === '/proposals' && location.pathname.startsWith('/proposals/') && proposalSource !== 'reviews')
+      || (href === '/reviews' && /^\/proposals\/[0-9a-f-]+$/i.test(location.pathname))
       || (href === '/campaigns' && location.pathname.startsWith('/campaigns/'));
     link.classList.toggle('active', active);
     if (active) {
@@ -17,6 +15,12 @@ function updateActiveNav() {
 }
 
 document.addEventListener('click', (event) => {
+  const modeSwitchControl = event.target.closest('[data-open-mode-switch]');
+  if (modeSwitchControl) {
+    event.preventDefault();
+    openTeamModeDropdown();
+    return;
+  }
   const workspaceOption = event.target.closest('[data-switch-workspace]');
   if (workspaceOption) {
     event.preventDefault();
@@ -31,6 +35,7 @@ document.addEventListener('click', (event) => {
   preferenceSelects.forEach((select, kind) => {
     if (!select.contains(event.target)) closePreferenceDropdown(kind);
   });
+  if (!teamModeSelect.contains(event.target)) closeTeamModeDropdown();
   if (!userMenu.contains(event.target)) closeUserMenu();
 });
 window.addEventListener('popstate', route);
@@ -64,6 +69,10 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && sidebar.classList.contains('open')) closeMobileNav();
   if (event.key === 'Escape' && !scopeSwitcherMenu.hidden) closeWorkspaceSwitcher({restoreFocus:true});
   if (event.key === 'Escape' && closePreferenceDropdowns({restoreFocus:true})) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === 'Escape' && closeTeamModeDropdown({restoreFocus:true})) {
     event.preventDefault();
     return;
   }
@@ -178,6 +187,7 @@ function closePreferenceDropdowns({except = null, restoreFocus = false} = {}) {
 
 function openPreferenceDropdown(kind, {focus = 'selected'} = {}) {
   const {trigger, menu} = preferenceElements(kind);
+  closeTeamModeDropdown();
   closePreferenceDropdowns({except:kind});
   menu.hidden = false;
   trigger.setAttribute('aria-expanded', 'true');
@@ -312,6 +322,7 @@ if (storedLanguagePreference && storedLanguagePreference !== currentLanguage) {
 const storedThemePreference = localStorage.getItem(THEME_STORAGE_KEY);
 currentThemePreference = normalizeThemePreference(storedThemePreference);
 initializePreferenceDropdowns();
+initializeTeamModeDropdown();
 applyTheme(currentThemePreference, {
   persist:Boolean(storedThemePreference && storedThemePreference !== currentThemePreference),
 });

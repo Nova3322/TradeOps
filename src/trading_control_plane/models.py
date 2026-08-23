@@ -223,7 +223,7 @@ class ExchangeAccount(Base):
         CheckConstraint("version >= 1", name="ck_exchange_accounts_version"),
         CheckConstraint("credential_version >= 0", name="ck_exchange_accounts_credential_version"),
         CheckConstraint(
-            "freqtrade_worker_mode IN ('UNCONFIGURED','DRY_RUN','LIVE')",
+            "freqtrade_worker_mode IN ('UNCONFIGURED','DRY_RUN','TESTNET','LIVE')",
             name="ck_exchange_accounts_freqtrade_worker_mode",
         ),
         CheckConstraint(
@@ -240,7 +240,7 @@ class ExchangeAccount(Base):
             "AND freqtrade_worker_status = 'UNCONFIGURED' "
             "AND freqtrade_worker_name IS NULL AND freqtrade_worker_url IS NULL "
             "AND freqtrade_auth_ciphertext IS NULL AND freqtrade_auth_version = 0) OR "
-            "(freqtrade_worker_mode IN ('DRY_RUN','LIVE') "
+            "(freqtrade_worker_mode IN ('DRY_RUN','TESTNET','LIVE') "
             "AND freqtrade_worker_status <> 'UNCONFIGURED' "
             "AND freqtrade_worker_name IS NOT NULL AND freqtrade_worker_url IS NOT NULL "
             "AND freqtrade_auth_ciphertext IS NOT NULL AND freqtrade_auth_version >= 1 "
@@ -323,6 +323,12 @@ class ExchangeAccount(Base):
     freqtrade_auth_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     freqtrade_hip3_dexes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     freqtrade_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    freqtrade_runtime_fingerprint: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    freqtrade_runtime_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
     freqtrade_last_check_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -529,7 +535,7 @@ class Instrument(Base):
         UniqueConstraint("venue", "symbol", name="uq_instruments_venue_symbol"),
         CheckConstraint("tick_size > 0", name="ck_instruments_tick_size_positive"),
         CheckConstraint("lot_size > 0", name="ck_instruments_lot_size_positive"),
-        CheckConstraint("minimum_notional >= 0", name="ck_instruments_min_notional_nonnegative"),
+        CheckConstraint("minimum_notional > 0", name="ck_instruments_min_notional_positive"),
         CheckConstraint("contract_multiplier > 0", name="ck_instruments_multiplier_positive"),
     )
 
@@ -693,6 +699,9 @@ class NotificationRoute(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     configuration_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
     configuration_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    recipient_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=True
+    )
     credential_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
@@ -747,6 +756,11 @@ class NotificationDelivery(Base):
             "team_id",
             "created_at",
         ),
+        Index(
+            "ix_notification_deliveries_recipient",
+            "recipient_user_id",
+            "created_at",
+        ),
     )
 
     notification_delivery_id: Mapped[UUID] = mapped_column(
@@ -770,6 +784,9 @@ class NotificationDelivery(Base):
     environment: Mapped[str | None] = mapped_column(String(16), nullable=True)
     account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     venue: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    recipient_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(24), nullable=False)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
@@ -862,6 +879,9 @@ class Proposal(Base):
             name="ck_proposals_status",
         ),
         CheckConstraint("quantity > 0", name="ck_proposals_quantity_positive"),
+        CheckConstraint(
+            "leverage IS NULL OR leverage > 0", name="ck_proposals_leverage_positive"
+        ),
         CheckConstraint("max_risk > 0", name="ck_proposals_risk_positive"),
         CheckConstraint(
             "source = 'MANUAL' OR (strategy_id IS NOT NULL AND strategy_version IS NOT NULL)",
@@ -927,6 +947,7 @@ class Proposal(Base):
     instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
     direction: Mapped[str] = mapped_column(String(16), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    leverage: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     max_risk: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     frozen_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -1020,6 +1041,12 @@ class RuntimeSourceHealth(Base):
             name="ck_runtime_source_health_failures_nonnegative",
         ),
         CheckConstraint(
+            "source_name NOT IN ('BINANCE','HYPERLIQUID','OKX','BYBIT') "
+            "OR error_code IS NULL OR error_code NOT LIKE '%RATE_LIMITED%' "
+            "OR retry_at IS NULL",
+            name="ck_runtime_source_health_exchange_cooldown_ephemeral",
+        ),
+        CheckConstraint(
             "(account_id IS NULL AND venue IS NULL) OR "
             "(account_id IS NOT NULL AND venue IN "
             "('BINANCE','HYPERLIQUID','OKX','BYBIT'))",
@@ -1052,6 +1079,31 @@ class RuntimeSourceHealth(Base):
     retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+
+
+class BinanceApiState(Base):
+    """Deployment-wide Binance caches, schedules, and clock state.
+
+    IP-scoped cooldowns and request-weight headers are deliberately process-local
+    so a changed production egress IP cannot inherit a previous IP's ban.
+    """
+
+    __tablename__ = "binance_api_state"
+
+    scope_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    clock_offset_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    clock_synchronized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    exchange_info: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    exchange_info_cached_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    history_schedules: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class TransferProposal(Base):
@@ -1533,6 +1585,16 @@ class DirectCapitalOperation(Base):
     destination_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
     stages: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
     blockers: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    receipt_poll_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    receipt_poll_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    receipt_poll_token: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    receipt_next_due_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    receipt_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    receipt_last_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     execute_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     final_confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -1540,6 +1602,42 @@ class DirectCapitalOperation(Base):
     correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class BinanceCapitalOutbox(Base):
+    """Durable fence around every Binance capital write attempt."""
+
+    __tablename__ = "binance_capital_outbox"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id", "stage", name="uq_binance_capital_outbox_operation_stage"
+        ),
+        CheckConstraint(
+            "status IN ('NEVER_ATTEMPTED','ATTEMPTING','CONFIRMED','UNKNOWN')",
+            name="ck_binance_capital_outbox_status",
+        ),
+        CheckConstraint("attempt_count >= 0", name="ck_binance_capital_outbox_attempts"),
+        Index("ix_binance_capital_outbox_status", "status", "updated_at"),
+    )
+
+    outbox_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    operation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("direct_capital_operations.operation_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    stage: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    external_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -1752,6 +1850,9 @@ class RiskDecision(Base):
         CheckConstraint("result IN ('ALLOW','SCALE','DENY')", name="ck_risk_decisions_result"),
         CheckConstraint("approved_quantity >= 0", name="ck_risk_decisions_quantity_nonnegative"),
         CheckConstraint("risk_amount >= 0", name="ck_risk_decisions_risk_nonnegative"),
+        CheckConstraint(
+            "leverage IS NULL OR leverage > 0", name="ck_risk_decisions_leverage_positive"
+        ),
         Index("ix_risk_decisions_proposal_created", "proposal_id", "created_at"),
         ForeignKeyConstraint(
             ["team_id", "proposal_id"],
@@ -1776,6 +1877,7 @@ class RiskDecision(Base):
     input_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     result: Mapped[str] = mapped_column(String(16), nullable=False)
     approved_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    leverage: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     risk_amount: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     reasons: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     data_as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -1804,6 +1906,10 @@ class TradingAuthorization(Base):
             "used_quantity <= quantity_limit", name="ck_authorizations_used_within_limit"
         ),
         CheckConstraint("risk_limit > 0", name="ck_authorizations_risk_positive"),
+        CheckConstraint(
+            "leverage IS NULL OR leverage > 0",
+            name="ck_trading_authorizations_leverage_positive",
+        ),
         CheckConstraint("allowed_adds >= 0", name="ck_authorizations_adds_nonnegative"),
         CheckConstraint(
             "used_adds >= 0 AND used_adds <= allowed_adds", name="ck_authorizations_adds"
@@ -1830,6 +1936,7 @@ class TradingAuthorization(Base):
     instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
     direction: Mapped[str] = mapped_column(String(16), nullable=False)
     quantity_limit: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    leverage: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     used_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False, default=Decimal(0))
     risk_limit: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -1980,6 +2087,9 @@ class OrderIntent(Base):
         ),
         CheckConstraint("quantity > 0", name="ck_order_intents_quantity_positive"),
         CheckConstraint(
+            "leverage IS NULL OR leverage > 0", name="ck_order_intents_leverage_positive"
+        ),
+        CheckConstraint(
             "limit_price IS NULL OR limit_price > 0",
             name="ck_order_intents_limit_price_positive",
         ),
@@ -2010,6 +2120,7 @@ class OrderIntent(Base):
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     side: Mapped[str] = mapped_column(String(8), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    leverage: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     limit_price: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
     trigger_source: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -2032,6 +2143,21 @@ class OrderIntent(Base):
     dispatch_fencing_token: Mapped[int | None] = mapped_column(Integer, nullable=True)
     dispatch_external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     dispatch_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    execution_blocker_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    execution_blocker_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_blocker_component: Mapped[str | None] = mapped_column(
+        String(120), nullable=True
+    )
+    execution_blocker_next_action: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_blocked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    execution_last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    execution_retry_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)

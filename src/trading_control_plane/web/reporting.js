@@ -12,7 +12,7 @@ async function renderRuntimeAlerts() {
   }).join('');
   main.innerHTML = `<section class="page exceptions-page"><header class="page-head"><div><p class="eyebrow">交易任务 · 运行告警详情</p><h1>运行告警</h1><p class="lede">只展示运行中生产交易任务需要人工处理的问题；风险恢复、资金异常和系统健康分别保留在各自页面。</p></div><div class="toolbar"><a class="secondary" href="/campaigns" data-link>返回交易任务</a><button class="secondary" data-refresh>刷新</button></div></header>
     <div class="stats exception-stats"><div class="stat"><small>受影响交易任务</small><b class="${affectedCampaigns.size ? 'danger-text' : ''}">${affectedCampaigns.size}</b></div><div class="stat"><small>运行问题</small><b>${items.length}</b></div><div class="stat"><small>结果未知</small><b class="${unknownCount ? 'danger-text' : ''}">${unknownCount}</b></div><div class="stat"><small>数据过期</small><b class="${staleCount ? 'warning-text' : ''}">${staleCount}</b><span>最近检查 ${fmtDate(result.as_of)}</span></div></div>
-    ${items.length ? `<div class="exception-grid">${cards}</div>` : `<section class="empty-state"><div><h2>无运行告警 / 当前无需处理</h2><p>检查范围：运行中的生产交易任务；未发现结果未知、数据过期、保护不足或对账差异。已关闭记录不会重新计入当前待办。</p><p class="subtle">最近检查：${fmtDate(result.as_of)}</p><div class="toolbar empty-actions"><a class="secondary" href="/home" data-link>返回当前任务</a><a class="primary" href="/campaigns" data-link>查看交易任务</a></div></div></section>`}</section>`;
+    ${items.length ? `<div class="exception-grid">${cards}</div>` : `<section class="empty-state"><div><h2>无告警</h2><p>检查范围：运行中的生产交易任务；未发现结果未知、数据过期、保护不足或对账差异。已关闭记录不会重新计入当前待办。</p><p class="subtle">最近检查：${fmtDate(result.as_of)}</p><div class="toolbar empty-actions"><a class="secondary" href="/home" data-link>返回当前任务</a><a class="primary" href="/campaigns" data-link>查看交易任务</a></div></div></section>`}</section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
 }
 
@@ -197,8 +197,11 @@ function notificationRoutePayload(form) {
 }
 
 async function renderNotifications() {
-  const data = await api('/api/notifications');
+  const data = await api('/api/notifications?limit=200');
   const routesById = new Map(data.routes.map(item => [item.notification_route_id, item]));
+  const deliveries = [...data.deliveries].sort((left, right) =>
+    new Date(right.created_at) - new Date(left.created_at)
+    || String(right.notification_delivery_id).localeCompare(String(left.notification_delivery_id)));
   const defaultEvents = ['PROPOSAL_REVIEW_REQUIRED','RISK_DECISION_RECORDED'];
   const counts = data.delivery_status_counts || {};
   const waiting = (counts.PENDING || 0) + (counts.RETRY_WAIT || 0) + (counts.SENDING || 0);
@@ -211,10 +214,11 @@ async function renderNotifications() {
     if (!data.can_manage) return `<article class="card notification-route-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(fmtExecutionMode(item.environment || 'LIVE'))} · ${escapeHtml(notificationChannelLabel(item.channel))} · ${escapeHtml(destination)}</p><h2>${escapeHtml(item.name)}</h2></div><span class="status-pill ${item.enabled ? 'status-APPROVED' : 'status-DISABLED'}">${item.enabled ? '已启用' : '已停用'}</span></div><div class="tag-row">${eventTags}</div><dl class="definition-grid">${definition('配置状态', 'AES-256-GCM 加密')}${definition('路由 / 凭据版本', `${item.version} / ${item.credential_version}`)}${definition('最近更新', fmtDate(item.updated_at))}</dl></article>`;
     return `<article class="card notification-route-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(fmtExecutionMode(item.environment || 'LIVE'))} · ${escapeHtml(notificationChannelLabel(item.channel))} · ${escapeHtml(destination)}</p><h2>${escapeHtml(item.name)}</h2></div><span class="status-pill ${item.enabled ? 'status-APPROVED' : 'status-DISABLED'}">${item.enabled ? '已启用' : '已停用'}</span></div><form class="notification-route-form" data-route-id="${escapeHtml(item.notification_route_id)}" data-route-name="${escapeHtml(item.name)}" data-version="${item.version}" data-channel="${escapeHtml(item.channel)}"><input name="environment" type="hidden" value="${escapeHtml(item.environment || 'LIVE')}"><div class="field-grid"><label>路由名称<input name="name" value="${escapeHtml(item.name)}" maxlength="120" required></label><label>通知渠道<input value="${escapeHtml(notificationChannelLabel(item.channel))}" disabled><input name="channel" type="hidden" value="${escapeHtml(item.channel)}"></label><label>路由状态<select name="enabled"><option value="true" ${item.enabled ? 'selected' : ''}>启用</option><option value="false" ${item.enabled ? '' : 'selected'}>停用</option></select></label></div><fieldset><legend>订阅事件</legend><div class="notification-event-grid">${notificationEventOptions(data.event_catalog, item.event_types)}</div></fieldset><details class="notification-credential-rotate"><summary><span><b>轮换加密渠道配置</b><small>留空则保留当前凭据版本</small></span><strong>展开</strong></summary><div class="field-grid">${notificationConfigurationFields(item.channel)}</div></details><div class="form-error" role="alert"></div><div class="form-actions"><button class="secondary" type="button" data-notification-test ${item.enabled ? '' : 'disabled title="先启用并保存路由"'}>加入测试队列</button><button class="primary" type="submit">保存路由版本</button><button class="danger" type="button" data-delete-notification-route>删除路由</button></div></form></article>`;
   }).join('');
-  const deliveryRows = data.deliveries.map(item => {
+  const deliveryRows = deliveries.map(item => {
     const route = routesById.get(item.notification_route_id);
     const timing = item.status === 'RETRY_WAIT' ? `下次 ${fmtDate(item.next_attempt_at)}` : item.sent_at ? fmtDate(item.sent_at) : fmtDate(item.created_at);
-    return `<tr><td data-label="事件"><b>${escapeHtml(notificationEventLabel(item.event_type))}</b><br><span class="subtle">${escapeHtml(item.payload?.summary || item.object_type)}</span></td><td data-label="路由">${escapeHtml(route?.name || shortId(item.notification_route_id))}<br><span class="subtle">${escapeHtml(notificationChannelLabel(item.channel))}</span></td><td data-label="范围">${escapeHtml(item.environment || '团队级')}<br><span class="subtle">${escapeHtml([item.account_id,item.venue].filter(Boolean).join(' · ') || '无账户范围')}</span></td><td data-label="状态"><span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span><br><span class="subtle">${item.attempt_count} / ${item.max_attempts} 次</span></td><td data-label="时间">${escapeHtml(timing)}</td><td data-label="错误">${escapeHtml(item.last_error_code || '—')}</td></tr>`;
+    const search = `${notificationEventLabel(item.event_type)} ${item.event_type} ${item.payload?.summary || ''} ${item.object_type || ''} ${item.object_id || ''} ${route?.name || ''} ${item.account_id || ''} ${item.venue || ''} ${item.last_error_code || ''}`.toLowerCase();
+    return `<tr data-notification-row data-search="${escapeHtml(search)}" data-channel="${escapeHtml(item.channel)}" data-status="${escapeHtml(item.status)}" data-environment="${escapeHtml(item.environment || '')}"><td data-label="事件"><b>${escapeHtml(notificationEventLabel(item.event_type))}</b><br><span class="subtle">${escapeHtml(item.payload?.summary || item.object_type)}</span></td><td data-label="路由">${escapeHtml(route?.name || shortId(item.notification_route_id))}<br><span class="subtle">${escapeHtml(notificationChannelLabel(item.channel))}</span></td><td data-label="范围">${escapeHtml(item.environment || '团队级')}<br><span class="subtle">${escapeHtml([item.account_id,item.venue].filter(Boolean).join(' · ') || '无账户范围')}</span></td><td data-label="状态"><span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span><br><span class="subtle">${item.attempt_count} / ${item.max_attempts} 次</span></td><td data-label="时间">${escapeHtml(timing)}</td><td data-label="错误">${escapeHtml(item.last_error_code || '—')}</td></tr>`;
   }).join('');
   const blockedCatalog = data.event_catalog.filter(item => item.integration_status !== 'ACTIVE');
   main.innerHTML = `<section class="page notification-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(data.scope.team_name)} · 团队级路由</p><h1>通知中心</h1><p class="lede">统一管理 Telegram、Slack、飞书 / Lark 和邮件。事件先写入当前团队的持久化投递队列；API 不直接外发，由独立最小权限进程发送。</p></div><button class="secondary" data-refresh>刷新投递事实</button></header>
@@ -223,7 +227,7 @@ async function renderNotifications() {
     ${blockedCatalog.length ? `<div class="callout tone-attention"><b>资金通知事件尚未开放路由。</b><p>${escapeHtml(blockedCatalog.map(item => item.blocker).filter(Boolean).join(' '))}</p></div>` : ''}
     ${createForm}
     <section><div class="section-heading"><div><p class="eyebrow">脱敏配置</p><h2>团队通知路由</h2><p>修改路由会创建新版本；旧版本待发送任务会取消, 不会使用新凭据发送旧快照。</p></div><span class="status-pill">${data.routes.length} 条</span></div>${routeCards ? `<div class="notification-route-grid">${routeCards}</div>` : '<div class="callout tone-attention"><b>当前团队尚未配置通知路由。</b><p>系统事件仍会写审计；配置路由前不会向外部渠道发送。</p></div>'}</section>
-    <section><div class="section-heading"><div><p class="eyebrow">持久化投递</p><h2>最近投递记录</h2><p>网络结果未知时停止自动重试, 避免外部渠道重复消息；明确限流才进入重试等待。</p></div><span class="status-pill">${data.deliveries.length} 条</span></div>${deliveryRows ? `<div class="table-wrap notification-table"><table><thead><tr><th>事件</th><th>路由</th><th>范围</th><th>状态</th><th>时间</th><th>错误</th></tr></thead><tbody>${deliveryRows}</tbody></table></div>` : '<div class="callout">当前团队没有通知投递记录。</div>'}</section>
+    <section><div class="section-heading"><div><p class="eyebrow">持久化投递</p><h2>最近投递记录</h2><p>网络结果未知时停止自动重试, 避免外部渠道重复消息；明确限流才进入重试等待。</p></div><span class="status-pill"><b data-notification-count>${deliveries.length}</b> 条</span></div>${deliveryRows ? `<details class="proposal-filter-disclosure" ${window.matchMedia('(min-width: 781px)').matches ? 'open' : ''}><summary><span><b>筛选投递记录</b><small>按事件、渠道、状态和环境缩小结果</small></span><strong><span><b data-notification-count>${deliveries.length}</b> 个结果</span><span class="proposal-filter-when-closed">展开</span><span class="proposal-filter-when-open">收起</span></strong></summary><div class="proposal-list-tools"><label>搜索事件或范围<input id="notification-search" type="search" placeholder="提案 / acct-1 / BINANCE"></label><label>渠道<select id="notification-channel"><option value="">全部渠道</option><option value="TELEGRAM">Telegram</option><option value="SLACK">Slack</option><option value="LARK">飞书 / Lark</option><option value="EMAIL">邮件</option></select></label><label>状态<select id="notification-status"><option value="">全部状态</option><option value="PENDING">等待中</option><option value="RETRY_WAIT">等待重试</option><option value="SENDING">发送中</option><option value="SENT">已发送</option><option value="DEAD_LETTER">投递失败</option><option value="OUTCOME_UNKNOWN">发送结果未知</option></select></label><label>环境<select id="notification-environment"><option value="">全部环境</option><option value="LIVE">生产模式</option><option value="TESTNET">测试模式</option></select></label><span role="status" aria-live="polite"><b data-notification-visible-count>${Math.min(deliveries.length, 50)}</b> / <b data-notification-count>${deliveries.length}</b> 个结果</span></div></details><div class="table-wrap notification-table"><table><thead><tr><th>事件</th><th>路由</th><th>范围</th><th>状态</th><th>时间</th><th>错误</th></tr></thead><tbody>${deliveryRows}</tbody></table></div>${recordPaginationMarkup(deliveries.length, '通知投递记录分页')}<section id="notification-filter-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的投递记录</h2><p>请清除搜索或调整筛选。</p></div></section>` : '<div class="callout">当前团队没有通知投递记录。</div>'}</section>
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
   const newRouteForm = document.querySelector('#notification-route-create-form');
@@ -274,4 +278,23 @@ async function renderNotifications() {
       });
     });
   });
+  if (deliveries.length) {
+    bindRecordList({
+      rowSelector:'[data-notification-row]',
+      filterSelectors:['#notification-search','#notification-channel','#notification-status','#notification-environment'],
+      matches:row => {
+        const query = document.querySelector('#notification-search')?.value.toLowerCase().trim() || '';
+        const channel = document.querySelector('#notification-channel')?.value || '';
+        const status = document.querySelector('#notification-status')?.value || '';
+        const environment = document.querySelector('#notification-environment')?.value || '';
+        return (!query || row.dataset.search.includes(query))
+          && (!channel || row.dataset.channel === channel)
+          && (!status || row.dataset.status === status)
+          && (!environment || row.dataset.environment === environment);
+      },
+      emptySelector:'#notification-filter-empty',
+      visibleCountSelector:'[data-notification-visible-count]',
+      totalCountSelector:'[data-notification-count]',
+    });
+  }
 }
