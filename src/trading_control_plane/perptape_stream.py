@@ -16,11 +16,13 @@ from websockets.sync.client import connect
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.perptape import (
     PERPTAPE_CANDIDATE_WINDOW,
+    PERPTAPE_SOURCE_EXCHANGES,
     PerptapeCandidate,
     PerptapeClient,
     PerptapeEventKey,
     PerptapeFeedSnapshot,
     PerptapeRateLimited,
+    PerptapeSourceExchange,
     bound_perptape_feed_snapshot,
     merge_incomplete_perptape_candidates,
     normalize_perptape_datetime,
@@ -38,6 +40,9 @@ PERPTAPE_FATAL_INPUT_ERROR_CODES = {
     "PERPTAPE_DECIMAL_INVALID",
     "PERPTAPE_FIELD_TOO_LARGE",
     "PERPTAPE_PAYLOAD_TOO_LARGE",
+    "PERPTAPE_RESPONSE_INVALID",
+    "PERPTAPE_STREAM_MESSAGE_INVALID",
+    "PERPTAPE_STREAM_PROTOCOL_ERROR",
 }
 
 
@@ -129,6 +134,7 @@ class PerptapeStreamWorker:
         reconnect_initial_seconds: float,
         reconnect_max_seconds: float,
         max_reconnect_attempts: int,
+        startup_reconciliation_enabled: bool = True,
         connector: SocketConnector = _default_connector,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic: Callable[[], float] = time.monotonic,
@@ -145,6 +151,7 @@ class PerptapeStreamWorker:
         self._reconnect_initial_seconds = reconnect_initial_seconds
         self._reconnect_max_seconds = reconnect_max_seconds
         self._max_reconnect_attempts = max_reconnect_attempts
+        self._startup_reconciliation_enabled = startup_reconciliation_enabled
         self._connector = connector
         self._clock = clock
         self._monotonic = monotonic
@@ -164,6 +171,7 @@ class PerptapeStreamWorker:
             PerptapeEventKey,
             tuple[PerptapeCandidate, int],
         ] = OrderedDict()
+        self._next_reconciliation_exchange: PerptapeSourceExchange = "BN"
         self.fatal_error_code: str | None = None
         self.stats = PerptapeStreamStats()
 
@@ -274,6 +282,10 @@ class PerptapeStreamWorker:
             ) in self._pending_completion_targets.items()
             if success_generation > registered_success_generation
             and (
+                feed.source_exchange is None
+                or target.source_exchange == feed.source_exchange
+            )
+            and (
                 any(
                     self._candidate_completes_target(candidate, target)
                     for candidate in feed.candidates
@@ -339,6 +351,8 @@ class PerptapeStreamWorker:
     def _preserved_pending_candidates(
         self,
         current: PerptapeFeedSnapshot | None,
+        *,
+        source_exchange: PerptapeSourceExchange,
     ) -> tuple[PerptapeCandidate, ...]:
         current_by_key = {
             perptape_event_key(candidate): candidate
@@ -351,6 +365,7 @@ class PerptapeStreamWorker:
         return tuple(
             current_by_key.get(event_key, target)
             for event_key, (target, _generation) in self._pending_completion_targets.items()
+            if target.source_exchange == source_exchange
         )
 
     def _reconcile(self, *, backfill: bool) -> PerptapeFeedSnapshot:
@@ -364,8 +379,26 @@ class PerptapeStreamWorker:
         base = self._current_snapshot()
         if base is not None and now < base.next_allowed_at:
             raise PerptapeRateLimited(base.next_allowed_at)
+        pending_exchange_value = next(
+            (
+                target.source_exchange
+                for target, _generation in self._pending_completion_targets.values()
+            ),
+            None,
+        )
+        source_exchange: PerptapeSourceExchange = (
+            "HL"
+            if pending_exchange_value == "HL"
+            else "BN"
+            if pending_exchange_value == "BN"
+            else self._next_reconciliation_exchange
+        )
         try:
-            feed = self._client.refresh(now=now, force=backfill)
+            feed = self._client.refresh(
+                now=now,
+                force=backfill,
+                source_exchange=source_exchange,
+            )
         except PerptapeRateLimited as exc:
             self._sync_remote_request_state()
             self._mark_degraded(next_allowed_at=exc.next_allowed_at)
@@ -377,10 +410,17 @@ class PerptapeStreamWorker:
             feed = replace(feed, fetched_at=fetched_at)
         feed = merge_incomplete_perptape_candidates(
             feed,
-            self._preserved_pending_candidates(current),
+            self._preserved_pending_candidates(
+                current,
+                source_exchange=source_exchange,
+            ),
             pending_max_age=timedelta(seconds=self._reconciliation_interval_seconds),
         )
         self._record(feed, base)
+        self._next_reconciliation_exchange = PERPTAPE_SOURCE_EXCHANGES[
+            (PERPTAPE_SOURCE_EXCHANGES.index(source_exchange) + 1)
+            % len(PERPTAPE_SOURCE_EXCHANGES)
+        ]
         self.stats.https_reconciliations += 1
         if backfill:
             self.stats.https_backfills += 1
@@ -754,6 +794,7 @@ class PerptapeStreamWorker:
                     generated_at if current is None else current.next_allowed_at,
                 ),
                 candidates=tuple(candidates.values()),
+                source_exchange="HL" if candidate.source_exchange == "HL" else "BN",
             ),
             current,
         )
@@ -922,9 +963,11 @@ class PerptapeStreamWorker:
                             self.fatal_error_code,
                             "Perptape unresolved alert window could not be restored",
                         )
-                    if current is None or self._now() >= current.next_allowed_at:
+                    if self._startup_reconciliation_enabled and (
+                        current is None or self._now() >= current.next_allowed_at
+                    ):
                         self._reconcile(backfill=False)
-                    else:
+                    elif current is not None and self._now() < current.next_allowed_at:
                         self._backfill_not_before = current.next_allowed_at
                         self._completion_pending = True
                     startup_complete = True
@@ -941,6 +984,11 @@ class PerptapeStreamWorker:
             if stop_event.is_set():
                 return
             if error_code in PERPTAPE_FATAL_INPUT_ERROR_CODES:
+                if error_code in {
+                    "PERPTAPE_STREAM_MESSAGE_INVALID",
+                    "PERPTAPE_STREAM_PROTOCOL_ERROR",
+                }:
+                    self._mark_degraded(preserve_complete=False)
                 self.fatal_error_code = error_code
                 logger.error(
                     "Perptape WebSocket stopped after an invalid external payload",
@@ -996,6 +1044,8 @@ class PerptapeStreamWorker:
             non_retryable = error_code in {
                 "PERPTAPE_AUTH_FAILED",
                 "PERPTAPE_NOT_CONFIGURED",
+                "PERPTAPE_PLAN_DENIED",
+                *PERPTAPE_FATAL_INPUT_ERROR_CODES,
             }
             if non_retryable or attempts >= self._max_reconnect_attempts:
                 self._mark_degraded(preserve_complete=False)

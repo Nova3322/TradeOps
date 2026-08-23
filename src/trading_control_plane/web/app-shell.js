@@ -6,6 +6,39 @@ function workspaceDefaultTeamId(workspace) {
     || null;
 }
 
+function setSidebarDatabaseStatus(state) {
+  if (!sidebarDatabaseStatus) return;
+  const labels = {
+    checking:'数据库检查中',
+    connected:'数据库已连接',
+    disconnected:'数据库未连接',
+    unknown:'数据库状态未知',
+  };
+  sidebarDatabaseStatus.dataset.state = state;
+  sidebarDatabaseStatus.textContent = localizedText(labels[state] || labels.unknown);
+}
+
+async function refreshSidebarDatabaseStatus() {
+  const requestToken = ++sidebarDatabaseRequestToken;
+  setSidebarDatabaseStatus('checking');
+  try {
+    const readiness = await api('/health/ready');
+    if (requestToken !== sidebarDatabaseRequestToken) return;
+    setSidebarDatabaseStatus(
+      readiness?.status === 'ready' && readiness?.durable_store === 'postgresql'
+        ? 'connected'
+        : 'unknown',
+    );
+  } catch (error) {
+    if (requestToken !== sidebarDatabaseRequestToken) return;
+    setSidebarDatabaseStatus(
+      error?.status === 503 && error?.code === 'DATABASE_UNAVAILABLE'
+        ? 'disconnected'
+        : 'unknown',
+    );
+  }
+}
+
 function renderWorkspaceSwitcher() {
   if (!session) return;
   const activeWorkspaceId = session.active_workspace?.workspace_id;
@@ -34,8 +67,13 @@ function setShell(loggedIn, {workspaceGate = false} = {}) {
   userMenu.hidden = !loggedIn;
   scopeControl.hidden = !loggedIn || workspaceGate;
   mobileNavToggle.hidden = !loggedIn || workspaceGate;
+  updateEnvironmentIndicators();
+  if (loggedIn && !workspaceGate) refreshSidebarDatabaseStatus();
+  else {
+    sidebarDatabaseRequestToken += 1;
+    setSidebarDatabaseStatus('checking');
+  }
   if (loggedIn) {
-    updateEnvironmentIndicators();
     renderWorkspaceSwitcher();
     const rolePriority = ['SYSTEM_ADMIN','TREASURY_ADMIN','OPERATOR','REVIEWER','PROPOSER','OBSERVER'];
     const primaryRole = rolePriority.find(role => roleNames().includes(role));
@@ -232,30 +270,69 @@ function enhanceRenderedPage() {
   }
 }
 
-function confirmAction({title, message, confirmLabel}) {
+function confirmAction({title, message, confirmLabel, passwordRequired = false}) {
   document.querySelector('#confirm-title').textContent = localizedText(title);
   document.querySelector('#confirm-message').textContent = localizedText(message);
   document.querySelector('#confirm-submit').textContent = localizedText(confirmLabel || '确认并继续');
+  const passwordField = document.querySelector('#confirm-password-field');
+  const passwordInput = document.querySelector('#confirm-password');
+  passwordField.hidden = !passwordRequired;
+  passwordInput.required = passwordRequired;
+  passwordInput.value = '';
   confirmDialog.returnValue = '';
   confirmDialog.showModal();
   return new Promise((resolve) => {
+    const form = confirmDialog.querySelector('form');
     const submit = confirmDialog.querySelector('#confirm-submit');
     const cancelButtons = [...confirmDialog.querySelectorAll('[value="cancel"]')];
     let settled = false;
-    const finish = confirmed => {
+    const finish = result => {
       if (settled) return;
       settled = true;
       submit?.removeEventListener('click', confirm);
       cancelButtons.forEach(button => button.removeEventListener('click', cancel));
+      form?.removeEventListener('submit', submitForm);
       confirmDialog.removeEventListener('cancel', cancel);
-      if (confirmDialog.open) confirmDialog.close(confirmed ? 'confirm' : 'cancel');
-      resolve(confirmed);
+      if (confirmDialog.open) confirmDialog.close(result ? 'confirm' : 'cancel');
+      passwordInput.value = '';
+      resolve(result);
     };
-    const confirm = event => { event.preventDefault(); finish(true); };
+    const confirm = event => {
+      event.preventDefault();
+      if (passwordRequired && !passwordInput.reportValidity()) return;
+      finish(passwordRequired ? passwordInput.value : true);
+    };
     const cancel = event => { event.preventDefault(); finish(false); };
-    submit?.addEventListener('click', confirm, {once:true});
+    const submitForm = event => {
+      event.preventDefault();
+      if (event.submitter?.value === 'cancel') finish(false);
+      else confirm(event);
+    };
+    submit?.addEventListener('click', confirm);
     cancelButtons.forEach(button => button.addEventListener('click', cancel, {once:true}));
+    form?.addEventListener('submit', submitForm);
     confirmDialog.addEventListener('cancel', cancel, {once:true});
+  });
+}
+
+function passwordStepUpRequired() {
+  return ['PASSWORD', 'password-scrypt'].includes(sessionAuthenticationMethod);
+}
+
+async function confirmStepUpAction({title, message, confirmLabel, action, objectId, objectVersion}) {
+  const requiresPassword = passwordStepUpRequired();
+  const confirmation = await confirmAction({
+    title,
+    message,
+    confirmLabel,
+    passwordRequired:requiresPassword,
+  });
+  if (!confirmation) return null;
+  const payload = {action, object_id:objectId, object_version:objectVersion};
+  if (requiresPassword) payload.password = confirmation;
+  return api(requiresPassword ? '/api/auth/step-up' : '/api/auth/mock/step-up', {
+    method:'POST',
+    body:JSON.stringify(payload),
   });
 }
 

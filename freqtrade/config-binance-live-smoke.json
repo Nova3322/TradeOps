@@ -11,32 +11,60 @@
   "timeframe": "5m",
   "initial_state": "stopped",
   "process_only_new_candles": true,
-  "position_adjustment_enable": false,
+  "position_adjustment_enable": true,
   "force_entry_enable": false,
-  "cancel_open_orders_on_exit": true,
+  "cancel_open_orders_on_exit": false,
   "stoploss": -0.01,
   "exchange": {
     "name": "binance",
     "key": "",
     "secret": "",
     "ccxt_config": {
-      "options": {"defaultType": "swap", "papi": true},
-      "has": {"setMarginMode": false}
+      "options": {
+        "defaultType": "swap",
+        "adjustForTimeDifference": true,
+        "recvWindow": 60000,
+        "papi": false
+      },
+      "has": {
+        "setMarginMode": false
+      },
+      "enableRateLimit": true
     },
     "ccxt_async_config": {
-      "options": {"defaultType": "swap", "papi": true},
-      "has": {"setMarginMode": false}
+      "options": {
+        "defaultType": "swap",
+        "adjustForTimeDifference": true,
+        "recvWindow": 60000,
+        "papi": false
+      },
+      "has": {
+        "setMarginMode": false
+      },
+      "enableRateLimit": true
     },
-    "pair_whitelist": ["SOL/USDT:USDT"],
+    "pair_whitelist": [
+      "SOL/USDT:USDT"
+    ],
     "pair_blacklist": []
   },
-  "pairlists": [{"method": "StaticPairList"}],
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    },
+    {
+      "method": "PrecisionFilter"
+    }
+  ],
   "entry_pricing": {
     "price_side": "same",
     "use_order_book": true,
     "order_book_top": 1,
     "price_last_balance": 0,
-    "check_depth_of_market": {"enabled": false, "bids_to_ask_delta": 1}
+    "check_depth_of_market": {
+      "enabled": false,
+      "bids_to_ask_delta": 1
+    }
   },
   "exit_pricing": {
     "price_side": "same",
@@ -53,7 +81,34 @@
     "stoploss_on_exchange": true,
     "stoploss_on_exchange_interval": 60
   },
-  "unfilledtimeout": {"entry": 1, "exit": 1, "unit": "minutes"},
+  "unfilledtimeout": {
+    "entry": 1,
+    "exit": 1,
+    "unit": "minutes"
+  },
+  "telegram": {
+    "enabled": false,
+    "token": "",
+    "chat_id": "",
+    "authorized_users": [],
+    "allow_custom_messages": true,
+    "notification_settings": {
+      "status": "on",
+      "warning": "on",
+      "startup": "on",
+      "entry": "on",
+      "entry_fill": "on",
+      "entry_cancel": "on",
+      "exit": "on",
+      "exit_fill": "on",
+      "exit_cancel": "on",
+      "protection_trigger": "on",
+      "protection_trigger_global": "on",
+      "strategy_msg": "on",
+      "show_candle": "off"
+    },
+    "reload": false
+  },
   "api_server": {
     "enabled": true,
     "listen_ip_address": "0.0.0.0",
@@ -61,6 +116,7 @@
     "verbosity": "error",
     "enable_openapi": false,
     "jwt_secret_key": "local-live-smoke-jwt-override-required",
+    "ws_token": "overridden-by-environment",
     "CORS_origins": [],
     "username": "overridden-by-environment",
     "password": "overridden-by-environment"

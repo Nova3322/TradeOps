@@ -15,6 +15,7 @@ from trading_control_plane.domain import (
     CapabilityStatus,
     Direction,
     DomainRejected,
+    ExecutionEnvironment,
     IntentKind,
     ProposalSource,
     ReviewDecision,
@@ -25,6 +26,7 @@ from trading_control_plane.domain import (
 )
 from trading_control_plane.models import (
     CapabilityGate,
+    ExchangeAccount,
     RiskControlChangeRequest,
     RiskPolicy,
     TradingAuthorization,
@@ -84,6 +86,7 @@ def prepare_add_proposal(service: TradingService, ids: dict[str, UUID], *, key: 
         expires_at=NOW + timedelta(hours=2),
         idempotency_key=f"{key}-proposal",
         details={
+            "trigger_price": "100",
             "allow_auto_add": True,
             "requested_adds": 1,
             "add_trigger_price": "105",
@@ -507,6 +510,149 @@ def test_restore_fails_closed_on_live_scope_configuration_and_control_drift(
             (),
             now=NOW + timedelta(minutes=17),
         )
+
+
+def test_live_restore_ignores_only_inactive_flat_hyperliquid_hip3_facts(
+    database: Database, service: TradingService
+) -> None:
+    fixture = WorkflowFixture.create(
+        service,
+        now=NOW,
+        admin_username="hip3-risk-admin",
+        account_id="acct-1",
+        venue="HYPERLIQUID",
+        environment=ExecutionEnvironment.LIVE,
+        actors=(
+            ActorSpec("operator", "hip3-risk-operator", Role.OPERATOR),
+        ),
+        symbol="BTC",
+        tick_size=Decimal("1"),
+        lot_size=Decimal("0.00001"),
+        minimum_notional=Decimal("10"),
+        quote_currency="USDC",
+        risk_version="hip3-risk-restore-v1",
+        max_fact_age=timedelta(minutes=5),
+        record_facts=False,
+    )
+    hip3_instrument = service.register_instrument(
+        actor_id=fixture.ids["admin"],
+        venue="HYPERLIQUID",
+        symbol="xyz:TSLA",
+        tick_size=Decimal("0.01"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("10"),
+        contract_multiplier=Decimal(1),
+        quote_currency="USDC",
+        collateral_currency="USDC",
+        protection_supported=True,
+        now=NOW,
+    )
+    service.record_position(
+        "acct-1",
+        "HYPERLIQUID",
+        hip3_instrument,
+        Decimal(0),
+        Decimal(0),
+        Decimal("100"),
+        True,
+        fixture.ids["operator"],
+        environment=ExecutionEnvironment.LIVE,
+        now=NOW,
+    )
+    current_at = NOW + timedelta(hours=1)
+    fixture.now = current_at
+    fixture.record_flat_facts(mark_price=Decimal("100"))
+    service.reconcile_scope(
+        "LIVE:acct-1:HYPERLIQUID",
+        fixture.ids["operator"],
+        now=current_at + timedelta(seconds=1),
+    )
+
+    scope = (("LIVE", "acct-1", "HYPERLIQUID"),)
+    status = service.risk_control_status(
+        fixture.ids["admin"], scope, now=current_at + timedelta(seconds=2)
+    )
+    assert status["restore_conditions"]["ready"] is True
+    assert status["restore_conditions"]["blockers"] == []
+
+    fixture.now = current_at + timedelta(seconds=3)
+    fixture.record_flat_facts(mark_price=Decimal("101"))
+    refreshed_status = service.risk_control_status(
+        fixture.ids["admin"], scope, now=current_at + timedelta(seconds=4)
+    )
+    assert refreshed_status["restore_conditions"]["ready"] is True
+    assert refreshed_status["restore_conditions"]["blockers"] == []
+
+    with database.session_factory.begin() as session:
+        account = session.scalar(
+            select(ExchangeAccount).where(
+                ExchangeAccount.account_id == "acct-1",
+                ExchangeAccount.venue == "HYPERLIQUID",
+                ExchangeAccount.environment == "LIVE",
+            )
+        )
+        assert account is not None
+        account.freqtrade_hip3_dexes = ["xyz"]
+
+    enabled_status = service.risk_control_status(
+        fixture.ids["admin"], scope, now=current_at + timedelta(seconds=5)
+    )
+    assert enabled_status["restore_conditions"]["ready"] is False
+    assert (
+        "POSITION_STALE:LIVE:acct-1:HYPERLIQUID"
+        in enabled_status["restore_conditions"]["blockers"]
+    )
+
+    with database.session_factory.begin() as session:
+        account = session.scalar(
+            select(ExchangeAccount).where(
+                ExchangeAccount.account_id == "acct-1",
+                ExchangeAccount.venue == "HYPERLIQUID",
+                ExchangeAccount.environment == "LIVE",
+            )
+        )
+        assert account is not None
+        account.freqtrade_hip3_dexes = []
+    service.record_position(
+        "acct-1",
+        "HYPERLIQUID",
+        hip3_instrument,
+        Decimal(1),
+        Decimal("100"),
+        Decimal("100"),
+        True,
+        fixture.ids["operator"],
+        environment=ExecutionEnvironment.LIVE,
+        observed_at=NOW,
+        now=current_at + timedelta(seconds=6),
+    )
+    exposed_status = service.risk_control_status(
+        fixture.ids["admin"], scope, now=current_at + timedelta(seconds=7)
+    )
+    assert (
+        "POSITION_STALE:LIVE:acct-1:HYPERLIQUID"
+        in exposed_status["restore_conditions"]["blockers"]
+    )
+
+    service.record_position(
+        "acct-1",
+        "HYPERLIQUID",
+        hip3_instrument,
+        Decimal(0),
+        Decimal(0),
+        Decimal("100"),
+        False,
+        fixture.ids["operator"],
+        environment=ExecutionEnvironment.LIVE,
+        now=current_at + timedelta(seconds=8),
+    )
+    unknown_status = service.risk_control_status(
+        fixture.ids["admin"], scope, now=current_at + timedelta(seconds=9)
+    )
+    assert (
+        "POSITION_UNKNOWN:LIVE:acct-1:HYPERLIQUID"
+        in unknown_status["restore_conditions"]["blockers"]
+    )
 
 
 def test_restore_rejection_expiry_and_terminal_status_are_durable(

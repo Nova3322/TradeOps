@@ -41,12 +41,15 @@ exchange account:
    explicit policy allows it, independent human review, or rejection. In the
    current Alpha release every executable proposal still requires independent
    human review; automatic approval is not yet enabled.
-4. Approval creates short-lived, account-scoped authorization. Approval alone
-   never sends an order.
-5. An operator executes through the adapter for the proposal's fixed TESTNET or
-   LIVE environment.
-6. TradeOps reconciles the venue outcome and writes the proposal, decision,
-   command, receipt, and exception path to the audit log.
+4. Once the independent-review threshold is met, the system automatically runs
+   risk against the latest account facts, issues short-lived account-scoped
+   authorization, and reserves risk.
+5. The controlled executor uses leases, fencing, and a stable client order ID to
+   call the exact-account Freqtrade worker. Review is the last normal human step
+   in the trading workflow.
+6. The Facts Adapter queries orders, fills, and positions and reconciles the
+   outcome. Timeout or ambiguity is query-only and never resubmits the order;
+   the complete evidence chain is audited.
 
 ```text
 Trader / Trading Bot / Strategy Program / AI Agent
@@ -98,6 +101,7 @@ policy, approval, execution gates, or account scope.
 | --- | --- |
 | Binance | TESTNET and LIVE adapter paths for account facts, order send/cancel, recovery, and reconciliation; credentials and LIVE gates are deployment-specific. |
 | Hyperliquid | TESTNET and LIVE adapter paths for account facts, order send/cancel, recovery, and reconciliation; credentials and LIVE gates are deployment-specific. |
+| Freqtrade | The sole strategy/bot lifecycle engine for exact-account Binance and Hyperliquid workers; TradeOps retains proposal, review, risk, authorization, and audit authority. |
 | Perptape | Configurable signal intake with freshness, normalization, and proposal revalidation. |
 | Signed Webhook | Signature, nonce, replay, freshness, idempotency, and payload validation. |
 | Telegram | Configurable team notification routes and a separate notification worker. |
@@ -105,9 +109,9 @@ policy, approval, execution gates, or account scope.
 | Vault / Safe | Production capital-path configuration exists; signing, broadcast, and capital movement stay disabled until separately configured and enabled. |
 
 The repository includes optional adapters for additional notification channels.
-Formal engine contracts for Freqtrade, Hummingbot, NautilusTrader, and
-QuantConnect LEAN remain roadmap work; they are not presented as supported
-turnkey integrations today.
+Formal engine contracts for Hummingbot, NautilusTrader, and QuantConnect LEAN
+remain roadmap work; they are not presented as supported turnkey integrations
+today.
 
 ## Run locally
 

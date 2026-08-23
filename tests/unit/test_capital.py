@@ -59,6 +59,7 @@ def test_mock_capital_adapter_is_deterministic_and_never_live() -> None:
                 "WAIT_10_MINUTES",
                 "REVALIDATE_RELEASE",
                 "TRANSFER_TO_AUTHORIZED_BINANCE_ADDRESS",
+                "TRANSFER_BINANCE_SPOT_TO_USDM",
             ],
         ),
         (
@@ -84,6 +85,7 @@ def test_mock_capital_adapter_is_deterministic_and_never_live() -> None:
             DirectCapitalPath.BINANCE_TO_VAULT,
             [
                 "RESTRICTED_BINANCE_WITHDRAWAL_TO_SELECTED_TREASURY",
+                "TRANSFER_BINANCE_USDM_TO_SPOT",
                 "VERIFY_BINANCE_WITHDRAWAL_RECEIPT",
                 "VERIFY_SELECTED_TREASURY_CREDIT",
             ],
@@ -104,6 +106,7 @@ def test_direct_capital_paths_are_explicit_and_never_broadcast(
         capital_direct_binance_withdrawal_address=("0x1111111111111111111111111111111111111111"),
         binance_capital_api_key="capital-key",
         binance_capital_api_secret="capital-secret",  # noqa: S106 - inert fixture credential
+        binance_capital_account_id="binance-main",
         capital_direct_hyperliquid_account_id="hyperliquid-main",
         capital_direct_hyperliquid_bridge_address=("0x4444444444444444444444444444444444444444"),
         capital_direct_max_amount=Decimal(1000),
@@ -165,3 +168,81 @@ def test_safe_spending_limits_are_a_parallel_fail_closed_provider() -> None:
     assert "CAPITAL_TRANSFER_GATE_DISABLED" in plan.blockers
     assert plan.execute_after is None
     assert plan.stages[0]["code"] == "READ_SAFE_SPENDING_LIMIT"
+
+
+def test_safe_outbound_gas_does_not_reduce_the_usdc_received_amount() -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        safe_spending_enabled=True,
+        safe_spending_arbitrum_rpc_url="https://example.invalid",
+        capital_direct_safe_address="0x1111111111111111111111111111111111111111",
+        capital_direct_safe_delegate_address="0x2222222222222222222222222222222222222222",
+        capital_direct_owned_arbitrum_address="0x1111111111111111111111111111111111111111",
+        capital_direct_hyperliquid_account_id="hyperliquid-main",
+        capital_direct_hyperliquid_bridge_address=("0x2df1c51e09aecf9cacb7bc98cb1742757f163df7"),
+        capital_direct_max_amount=Decimal(100),
+        capital_direct_max_fee=Decimal(1),
+        _env_file=None,
+    )
+
+    plan = build_direct_capital_plan(
+        path=DirectCapitalPath.VAULT_TO_HYPERLIQUID,
+        treasury_provider=CapitalTreasuryProvider.SAFE_SPENDING_LIMIT,
+        amount=Decimal(1),
+        settings=settings,
+        capital_transfer_gate="ENABLED",
+        now=datetime(2026, 8, 17, tzinfo=UTC),
+    )
+
+    assert plan.min_received == Decimal(1)
+    assert "CAPITAL_MIN_RECEIVED_INVALID" not in plan.blockers
+
+
+def test_binance_account_managed_credentials_satisfy_plan_without_env_secrets() -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        capital_direct_vault_id="vault-1",
+        capital_direct_vault_address="0x1111111111111111111111111111111111111111",
+        capital_direct_binance_account_id="binance-main",
+        capital_direct_binance_withdrawal_address=("0x1111111111111111111111111111111111111111"),
+        capital_direct_max_amount=Decimal(100),
+        capital_direct_max_fee=Decimal(1),
+        _env_file=None,
+    )
+
+    plan = build_direct_capital_plan(
+        path=DirectCapitalPath.BINANCE_TO_VAULT,
+        amount=Decimal("0.1"),
+        settings=settings,
+        capital_transfer_gate="ENABLED",
+        binance_capital_credentials_configured=True,
+        now=datetime(2026, 8, 17, tzinfo=UTC),
+    )
+
+    assert "BINANCE_CAPITAL_CREDENTIALS_MISSING" not in plan.blockers
+    assert "CAPITAL_MIN_RECEIVED_INVALID" not in plan.blockers
+    assert plan.min_received is None
+
+
+def test_hyperliquid_withdrawal_waits_for_current_route_fee_before_min_received() -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        capital_direct_vault_id="vault-1",
+        capital_direct_vault_address="0x1111111111111111111111111111111111111111",
+        capital_direct_hyperliquid_account_id="hyperliquid-main",
+        capital_direct_hyperliquid_bridge_address=("0x2df1c51e09aecf9cacb7bc98cb1742757f163df7"),
+        capital_direct_max_amount=Decimal(100),
+        capital_direct_max_fee=Decimal(1),
+        _env_file=None,
+    )
+
+    plan = build_direct_capital_plan(
+        path=DirectCapitalPath.HYPERLIQUID_TO_VAULT,
+        amount=Decimal("0.5"),
+        settings=settings,
+        capital_transfer_gate="ENABLED",
+        now=datetime(2026, 8, 18, tzinfo=UTC),
+    )
+
+    assert "CAPITAL_MIN_RECEIVED_INVALID" not in plan.blockers
+    assert plan.min_received is None

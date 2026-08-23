@@ -27,9 +27,13 @@ custodian, fund PMS, or investment adviser.
 3. Deterministic policy chooses automatic approval, independent review, or
    rejection. In the current Alpha, executable proposals still require manual
    independent review and self-review is blocked.
-4. Approval creates short-lived authorization but does not send an order.
-5. An operator executes through the proposal's fixed TESTNET or LIVE adapter.
-6. TradeOps reconciles the exchange outcome and records the entire path.
+4. When the independent-review threshold is met, TradeOps automatically runs
+   current-fact risk checks, issues short-lived authorization, and reserves risk.
+5. The controlled executor uses leases, fencing, and a stable client order ID
+   to call the exact-account Freqtrade worker in the proposal's fixed TESTNET or
+   LIVE environment.
+6. The Facts Adapter queries and reconciles the exchange outcome. Unknown or
+   timed-out results remain query-only and are never blindly resubmitted.
 
 Every human, trading bot, strategy program, and AI agent should have a separate
 identity, permission set, risk allowance, and audit history. Trader, Reviewer,
@@ -43,14 +47,14 @@ gates, account scope, or environment isolation.
 | --- | --- | --- |
 | Proposal and review | Versioned proposals, approve/reject, no self-review, expiry | Automatic approval is a workflow outcome but is not enabled in the current Alpha |
 | Risk control | Team/account/single-trade limits, cooldown, no-pyramid, reduce-only, pause, kill switch | No promise that trading losses are prevented |
-| Execution | Binance and Hyperliquid TESTNET/LIVE adapter paths, idempotency, cancel, recovery, sync, reconciliation | LIVE send is not enabled by installation or process health |
+| Execution | Exact-account Binance and Hyperliquid Freqtrade workers, idempotency, fencing, cancel, query-only recovery, Facts sync, and reconciliation | LIVE send is not enabled by installation or process health |
 | Signals | Perptape and signed Webhook ingestion with freshness and replay checks | Not a signal marketplace or trading recommendation |
 | Notifications | Telegram team routes and optional channel adapters | Delivery configuration is deployment-specific |
 | Bot and Agent API | User-owned API Keys, RBAC, workspace/team scope, proposal access | Agents cannot bypass human review or execute outside scope |
 | Capital | Vault/Safe configuration and controlled capital-path gates | TradeOps is not a custodian; signing, broadcast, and transfer are separate capabilities |
 
-Formal turnkey contracts for Freqtrade, Hummingbot, NautilusTrader, and
-QuantConnect LEAN are roadmap items. A separately packaged Local Execution Agent
+Formal turnkey contracts for Hummingbot, NautilusTrader, and QuantConnect LEAN
+are roadmap items. A separately packaged Local Execution Agent
 with non-bypassable local hard limits is a design direction, not a current
 product claim.
 

@@ -7,7 +7,7 @@ import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 from unittest.mock import patch
 
 from trading_control_plane.analytics import PERIODS_PER_YEAR, AnalyticsDataset
@@ -25,6 +25,28 @@ class QuantStatsReport:
     frames: AnalyticsFrames
     metrics: dict[str, str]
     chart_count: int
+
+
+class _IntegerIndexer(Protocol):
+    def __getitem__(self, index: int) -> object: ...
+
+
+@runtime_checkable
+class _SingleColumnResult(Protocol):
+    @property
+    def iloc(self) -> _IntegerIndexer: ...
+
+
+@runtime_checkable
+class _FloatValue(Protocol):
+    def __float__(self) -> float: ...
+
+
+def _scalar_float(value: object) -> float:
+    scalar = value.iloc[0] if isinstance(value, _SingleColumnResult) else value
+    if isinstance(scalar, (int, float, _FloatValue)):
+        return float(scalar)
+    raise TypeError("analytics metric is not a scalar numeric value")
 
 
 def _network_download_forbidden(*_args: object, **_kwargs: object) -> None:
@@ -111,8 +133,29 @@ class QuantStatsReportAdapter:
                     ),
                     warnings.catch_warnings(),
                 ):
-                    warnings.simplefilter("ignore", RuntimeWarning)
-                    warnings.simplefilter("ignore", UserWarning)
+                    # QuantStats 0.0.81 and its pinned plotting stack emit these exact
+                    # compatibility warnings on pandas/Matplotlib 3.11. Unknown warnings
+                    # remain visible and fail the strict test warning policy.
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r"The 'generic' unit for NumPy timedelta is deprecated,.*",
+                        category=DeprecationWarning,
+                        module=r"(?:quantstats\.stats|pandas\.core\.resample)",
+                    )
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r"The set_bad function will be deprecated in a future version\..*",
+                        category=PendingDeprecationWarning,
+                        module=r"seaborn\.matrix",
+                    )
+                    from matplotlib import MatplotlibDeprecationWarning
+
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r"vert: bool was deprecated in Matplotlib 3\.11.*",
+                        category=MatplotlibDeprecationWarning,
+                        module=r"seaborn\.categorical",
+                    )
                     qs.reports.html(  # type: ignore[no-untyped-call]
                         frames.returns,
                         benchmark=frames.benchmark_returns,
@@ -121,28 +164,30 @@ class QuantStatsReportAdapter:
                         title=safe_title,
                         download_filename="tradingops-quantstats.html",
                     )
+                    sharpe = qs.stats.sharpe(frames.returns, periods=PERIODS_PER_YEAR)
+                    metrics = {
+                        "total_return": str(float(qs.stats.comp(frames.returns))),
+                        "annual_return": str(
+                            float(qs.stats.cagr(frames.returns, periods=PERIODS_PER_YEAR))
+                        ),
+                        "annual_volatility": str(
+                            float(qs.stats.volatility(frames.returns, periods=PERIODS_PER_YEAR))
+                        ),
+                        "sharpe": str(_scalar_float(sharpe)),
+                        "sortino": str(
+                            float(qs.stats.sortino(frames.returns, periods=PERIODS_PER_YEAR))
+                        ),
+                        "max_drawdown": str(float(qs.stats.max_drawdown(frames.returns))),
+                        "win_rate": str(float(qs.stats.win_rate(frames.returns))),
+                        "fees": str(float(frames.transactions["commission"].sum())),
+                    }
                 raw = output.read_text(encoding="utf-8")
                 plt.close("all")
             return QuantStatsReport(
                 html=sanitize_quantstats_html(raw),
                 version=str(qs.__version__),
                 frames=frames,
-                metrics={
-                    "total_return": str(float(qs.stats.comp(frames.returns))),
-                    "annual_return": str(
-                        float(qs.stats.cagr(frames.returns, periods=PERIODS_PER_YEAR))
-                    ),
-                    "annual_volatility": str(
-                        float(qs.stats.volatility(frames.returns, periods=PERIODS_PER_YEAR))
-                    ),
-                    "sharpe": str(float(qs.stats.sharpe(frames.returns, periods=PERIODS_PER_YEAR))),
-                    "sortino": str(
-                        float(qs.stats.sortino(frames.returns, periods=PERIODS_PER_YEAR))
-                    ),
-                    "max_drawdown": str(float(qs.stats.max_drawdown(frames.returns))),
-                    "win_rate": str(float(qs.stats.win_rate(frames.returns))),
-                    "fees": str(float(frames.transactions["commission"].sum())),
-                },
+                metrics=metrics,
                 chart_count=raw.lower().count("<svg") + raw.lower().count("data:image"),
             )
         except DomainRejected:

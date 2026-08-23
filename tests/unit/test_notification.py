@@ -168,6 +168,63 @@ def test_templates_are_frozen_and_include_the_stable_event_identity() -> None:
     assert unavailable.value.code == "NOTIFICATION_TEMPLATE_UNAVAILABLE"
 
 
+def test_proposal_review_template_is_a_formal_card_with_required_facts_and_entry() -> None:
+    proposal_id = "848cb77b-2ecb-4ad6-a514-c2719b8a196f"
+    message = render_notification_message(
+        event_type="PROPOSAL_REVIEW_REQUIRED",
+        template_key="proposal.review-required",
+        template_version=2,
+        payload={
+            "summary": "冻结提案已提交, 等待团队成员独立审核。",
+            "proposal_id": proposal_id,
+            "proposal_version": 2,
+            "status": "PENDING_REVIEW",
+            "environment": "LIVE",
+            "account_id": "acct-1",
+            "venue": "BINANCE",
+            "symbol": "BTCUSDT",
+            "direction": "LONG",
+            "risk_tier": "MEDIUM",
+            "quantity": "0.001",
+            "estimated_notional": "100",
+            "quote_currency": "USDT",
+            "collateral_currency": "USDT",
+            "leverage": "2",
+            "max_risk": "1",
+            "expires_at": "2026-08-22T12:00:00+00:00",
+        },
+        event_id="event-review-001",
+        public_base_url="https://tradeops.example",
+    )
+
+    assert message.subject == "[TradingOPS] 提案等待独立审核"
+    for required in (
+        "BTCUSDT / 做多 · LONG",
+        "acct-1 / BINANCE",
+        "环境: LIVE",
+        "风险等级: 中 · MEDIUM",
+        "0.001 / 100 USDT",
+        "杠杆: 2x",
+        "2026-08-22T12:00:00+00:00",
+        proposal_id,
+    ):
+        assert required in message.text
+    assert "<b>待审核提案</b>" in message.html
+    assert "打开 Web 安全审核" not in message.html
+    assert "审核入口:" not in message.text
+    assert f"https://tradeops.example/proposals/{proposal_id}" not in message.html
+
+    legacy = render_notification_message(
+        event_type="PROPOSAL_REVIEW_REQUIRED",
+        template_key="proposal.review-required",
+        template_version=1,
+        payload={"summary": "legacy frozen delivery", "environment": "LIVE"},
+        event_id="event-review-legacy",
+    )
+    assert "legacy frozen delivery" in legacy.text
+    assert "<pre>" in legacy.html
+
+
 def test_lark_signature_matches_the_official_empty_message_hmac_contract() -> None:
     fixture_signing_value = "lark-signing-fixture"
     timestamp = "1786291200"

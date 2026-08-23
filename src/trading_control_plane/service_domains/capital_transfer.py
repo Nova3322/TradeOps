@@ -1,10 +1,19 @@
 from __future__ import annotations
 
-from trading_control_plane.service_component import ServiceComponent
+from datetime import datetime
+from decimal import Decimal
+from uuid import UUID, uuid4
 
-# The domain implementation intentionally consumes the explicit service_core export surface.
-# ruff: noqa: F403, F405
-from trading_control_plane.service_core import *
+from sqlalchemy import func, select, text
+
+from trading_control_plane import capital, domain, models, rejections
+from trading_control_plane import execution_scope as scope_rules
+from trading_control_plane.service_component import ServiceComponent
+from trading_control_plane.service_domains.accounts import ensure_exchange_account_reference
+from trading_control_plane.service_domains.capital_reconciliation import (
+    assert_capital_scope_flat,
+    capital_balance,
+)
 
 
 class TransferCapitalService(ServiceComponent):
@@ -12,8 +21,8 @@ class TransferCapitalService(ServiceComponent):
         self,
         *,
         actor_id: UUID,
-        environment: ExecutionEnvironment,
-        direction: CapitalDirection,
+        environment: domain.ExecutionEnvironment,
+        direction: domain.CapitalDirection,
         account_id: str,
         venue: str,
         vault_id: str,
@@ -29,16 +38,18 @@ class TransferCapitalService(ServiceComponent):
         now: datetime,
         allow_live_unsigned: bool = False,
     ) -> UUID:
-        if environment is ExecutionEnvironment.LIVE and not allow_live_unsigned:
-            _reject(
+        if environment is domain.ExecutionEnvironment.LIVE and not allow_live_unsigned:
+            rejections.reject(
                 "CAPITAL_TRANSFER_LIVE_DISABLED",
                 "LIVE capital proposals require the constrained unsigned transaction workflow",
             )
         if expires_at <= now:
-            _reject("TRANSFER_PROPOSAL_EXPIRY_INVALID", "transfer proposal must expire later")
+            rejections.reject(
+                "TRANSFER_PROPOSAL_EXPIRY_INVALID", "transfer proposal must expire later"
+            )
         source_type, source_id, destination_type, destination_id = (
             ("VAULT", vault_id, "VENUE", account_id)
-            if direction is CapitalDirection.VAULT_TO_VENUE
+            if direction is domain.CapitalDirection.VAULT_TO_VENUE
             else ("VENUE", account_id, "VAULT", vault_id)
         )
         payload = {
@@ -62,8 +73,8 @@ class TransferCapitalService(ServiceComponent):
         }
         operation = "capital.propose"
         with self.database.session_factory.begin() as session:
-            team = self.transactions._require_role(session, actor_id, operation, account_id, venue)
-            self._ensure_exchange_account_reference(
+            team = self.transactions.require_role(session, actor_id, operation, account_id, venue)
+            ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
@@ -72,7 +83,7 @@ class TransferCapitalService(ServiceComponent):
                 environment=environment.value,
                 now=now,
             )
-            digest, response = self.transactions._idempotency(
+            digest, response = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -80,14 +91,14 @@ class TransferCapitalService(ServiceComponent):
                 payload=payload,
             )
             if response is not None:
-                return _as_uuid(str(response["transfer_proposal_id"]))
-            proposal = TransferProposal(
+                return UUID(str(response["transfer_proposal_id"]))
+            proposal = models.TransferProposal(
                 team_id=team.team_id,
                 proposer_id=actor_id,
                 environment=environment.value,
                 direction=direction.value,
                 purpose="MANUAL_TRANSFER",
-                status=ProposalStatus.DRAFT.value,
+                status=domain.ProposalStatus.DRAFT.value,
                 version=1,
                 account_id=account_id,
                 venue=venue,
@@ -113,7 +124,7 @@ class TransferCapitalService(ServiceComponent):
             session.add(proposal)
             session.flush()
             result = {"transfer_proposal_id": str(proposal.transfer_proposal_id)}
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -122,7 +133,7 @@ class TransferCapitalService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="TRANSFER_PROPOSAL_CREATED",
@@ -143,10 +154,12 @@ class TransferCapitalService(ServiceComponent):
         self, transfer_proposal_id: UUID, actor_id: UUID, *, now: datetime
     ) -> None:
         with self.database.session_factory.begin() as session:
-            proposal = session.get(TransferProposal, transfer_proposal_id, with_for_update=True)
+            proposal = session.get(
+                models.TransferProposal, transfer_proposal_id, with_for_update=True
+            )
             if proposal is None:
-                _reject("TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist")
-            team = self.transactions._require_role(
+                rejections.reject("TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist")
+            team = self.transactions.require_role(
                 session,
                 actor_id,
                 "capital.submit",
@@ -155,19 +168,21 @@ class TransferCapitalService(ServiceComponent):
                 team_id=proposal.team_id,
             )
             if proposal.proposer_id != actor_id:
-                _reject("TRANSFER_PROPOSAL_OWNER_REQUIRED", "only the proposer may submit")
+                rejections.reject(
+                    "TRANSFER_PROPOSAL_OWNER_REQUIRED", "only the proposer may submit"
+                )
             if proposal.expires_at <= now:
-                proposal.status = ProposalStatus.EXPIRED.value
+                proposal.status = domain.ProposalStatus.EXPIRED.value
                 proposal.version += 1
                 proposal.updated_at = now
-                _reject("TRANSFER_PROPOSAL_EXPIRED", "transfer proposal expired")
-            if proposal.status != ProposalStatus.DRAFT.value:
-                _reject("TRANSFER_PROPOSAL_NOT_DRAFT", "only a draft may be submitted")
-            proposal.status = ProposalStatus.PENDING_REVIEW.value
+                rejections.reject("TRANSFER_PROPOSAL_EXPIRED", "transfer proposal expired")
+            if proposal.status != domain.ProposalStatus.DRAFT.value:
+                rejections.reject("TRANSFER_PROPOSAL_NOT_DRAFT", "only a draft may be submitted")
+            proposal.status = domain.ProposalStatus.PENDING_REVIEW.value
             proposal.frozen_at = now
             proposal.version += 1
             proposal.updated_at = now
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="TRANSFER_PROPOSAL_SUBMITTED",
@@ -186,21 +201,23 @@ class TransferCapitalService(ServiceComponent):
         self,
         transfer_proposal_id: UUID,
         reviewer_id: UUID,
-        decision: ReviewDecision,
+        decision: domain.ReviewDecision,
         reason: str,
         expected_version: int,
         *,
         now: datetime,
-    ) -> ProposalStatus:
+    ) -> domain.ProposalStatus:
         with self.database.session_factory.begin() as session:
-            proposal = session.get(TransferProposal, transfer_proposal_id, with_for_update=True)
+            proposal = session.get(
+                models.TransferProposal, transfer_proposal_id, with_for_update=True
+            )
             if proposal is None:
-                _reject("TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist")
+                rejections.reject("TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist")
             if proposal.version != expected_version:
-                _reject("VERSION_CONFLICT", "transfer proposal changed before review")
+                rejections.reject("VERSION_CONFLICT", "transfer proposal changed before review")
             if proposal.proposer_id == reviewer_id:
-                _reject("SELF_REVIEW_FORBIDDEN", "a transfer proposer cannot review it")
-            team = self.transactions._require_role(
+                rejections.reject("SELF_REVIEW_FORBIDDEN", "a transfer proposer cannot review it")
+            team = self.transactions.require_role(
                 session,
                 reviewer_id,
                 "capital.review",
@@ -208,26 +225,30 @@ class TransferCapitalService(ServiceComponent):
                 proposal.venue,
                 team_id=proposal.team_id,
             )
-            reviewer = session.get(User, reviewer_id)
-            if reviewer is None or reviewer.principal_type != PrincipalType.HUMAN.value:
-                _reject("SERVICE_REVIEW_FORBIDDEN", "capital review requires a human")
+            reviewer = session.get(models.User, reviewer_id)
+            if reviewer is None or reviewer.principal_type != domain.PrincipalType.HUMAN.value:
+                rejections.reject("SERVICE_REVIEW_FORBIDDEN", "capital review requires a human")
             if proposal.expires_at <= now:
-                proposal.status = ProposalStatus.EXPIRED.value
+                proposal.status = domain.ProposalStatus.EXPIRED.value
                 proposal.version += 1
                 proposal.updated_at = now
-                _reject("TRANSFER_PROPOSAL_EXPIRED", "transfer proposal expired")
-            if proposal.status != ProposalStatus.PENDING_REVIEW.value:
-                _reject("TRANSFER_PROPOSAL_NOT_REVIEWABLE", "transfer proposal is not pending")
+                rejections.reject("TRANSFER_PROPOSAL_EXPIRED", "transfer proposal expired")
+            if proposal.status != domain.ProposalStatus.PENDING_REVIEW.value:
+                rejections.reject(
+                    "TRANSFER_PROPOSAL_NOT_REVIEWABLE", "transfer proposal is not pending"
+                )
             duplicate = session.scalar(
-                select(Approval).where(
-                    Approval.transfer_proposal_id == transfer_proposal_id,
-                    Approval.reviewer_id == reviewer_id,
+                select(models.Approval).where(
+                    models.Approval.transfer_proposal_id == transfer_proposal_id,
+                    models.Approval.reviewer_id == reviewer_id,
                 )
             )
             if duplicate is not None:
-                _reject("REVIEW_ALREADY_RECORDED", "reviewer already decided this transfer")
+                rejections.reject(
+                    "REVIEW_ALREADY_RECORDED", "reviewer already decided this transfer"
+                )
             session.add(
-                Approval(
+                models.Approval(
                     proposal_id=None,
                     transfer_proposal_id=transfer_proposal_id,
                     reviewer_id=reviewer_id,
@@ -237,22 +258,22 @@ class TransferCapitalService(ServiceComponent):
                 )
             )
             session.flush()
-            if decision is ReviewDecision.REJECT:
-                proposal.status = ProposalStatus.REJECTED.value
+            if decision is domain.ReviewDecision.REJECT:
+                proposal.status = domain.ProposalStatus.REJECTED.value
             else:
                 approvals = session.scalar(
                     select(func.count())
-                    .select_from(Approval)
+                    .select_from(models.Approval)
                     .where(
-                        Approval.transfer_proposal_id == transfer_proposal_id,
-                        Approval.decision == ReviewDecision.APPROVE.value,
+                        models.Approval.transfer_proposal_id == transfer_proposal_id,
+                        models.Approval.decision == domain.ReviewDecision.APPROVE.value,
                     )
                 )
                 if int(approvals or 0) >= 2:
-                    proposal.status = ProposalStatus.APPROVED.value
+                    proposal.status = domain.ProposalStatus.APPROVED.value
             proposal.version += 1
             proposal.updated_at = now
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(reviewer_id),
                 event_type="TRANSFER_PROPOSAL_REVIEWED",
@@ -266,7 +287,7 @@ class TransferCapitalService(ServiceComponent):
                 account_id=proposal.account_id,
                 now=now,
             )
-            return ProposalStatus(proposal.status)
+            return domain.ProposalStatus(proposal.status)
 
     def issue_transfer_authorization(
         self,
@@ -283,10 +304,10 @@ class TransferCapitalService(ServiceComponent):
         }
         operation = "capital.authorize"
         with self.database.session_factory.begin() as session:
-            proposal = session.get(TransferProposal, transfer_proposal_id)
+            proposal = session.get(models.TransferProposal, transfer_proposal_id)
             if proposal is None:
-                _reject("TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist")
-            team = self.transactions._require_role(
+                rejections.reject("TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist")
+            team = self.transactions.require_role(
                 session,
                 actor_id,
                 operation,
@@ -295,11 +316,11 @@ class TransferCapitalService(ServiceComponent):
                 team_id=proposal.team_id,
             )
             if proposal.proposer_id == actor_id:
-                _reject(
+                rejections.reject(
                     "CAPITAL_DUTY_SEPARATION_REQUIRED",
                     "the transfer proposer cannot issue its authorization",
                 )
-            digest, response = self.transactions._idempotency(
+            digest, response = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -307,15 +328,17 @@ class TransferCapitalService(ServiceComponent):
                 payload=payload,
             )
             if response is not None:
-                return _as_uuid(str(response["transfer_authorization_id"]))
-            if proposal.status != ProposalStatus.APPROVED.value:
-                _reject("TRANSFER_PROPOSAL_NOT_APPROVED", "two Treasury approvals are required")
+                return UUID(str(response["transfer_authorization_id"]))
+            if proposal.status != domain.ProposalStatus.APPROVED.value:
+                rejections.reject(
+                    "TRANSFER_PROPOSAL_NOT_APPROVED", "two Treasury approvals are required"
+                )
             if expires_at <= now or expires_at > proposal.expires_at:
-                _reject(
+                rejections.reject(
                     "TRANSFER_AUTHORIZATION_EXPIRY_INVALID",
                     "transfer authorization must be short-lived",
                 )
-            authorization = TransferAuthorization(
+            authorization = models.TransferAuthorization(
                 team_id=proposal.team_id,
                 transfer_proposal_id=proposal.transfer_proposal_id,
                 environment=proposal.environment,
@@ -343,7 +366,7 @@ class TransferCapitalService(ServiceComponent):
             session.add(authorization)
             session.flush()
             result = {"transfer_authorization_id": str(authorization.transfer_authorization_id)}
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -352,7 +375,7 @@ class TransferCapitalService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="TRANSFER_AUTHORIZATION_ISSUED",
@@ -382,11 +405,13 @@ class TransferCapitalService(ServiceComponent):
         payload = {"transfer_authorization_id": str(transfer_authorization_id)}
         with self.database.session_factory.begin() as session:
             authorization = session.get(
-                TransferAuthorization, transfer_authorization_id, with_for_update=True
+                models.TransferAuthorization, transfer_authorization_id, with_for_update=True
             )
             if authorization is None:
-                _reject("TRANSFER_AUTHORIZATION_NOT_FOUND", "transfer authorization is missing")
-            team = self.transactions._require_role(
+                rejections.reject(
+                    "TRANSFER_AUTHORIZATION_NOT_FOUND", "transfer authorization is missing"
+                )
+            team = self.transactions.require_role(
                 session,
                 actor_id,
                 operation,
@@ -394,17 +419,19 @@ class TransferCapitalService(ServiceComponent):
                 authorization.venue,
                 team_id=authorization.team_id,
             )
-            proposal = session.get(TransferProposal, authorization.transfer_proposal_id)
+            proposal = session.get(models.TransferProposal, authorization.transfer_proposal_id)
             if proposal is None:
-                _reject("TRANSFER_PROPOSAL_NOT_FOUND", "authorization proposal is missing")
+                rejections.reject(
+                    "TRANSFER_PROPOSAL_NOT_FOUND", "authorization proposal is missing"
+                )
             if proposal.team_id != authorization.team_id:
-                _reject("TEAM_SCOPE_DENIED", "authorization lineage crosses team scope")
+                rejections.reject("TEAM_SCOPE_DENIED", "authorization lineage crosses team scope")
             if proposal.proposer_id == actor_id:
-                _reject(
+                rejections.reject(
                     "CAPITAL_DUTY_SEPARATION_REQUIRED",
                     "the transfer proposer cannot execute its transfer",
                 )
-            digest, response = self.transactions._idempotency(
+            digest, response = self.transactions.idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -412,30 +439,35 @@ class TransferCapitalService(ServiceComponent):
                 payload=payload,
             )
             if response is not None:
-                return _as_uuid(str(response["capital_transfer_id"]))
+                return UUID(str(response["capital_transfer_id"]))
             if not authorization.active or authorization.expires_at <= now:
-                _reject("TRANSFER_AUTHORIZATION_INACTIVE", "transfer authorization is inactive")
-            if allow_live_unsigned and authorization.environment != ExecutionEnvironment.LIVE.value:
-                _reject(
+                rejections.reject(
+                    "TRANSFER_AUTHORIZATION_INACTIVE", "transfer authorization is inactive"
+                )
+            if (
+                allow_live_unsigned
+                and authorization.environment != domain.ExecutionEnvironment.LIVE.value
+            ):
+                rejections.reject(
                     "NOTILT_TRANSFER_ENVIRONMENT_INVALID",
                     "NoTilt transaction plans require a LIVE authorization",
                 )
             if (
-                authorization.environment == ExecutionEnvironment.LIVE.value
+                authorization.environment == domain.ExecutionEnvironment.LIVE.value
                 and not allow_live_unsigned
             ):
-                _reject(
+                rejections.reject(
                     "CAPITAL_TRANSFER_LIVE_DISABLED",
                     "LIVE transfer requires the constrained unsigned transaction workflow",
                 )
-            if authorization.environment == ExecutionEnvironment.LIVE.value:
-                gate = session.get(CapabilityGate, "CAPITAL_TRANSFER")
-                if gate is None or gate.status != CapabilityStatus.ENABLED.value:
-                    _reject(
+            if authorization.environment == domain.ExecutionEnvironment.LIVE.value:
+                gate = session.get(models.CapabilityGate, "CAPITAL_TRANSFER")
+                if gate is None or gate.status != domain.CapabilityStatus.ENABLED.value:
+                    rejections.reject(
                         "CAPABILITY_DISABLED",
                         "CAPITAL_TRANSFER must be explicitly enabled before a LIVE reservation",
                     )
-            self._assert_capital_scope_flat(
+            assert_capital_scope_flat(
                 session,
                 team_id=team.team_id,
                 environment=authorization.environment,
@@ -443,34 +475,34 @@ class TransferCapitalService(ServiceComponent):
                 venue=authorization.venue,
                 now=now,
             )
-            if authorization.direction == CapitalDirection.VENUE_TO_VAULT.value:
+            if authorization.direction == domain.CapitalDirection.VENUE_TO_VAULT.value:
                 latest = session.scalar(
-                    select(ReconciliationRun)
+                    select(models.ReconciliationRun)
                     .where(
-                        ReconciliationRun.team_id == team.team_id,
-                        ReconciliationRun.execution_scope
-                        == _scope_key(
+                        models.ReconciliationRun.team_id == team.team_id,
+                        models.ReconciliationRun.execution_scope
+                        == scope_rules.scope_key(
                             authorization.environment,
                             authorization.account_id,
                             authorization.venue,
                         ),
                     )
-                    .order_by(ReconciliationRun.completed_at.desc())
+                    .order_by(models.ReconciliationRun.completed_at.desc())
                     .limit(1)
                 )
                 if (
                     latest is None
-                    or latest.status != ReconciliationStatus.MATCH.value
+                    or latest.status != domain.ReconciliationStatus.MATCH.value
                     or not latest.is_computed
                 ):
-                    _reject(
+                    rejections.reject(
                         "CAPITAL_RECONCILIATION_REQUIRED",
                         "venue to Vault transfer requires a computed MATCH",
                     )
             session.execute(
                 text("SELECT pg_advisory_xact_lock(:key)"),
                 {
-                    "key": _advisory_lock_key(
+                    "key": scope_rules.advisory_lock_key(
                         str(team.team_id),
                         "capital-source",
                         f"{authorization.environment}:{authorization.source_type}:"
@@ -479,7 +511,7 @@ class TransferCapitalService(ServiceComponent):
                     )
                 },
             )
-            source = self._capital_balance(
+            source = capital_balance(
                 session,
                 team_id=team.team_id,
                 environment=authorization.environment,
@@ -489,7 +521,7 @@ class TransferCapitalService(ServiceComponent):
                 asset=authorization.asset,
                 lock=True,
             )
-            destination = self._capital_balance(
+            destination = capital_balance(
                 session,
                 team_id=team.team_id,
                 environment=authorization.environment,
@@ -500,14 +532,16 @@ class TransferCapitalService(ServiceComponent):
                 lock=True,
             )
             if source.control_status == "UNKNOWN" or destination.deposit_status != "READY":
-                _reject("CAPITAL_FACT_UNKNOWN", "control or destination deposit status is unsafe")
+                rejections.reject(
+                    "CAPITAL_FACT_UNKNOWN", "control or destination deposit status is unsafe"
+                )
             occupied = session.scalar(
-                select(func.coalesce(func.sum(CapitalTransfer.reserved_amount), 0)).where(
-                    CapitalTransfer.team_id == team.team_id,
-                    CapitalTransfer.environment == authorization.environment,
-                    CapitalTransfer.source_id == authorization.source_id,
-                    CapitalTransfer.asset == authorization.asset,
-                    CapitalTransfer.status.in_(OCCUPIED_CAPITAL_STATUSES),
+                select(func.coalesce(func.sum(models.CapitalTransfer.reserved_amount), 0)).where(
+                    models.CapitalTransfer.team_id == team.team_id,
+                    models.CapitalTransfer.environment == authorization.environment,
+                    models.CapitalTransfer.source_id == authorization.source_id,
+                    models.CapitalTransfer.asset == authorization.asset,
+                    models.CapitalTransfer.status.in_(scope_rules.OCCUPIED_CAPITAL_STATUSES),
                 )
             )
             withdrawable = (
@@ -516,8 +550,10 @@ class TransferCapitalService(ServiceComponent):
                 else source.withdrawable_balance
             )
             if withdrawable - Decimal(occupied or 0) < authorization.amount_limit:
-                _reject("CAPITAL_CAPACITY_EXCEEDED", "source confirmed capital is insufficient")
-            transfer = CapitalTransfer(
+                rejections.reject(
+                    "CAPITAL_CAPACITY_EXCEEDED", "source confirmed capital is insufficient"
+                )
+            transfer = models.CapitalTransfer(
                 team_id=team.team_id,
                 transfer_authorization_id=authorization.transfer_authorization_id,
                 environment=authorization.environment,
@@ -528,7 +564,7 @@ class TransferCapitalService(ServiceComponent):
                 destination_id=authorization.destination_id,
                 asset=authorization.asset,
                 network=authorization.network,
-                status=CapitalTransferStatus.SOURCE_RESERVED.value,
+                status=domain.CapitalTransferStatus.SOURCE_RESERVED.value,
                 gross_amount=authorization.amount_limit,
                 reserved_amount=authorization.amount_limit,
                 source_balance_before=source.available_balance,
@@ -553,7 +589,7 @@ class TransferCapitalService(ServiceComponent):
             session.add(transfer)
             session.flush()
             result = {"capital_transfer_id": str(transfer.capital_transfer_id)}
-            self.transactions._save_receipt(
+            self.transactions.save_receipt(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -562,7 +598,7 @@ class TransferCapitalService(ServiceComponent):
                 response=result,
                 now=now,
             )
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="CAPITAL_SOURCE_RESERVED",
@@ -570,7 +606,7 @@ class TransferCapitalService(ServiceComponent):
                 object_id=transfer.capital_transfer_id,
                 reason=(
                     "source availability reserved before independent wallet confirmation"
-                    if authorization.environment == ExecutionEnvironment.LIVE.value
+                    if authorization.environment == domain.ExecutionEnvironment.LIVE.value
                     else "source availability reduced before mock submission"
                 ),
                 correlation_id=transfer.correlation_id,
@@ -585,15 +621,19 @@ class TransferCapitalService(ServiceComponent):
 
     def capital_transfer_command(
         self, capital_transfer_id: UUID, actor_id: UUID, *, now: datetime
-    ) -> CapitalTransferCommand:
+    ) -> capital.CapitalTransferCommand:
         with self.database.session_factory() as session:
-            transfer = session.get(CapitalTransfer, capital_transfer_id)
+            transfer = session.get(models.CapitalTransfer, capital_transfer_id)
             if transfer is None:
-                _reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
-            authorization = session.get(TransferAuthorization, transfer.transfer_authorization_id)
+                rejections.reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
+            authorization = session.get(
+                models.TransferAuthorization, transfer.transfer_authorization_id
+            )
             if authorization is None:
-                _reject("TRANSFER_AUTHORIZATION_NOT_FOUND", "transfer authorization is missing")
-            self.transactions._require_role(
+                rejections.reject(
+                    "TRANSFER_AUTHORIZATION_NOT_FOUND", "transfer authorization is missing"
+                )
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "capital.execute",
@@ -601,12 +641,14 @@ class TransferCapitalService(ServiceComponent):
                 transfer.venue,
                 team_id=transfer.team_id,
             )
-            if transfer.status != CapitalTransferStatus.SOURCE_RESERVED.value:
-                _reject("CAPITAL_TRANSFER_ALREADY_SUBMITTED", "capital transfer is not reserved")
-            return CapitalTransferCommand(
+            if transfer.status != domain.CapitalTransferStatus.SOURCE_RESERVED.value:
+                rejections.reject(
+                    "CAPITAL_TRANSFER_ALREADY_SUBMITTED", "capital transfer is not reserved"
+                )
+            return capital.CapitalTransferCommand(
                 capital_transfer_id=transfer.capital_transfer_id,
-                environment=ExecutionEnvironment(transfer.environment),
-                direction=CapitalDirection(transfer.direction),
+                environment=domain.ExecutionEnvironment(transfer.environment),
+                direction=domain.CapitalDirection(transfer.direction),
                 source_id=transfer.source_id,
                 destination_id=transfer.destination_id,
                 asset=transfer.asset,
@@ -621,17 +663,19 @@ class TransferCapitalService(ServiceComponent):
         self,
         capital_transfer_id: UUID,
         actor_id: UUID,
-        submission: CapitalTransferSubmission,
+        submission: capital.CapitalTransferSubmission,
         *,
         now: datetime,
     ) -> None:
-        if submission.status != CapitalTransferStatus.SUBMITTED.value:
-            _reject("CAPITAL_SUBMISSION_INVALID", "adapter submission status is invalid")
+        if submission.status != domain.CapitalTransferStatus.SUBMITTED.value:
+            rejections.reject("CAPITAL_SUBMISSION_INVALID", "adapter submission status is invalid")
         with self.database.session_factory.begin() as session:
-            transfer = session.get(CapitalTransfer, capital_transfer_id, with_for_update=True)
+            transfer = session.get(
+                models.CapitalTransfer, capital_transfer_id, with_for_update=True
+            )
             if transfer is None:
-                _reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
-            self.transactions._require_role(
+                rejections.reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "capital.execute",
@@ -639,18 +683,22 @@ class TransferCapitalService(ServiceComponent):
                 transfer.venue,
                 team_id=transfer.team_id,
             )
-            if transfer.status == CapitalTransferStatus.SUBMITTED.value:
+            if transfer.status == domain.CapitalTransferStatus.SUBMITTED.value:
                 if transfer.external_transfer_id == submission.external_transfer_id:
                     return
-                _reject("CAPITAL_TRANSFER_IDENTITY_CONFLICT", "submission identity changed")
-            if transfer.status != CapitalTransferStatus.SOURCE_RESERVED.value:
-                _reject("CAPITAL_TRANSFER_NOT_SUBMITTABLE", "transfer cannot be submitted again")
-            transfer.status = CapitalTransferStatus.SUBMITTED.value
+                rejections.reject(
+                    "CAPITAL_TRANSFER_IDENTITY_CONFLICT", "submission identity changed"
+                )
+            if transfer.status != domain.CapitalTransferStatus.SOURCE_RESERVED.value:
+                rejections.reject(
+                    "CAPITAL_TRANSFER_NOT_SUBMITTABLE", "transfer cannot be submitted again"
+                )
+            transfer.status = domain.CapitalTransferStatus.SUBMITTED.value
             transfer.external_transfer_id = submission.external_transfer_id
             transfer.observed_at = submission.observed_at
             transfer.updated_at = now
             transfer.version += 1
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="CAPITAL_TRANSFER_SUBMITTED_MOCK",
@@ -666,40 +714,42 @@ class TransferCapitalService(ServiceComponent):
         self,
         capital_transfer_id: UUID,
         actor_id: UUID,
-        status: CapitalTransferStatus,
+        status: domain.CapitalTransferStatus,
         *,
         transaction_reference: str | None = None,
         fee_amount: Decimal | None = None,
         net_received: Decimal | None = None,
         now: datetime,
-    ) -> CapitalTransferStatus:
+    ) -> domain.CapitalTransferStatus:
         allowed = {
-            CapitalTransferStatus.SUBMITTED: {
-                CapitalTransferStatus.IN_FLIGHT,
-                CapitalTransferStatus.UNKNOWN,
-                CapitalTransferStatus.FAILED_SOURCE_RESTORED,
+            domain.CapitalTransferStatus.SUBMITTED: {
+                domain.CapitalTransferStatus.IN_FLIGHT,
+                domain.CapitalTransferStatus.UNKNOWN,
+                domain.CapitalTransferStatus.FAILED_SOURCE_RESTORED,
             },
-            CapitalTransferStatus.IN_FLIGHT: {
-                CapitalTransferStatus.DESTINATION_CONFIRMED,
-                CapitalTransferStatus.UNKNOWN,
+            domain.CapitalTransferStatus.IN_FLIGHT: {
+                domain.CapitalTransferStatus.DESTINATION_CONFIRMED,
+                domain.CapitalTransferStatus.UNKNOWN,
             },
-            CapitalTransferStatus.UNKNOWN: {
-                CapitalTransferStatus.IN_FLIGHT,
-                CapitalTransferStatus.DESTINATION_CONFIRMED,
-                CapitalTransferStatus.MANUAL_REQUIRED,
-                CapitalTransferStatus.FAILED_SOURCE_RESTORED,
+            domain.CapitalTransferStatus.UNKNOWN: {
+                domain.CapitalTransferStatus.IN_FLIGHT,
+                domain.CapitalTransferStatus.DESTINATION_CONFIRMED,
+                domain.CapitalTransferStatus.MANUAL_REQUIRED,
+                domain.CapitalTransferStatus.FAILED_SOURCE_RESTORED,
             },
-            CapitalTransferStatus.MANUAL_REQUIRED: {
-                CapitalTransferStatus.IN_FLIGHT,
-                CapitalTransferStatus.DESTINATION_CONFIRMED,
-                CapitalTransferStatus.FAILED_SOURCE_RESTORED,
+            domain.CapitalTransferStatus.MANUAL_REQUIRED: {
+                domain.CapitalTransferStatus.IN_FLIGHT,
+                domain.CapitalTransferStatus.DESTINATION_CONFIRMED,
+                domain.CapitalTransferStatus.FAILED_SOURCE_RESTORED,
             },
         }
         with self.database.session_factory.begin() as session:
-            transfer = session.get(CapitalTransfer, capital_transfer_id, with_for_update=True)
+            transfer = session.get(
+                models.CapitalTransfer, capital_transfer_id, with_for_update=True
+            )
             if transfer is None:
-                _reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
-            self.transactions._require_role(
+                rejections.reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "capital.reconcile",
@@ -707,17 +757,23 @@ class TransferCapitalService(ServiceComponent):
                 transfer.venue,
                 team_id=transfer.team_id,
             )
-            current = CapitalTransferStatus(transfer.status)
+            current = domain.CapitalTransferStatus(transfer.status)
             if status is current:
                 return current
             if status not in allowed.get(current, set()):
-                _reject("CAPITAL_TRANSFER_TRANSITION_INVALID", "capital transition is invalid")
-            authorization = session.get(TransferAuthorization, transfer.transfer_authorization_id)
+                rejections.reject(
+                    "CAPITAL_TRANSFER_TRANSITION_INVALID", "capital transition is invalid"
+                )
+            authorization = session.get(
+                models.TransferAuthorization, transfer.transfer_authorization_id
+            )
             if authorization is None:
-                _reject("TRANSFER_AUTHORIZATION_NOT_FOUND", "transfer authorization is missing")
-            if status is CapitalTransferStatus.DESTINATION_CONFIRMED:
+                rejections.reject(
+                    "TRANSFER_AUTHORIZATION_NOT_FOUND", "transfer authorization is missing"
+                )
+            if status is domain.CapitalTransferStatus.DESTINATION_CONFIRMED:
                 if fee_amount is None or net_received is None:
-                    _reject(
+                    rejections.reject(
                         "CAPITAL_DESTINATION_EVIDENCE_REQUIRED",
                         "destination confirmation requires fee and net receipt",
                     )
@@ -726,7 +782,7 @@ class TransferCapitalService(ServiceComponent):
                     or net_received < authorization.min_received
                     or net_received + fee_amount > transfer.gross_amount
                 ):
-                    _reject(
+                    rejections.reject(
                         "CAPITAL_DESTINATION_AMOUNT_INVALID",
                         "destination receipt is outside the authorization",
                     )
@@ -737,7 +793,7 @@ class TransferCapitalService(ServiceComponent):
             transfer.observed_at = now
             transfer.updated_at = now
             transfer.version += 1
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="CAPITAL_TRANSFER_OBSERVED",

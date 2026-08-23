@@ -15,11 +15,15 @@ from trading_control_plane.telegram import (
     TelegramBotClient,
     TelegramBotGateway,
     TelegramProposalReviewAction,
+    TelegramReviewPrompt,
     TelegramUnavailable,
     _default_poster,
+    parse_telegram_callback_data,
+    proposal_review_keyboard,
     render_help,
     render_proposal_notification,
     render_status,
+    telegram_callback_data,
 )
 
 
@@ -55,6 +59,13 @@ def proposal(recipient_id: UUID, *, status: str = "PENDING_REVIEW") -> ProposalN
         risk_tier="MEDIUM",
         quantity="0.001",
         max_risk="1",
+        account_id="acct-1",
+        venue="BINANCE",
+        order_type="MARKET",
+        estimated_notional="100",
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        leverage="1",
     )
 
 
@@ -131,7 +142,7 @@ def test_bot_requires_two_clicks_and_exposes_only_proposal_review() -> None:
     assert [row[0]["text"] for row in keyboard] == [
         "需确认 · 批准",
         "需确认 · 拒绝",
-        "查看完整冻结快照",
+        "打开 Web 安全审核",
     ]
     assert "BTCUSDT" in fake.calls[-1][1]["text"]
     assert "2026年8月4日 20:00 UTC" in fake.calls[-1][1]["text"]
@@ -178,6 +189,10 @@ def test_bot_requires_two_clicks_and_exposes_only_proposal_review() -> None:
     assert "做多" in confirmation["text"]
     assert "中 · <code>MEDIUM</code>" in confirmation["text"]
     assert "最大风险 1" in confirmation["text"]
+    assert "acct-1 / BINANCE" in confirmation["text"]
+    assert "MARKET · 数量 0.001" in confirmation["text"]
+    assert "100 USDT · 1x" in confirmation["text"]
+    assert "不再要求后续按钮" in confirmation["text"]
     assert "2026年8月4日 20:00 UTC" in confirmation["text"]
     confirm_key = confirmation["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
     bot.handle_update({"update_id": 11, "callback_query": callback("confirm", confirm_key)})
@@ -189,6 +204,93 @@ def test_bot_requires_two_clicks_and_exposes_only_proposal_review() -> None:
     )
     assert "审核已记录" in receipt["text"]
     assert "BTCUSDT" in receipt["text"]
+
+
+def test_durable_confirmation_survives_gateway_restart() -> None:
+    fake = FakeBotApi()
+    token = "123456789:abcdefghijklmnopqrstuvwxyz"  # noqa: S105
+    recipient_id = uuid4()
+    delivery_id = uuid4()
+    item = proposal(recipient_id)
+    original_text = render_proposal_notification(item)
+    original_markup = proposal_review_keyboard(delivery_id, item.review_url)
+
+    def resolver(callback_key: str) -> TelegramReviewPrompt | None:
+        reference = parse_telegram_callback_data(callback_key)
+        if reference is None or reference.delivery_id != delivery_id:
+            return None
+        return TelegramReviewPrompt(
+            action=TelegramProposalReviewAction(
+                callback_key=callback_key,
+                recipient_id=recipient_id,
+                proposal_id=item.proposal_id,
+                action=reference.action,
+                proposal_version=item.proposal_version,
+                environment=item.environment,
+                symbol=item.symbol,
+                direction=item.direction,
+                risk_tier=item.risk_tier,
+                max_risk=item.max_risk,
+                expires_at=item.expires_at,
+                account_id=item.account_id,
+                venue=item.venue,
+                order_type=item.order_type,
+                quantity=item.quantity,
+                estimated_notional=item.estimated_notional,
+                quote_currency=item.quote_currency,
+                collateral_currency=item.collateral_currency,
+                leverage=item.leverage,
+                delivery_id=delivery_id,
+                route_version=4,
+            ),
+            source_callback_key=telegram_callback_data(
+                "source", reference.action, delivery_id
+            ),
+            original_text=original_text,
+            original_reply_markup=original_markup,
+        )
+
+    first_gateway = TelegramBotGateway(
+        token=token,
+        allowed_username="telegram-owner",
+        internal_username="telegram-owner",
+        binder=lambda *_args: "telegram-owner",
+        chat_resolver=lambda user_id: "789" if user_id == recipient_id else None,
+        action_resolver=resolver,
+        client=TelegramBotClient(token, base_url="https://telegram.invalid", poster=fake.poster),
+    )
+    first_gateway.set_action_handler(lambda _action, _update_id: "unused")
+    source_key = original_markup["inline_keyboard"][0][0]["callback_data"]
+    first_gateway.handle_update(
+        {"update_id": 40, "callback_query": callback("durable-source", source_key)}
+    )
+    confirmation = next(
+        payload for method, payload in reversed(fake.calls) if method == "editMessageText"
+    )
+    confirm_key = confirmation["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+
+    handled: list[object] = []
+    restarted_gateway = TelegramBotGateway(
+        token=token,
+        allowed_username="telegram-owner",
+        internal_username="telegram-owner",
+        binder=lambda *_args: "telegram-owner",
+        chat_resolver=lambda user_id: "789" if user_id == recipient_id else None,
+        action_resolver=resolver,
+        client=TelegramBotClient(token, base_url="https://telegram.invalid", poster=fake.poster),
+    )
+    restarted_gateway.set_action_handler(
+        lambda action, update_id: handled.extend([action, update_id]) or "review recorded"
+    )
+    restarted_gateway.handle_update(
+        {"update_id": 41, "callback_query": callback("durable-confirm", confirm_key)}
+    )
+
+    assert isinstance(handled[0], TelegramProposalReviewAction)
+    assert handled[0].action == "APPROVE_PROPOSAL"
+    assert handled[0].delivery_id == delivery_id
+    assert handled[0].route_version == 4
+    assert handled[1] == 41
 
 
 def test_authoritative_rejection_is_an_alert_and_never_claims_a_write() -> None:
@@ -473,7 +575,8 @@ def test_default_poster_rejects_unsuccessful_response(monkeypatch: Any) -> None:
 
 def test_help_status_and_unknown_commands_explain_narrow_boundary() -> None:
     assert "唯一可执行动作" in render_help()
-    assert "不看资金、不下单" in render_help()
+    assert "Bot 本身不看资金、不调用交易所、不划转资金" in render_help()
+    assert "不再要求后续按钮" in render_help()
     assert "冻结提案批准 / 拒绝" in render_status()
     assert "风险开关" in render_status()
 

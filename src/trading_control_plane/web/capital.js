@@ -1,4 +1,6 @@
 let capitalSeriesColorIndex = {TOTAL:6};
+let capitalOperationsPage = 1;
+let capitalOperationsPageSize = 50;
 
 function partitionCapitalRecords(records) {
   return {
@@ -91,7 +93,7 @@ function capitalSourcePresentation(netWorth, source, latestPoint) {
     : nearExpiry
       ? '当前，接近过期'
     : individuallyCurrent
-      ? '当前可信'
+      ? '可信'
       : capitalSourceIssue(netWorth.issues, source) || '等待数据';
   return {
     aligned, individuallyCurrent, nearExpiry, observedAt, state, value,
@@ -274,16 +276,893 @@ function formatDirectCapitalBlocker(code) {
     HUMAN_WALLET_CONFIRMATION_CANCELLED:'用户已取消钱包确认；资金保持原位',
     TREASURY_SOURCE_RECEIPT_REQUIRED:'仍需验证链上金库释放及到账回执',
     TREASURY_DESTINATION_RECEIPT_REQUIRED:'仍需验证链上金库最终入金回执',
-    HYPERLIQUID_WITHDRAWAL_REVALIDATION_REQUIRED:'主账户资金归集已确认；须重新读取实时可提现余额后再生成 withdraw3',
-    BINANCE_CAPITAL_CREDENTIALS_MISSING:'未加载币安专用资金 API 凭据',
+    HYPERLIQUID_WITHDRAWAL_REVALIDATION_REQUIRED:'主账户资金归集已确认；须重新读取实时可提现余额与官方 USDC 路由后再生成提现请求',
+    BINANCE_CAPITAL_CREDENTIALS_MISSING:'未加载所选币安账户的已验证资金 API 凭据',
+    CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY:'所选币安账户凭据尚未通过连接验证',
+    CAPITAL_ACCOUNT_ENVIRONMENT_MISMATCH:'所选币安账户与当前生产环境不一致',
+    BINANCE_CAPITAL_TIME_SYNC_FAILED:'币安签名请求前的服务器时间同步失败',
+    BINANCE_INTERNAL_TRANSFER_PERMISSION_DISABLED:'币安 Universal Transfer 实际端点拒绝访问，请核对现货/合约划转权限、IP 白名单和账户范围',
     BINANCE_DEPOSIT_PREFLIGHT_REQUIRED:'需要读取并核对币安实时充值地址与网络状态',
     BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_REQUIRED:'需要核对币安 API 权限、IP 限制、白名单、余额、额度和手续费',
     BINANCE_RESTRICTED_WITHDRAWAL_ADAPTER_UNAVAILABLE:'币安受限提现 API 尚未配置',
     SAFE_ADDRESS_MISSING:'未配置 Safe Smart Account',
     SAFE_DELEGATE_ADDRESS_MISSING:'未配置 Safe 委托地址（delegate）',
     SAFE_SPENDING_LIMIT_NOT_CONFIGURED:'Safe 只读 RPC 或 Spending Limit 范围未配置',
+    SAFE_GATEWAY_UNAVAILABLE:'Safe Gateway 运行时未就绪',
+    SAFE_PREFLIGHT_REJECTED:'Safe 链上实时预检未通过',
+    SAFE_RESPONSE_INVALID:'Safe RPC 返回的数据无效',
     SAFE_ALLOWANCE_PREFLIGHT_REQUIRED:'必须读取 Safe 当前额度、余额、重置周期与 nonce',
+    CAPITAL_DIRECT_OPERATION_EXPIRED:'操作已过期且从未提交；资金保持原位，请新建操作并重新读取实时状态',
   }[code] || code);
+}
+
+const DIRECT_CAPITAL_PREFLIGHT_BLOCKERS = new Set([
+  'SAFE_ALLOWANCE_PREFLIGHT_REQUIRED',
+  'BINANCE_DEPOSIT_PREFLIGHT_REQUIRED',
+  'BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_REQUIRED',
+]);
+
+const ARBITRUM_WALLET_CHAIN = {
+  chainId:'0xa4b1',
+  chainName:'Arbitrum One',
+  nativeCurrency:{name:'Ether', symbol:'ETH', decimals:18},
+  rpcUrls:['https://arb1.arbitrum.io/rpc'],
+  blockExplorerUrls:['https://arbiscan.io'],
+};
+let directCapitalWalletActions = new Map();
+let directCapitalAssuranceRecords = new Map();
+const directCapitalReceiptReconciliations = new Map();
+const directCapitalOutboundContinuations = new Map();
+let capitalBackgroundRefreshTimer = null;
+const BINANCE_RECEIPT_BROWSER_LEASE_MS = 60_000;
+
+function capitalPageHasActiveInteraction() {
+  if (document.querySelector('.capital-page dialog[open]')) return true;
+  const active = document.activeElement;
+  return Boolean(active?.closest?.('.capital-page input, .capital-page select, .capital-page textarea, .capital-page [contenteditable="true"]'));
+}
+
+function scheduleCapitalBackgroundRefresh(delayMs = 0) {
+  if (capitalBackgroundRefreshTimer) clearTimeout(capitalBackgroundRefreshTimer);
+  capitalBackgroundRefreshTimer = setTimeout(async () => {
+    capitalBackgroundRefreshTimer = null;
+    if (location.pathname !== '/capital') return;
+    if (capitalPageHasActiveInteraction()) {
+      scheduleCapitalBackgroundRefresh(3000);
+      return;
+    }
+    await route({preserveView:true, backgroundRefresh:true});
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
+async function refreshCapitalPage() {
+  if (location.pathname !== '/capital') return;
+  await route({preserveView:true, backgroundRefresh:true});
+}
+
+async function withBinanceReceiptBrowserSingleflight(reconciliationKey, action) {
+  const lockName = `tradeops:binance-receipt:${reconciliationKey}`;
+  const browserLocks = globalThis.navigator?.locks;
+  if (browserLocks?.request) {
+    return browserLocks.request(lockName, {mode:'exclusive', ifAvailable:true}, lock => (
+      lock ? action() : {pending:true, active_reconciliation:true}
+    ));
+  }
+  const storage = globalThis.localStorage;
+  if (!storage) return action();
+  const owner = crypto.randomUUID();
+  const renew = () => storage.setItem(lockName, JSON.stringify({owner, expiresAt:Date.now() + BINANCE_RECEIPT_BROWSER_LEASE_MS}));
+  try {
+    const active = JSON.parse(storage.getItem(lockName) || 'null');
+    if (active?.owner && Number(active.expiresAt) > Date.now()) return {pending:true, active_reconciliation:true};
+    renew();
+    const claimed = JSON.parse(storage.getItem(lockName) || 'null');
+    if (claimed?.owner !== owner) return {pending:true, active_reconciliation:true};
+  } catch (_error) {
+    return action();
+  }
+  const heartbeat = setInterval(renew, BINANCE_RECEIPT_BROWSER_LEASE_MS / 2);
+  try {
+    return await action();
+  } finally {
+    clearInterval(heartbeat);
+    try {
+      const active = JSON.parse(storage.getItem(lockName) || 'null');
+      if (active?.owner === owner) storage.removeItem(lockName);
+    } catch (_error) { /* the server-side lease remains authoritative */ }
+  }
+}
+
+function directCapitalCurrentPhase(operation) {
+  const stages = operation?.stages || [];
+  const confirmed = new Set(stages.filter(stage => stage.status === 'CONFIRMED').map(stage => stage.code));
+  const submitted = stages.some(stage => String(stage.code || '').endsWith('_SUBMITTED_BY_HUMAN_WALLET')
+    || stage.code === 'BINANCE_RESTRICTED_WITHDRAWAL_SUBMITTED');
+  if (operation?.status === 'SETTLED') return '资金路径已完成，公开回执已确认';
+  if (operation?.path === 'VAULT_TO_BINANCE' && operation?.receipt_next_due_at) {
+    return `后台自动续接中（第 ${Number(operation.receipt_attempt_count || 0)} / 10 次检查）`;
+  }
+  if (confirmed.has('HYPERLIQUID_WITHDRAWAL_ARBITRUM_CONFIRMED')) return 'Safe 已到账，正在完成最终状态同步';
+  if (confirmed.has('HYPERLIQUID_WITHDRAWAL_LEDGER_CONFIRMED')) return 'Hyperliquid 提现已确认，正在等待 Arbitrum / Safe 到账';
+  if (submitted && operation?.path === 'HYPERLIQUID_TO_VAULT') return '钱包提交成功，正在核对 Hyperliquid 账本';
+  if (submitted) return '资金操作已提交，正在核对公开回执';
+  if (operation?.status === 'BLOCKED') return '安全预检尚未通过，未提交资金操作';
+  return '资金操作已创建，正在准备下一步';
+}
+
+function directCapitalReceiptHash(operation) {
+  const confirmed = [...(operation?.stages || [])].reverse().find(stage =>
+    ['HYPERLIQUID_WITHDRAWAL_ARBITRUM_CONFIRMED','TREASURY_DESTINATION_RECEIPT_CONFIRMED','BINANCE_WITHDRAWAL_RECEIPT_CONFIRMED','BINANCE_DEPOSIT_RECEIPT_CONFIRMED'].includes(stage.code));
+  return confirmed?.evidence?.transactionHash || confirmed?.evidence?.transaction_hash || '';
+}
+
+function renderDirectCapitalLiveProgress(operations) {
+  const operation = (operations || [])[0];
+  if (!operation) return '<div data-capital-live-progress></div>';
+  const path = DIRECT_CAPITAL_PATHS.find(item => item.path === operation.path);
+  const label = path ? `${path.from} → ${path.to}` : operation.path;
+  const tone = operation.status === 'SETTLED' ? 'is-success' : operation.status === 'BLOCKED' ? 'is-warning' : '';
+  const hash = directCapitalReceiptHash(operation);
+  const receiptLink = /^0x[0-9a-fA-F]{64}$/.test(hash)
+    ? `<a href="https://arbiscan.io/tx/${escapeHtml(hash)}" target="_blank" rel="noopener">查看 Arbitrum 回执</a>`
+    : '';
+  return `<div class="callout capital-live-progress ${tone}" data-capital-live-progress data-operation-id="${escapeHtml(operation.operation_id)}"><div><small>最近一次资金操作</small><b>${escapeHtml(label)} · ${fmtNumber(operation.amount)} ${escapeHtml(operation.asset)}</b><span>${escapeHtml(directCapitalCurrentPhase(operation))}</span></div><div><span>操作 ${shortId(operation.operation_id)} · ${escapeHtml(fmtDate(operation.updated_at || operation.final_confirmed_at))}</span>${receiptLink}</div></div>`;
+}
+
+function setDirectCapitalLiveProgress(message, operationId = '') {
+  const host = document.querySelector('[data-capital-live-progress]');
+  if (!host) return;
+  if (operationId && host.dataset.operationId !== String(operationId)) return;
+  const status = host.querySelector('div:first-child span');
+  if (status) status.textContent = message;
+}
+
+const announcedCapitalWalletProviders = [];
+window.addEventListener('eip6963:announceProvider', event => {
+  const provider = event?.detail?.provider;
+  if (!provider?.request || announcedCapitalWalletProviders.some(item => item.provider === provider)) return;
+  announcedCapitalWalletProviders.push({provider, info:event.detail.info || {}});
+});
+window.dispatchEvent(new Event('eip6963:requestProvider'));
+
+function capitalWalletError(code, message, cause = null) {
+  const error = new Error(message);
+  error.code = code;
+  if (cause) error.cause = cause;
+  return error;
+}
+
+function capitalWalletProviders() {
+  const providers = [];
+  const add = (provider, info = {}) => {
+    if (provider?.request && !providers.some(item => item.provider === provider)) providers.push({provider, info});
+  };
+  (Array.isArray(window.ethereum?.providers) ? window.ethereum.providers : []).forEach(provider => add(provider));
+  add(window.ethereum);
+  announcedCapitalWalletProviders.forEach(item => add(item.provider, item.info));
+  return providers;
+}
+
+function isWalletCancellation(error) {
+  const message = String(error?.message || '').toLowerCase();
+  return Number(error?.code) === 4001 || error?.code === 'ACTION_REJECTED'
+    || message.includes('user rejected') || message.includes('user denied');
+}
+
+function normalizeCapitalWalletError(error) {
+  if (error?.code && ['WALLET_', 'HYPERLIQUID_'].some(prefix => String(error.code).startsWith(prefix))) return error;
+  const message = String(error?.message || '').toLowerCase();
+  if (message.includes('insufficient funds') || message.includes('insufficient balance')) {
+    return capitalWalletError('WALLET_GAS_INSUFFICIENT', '当前钱包没有足够的 Arbitrum ETH 支付 Gas。', error);
+  }
+  if (Number(error?.code) === -32002 || message.includes('already pending')) {
+    return capitalWalletError('WALLET_REQUEST_PENDING', '钱包中已有待处理请求，请先在钱包里完成或取消。', error);
+  }
+  if (Number(error?.code) === 4100 || message.includes('unauthorized')) {
+    return capitalWalletError('WALLET_ACCOUNT_ACCESS_DENIED', '钱包尚未授权 TradeOps 读取当前账户。', error);
+  }
+  return capitalWalletError('WALLET_REQUEST_FAILED', '钱包没有接受本次请求，请打开钱包查看具体提示后重试。', error);
+}
+
+async function walletProvider(expectedAddress) {
+  const candidates = capitalWalletProviders();
+  if (!candidates.length) {
+    throw capitalWalletError(
+      'WALLET_PROVIDER_NOT_AVAILABLE',
+      '当前标签页没有检测到钱包。请允许钱包扩展访问 127.0.0.1，并刷新后重试。',
+    );
+  }
+  if (expectedAddress) {
+    for (const candidate of candidates) {
+      try {
+        const accounts = await candidate.provider.request({method:'eth_accounts'});
+        if (String(accounts?.[0] || '').toLowerCase() === String(expectedAddress).toLowerCase()) {
+          return candidate.provider;
+        }
+      } catch (_error) { /* The interactive request below remains authoritative. */ }
+    }
+  }
+  if (candidates.length > 1) {
+    throw capitalWalletError(
+      'WALLET_PROVIDER_SELECTION_REQUIRED',
+      '检测到多个钱包，但没有钱包连接到本次要求的账户。请在目标钱包中连接当前站点后重试。',
+    );
+  }
+  return candidates[0].provider;
+}
+
+async function connectedArbitrumWallet(expectedAddress) {
+  const provider = await walletProvider(expectedAddress);
+  let accounts;
+  try {
+    accounts = await provider.request({method:'eth_requestAccounts'});
+  } catch (error) {
+    if (isWalletCancellation(error)) throw error;
+    throw normalizeCapitalWalletError(error);
+  }
+  const account = String(accounts?.[0] || '');
+  if (!/^0x[0-9a-fA-F]{40}$/.test(account)) {
+    throw capitalWalletError('WALLET_ACCOUNT_INVALID', '钱包没有返回有效的账户地址。');
+  }
+  if (expectedAddress && account.toLowerCase() !== String(expectedAddress).toLowerCase()) {
+    throw capitalWalletError('WALLET_ACCOUNT_MISMATCH', `请在钱包中切换到本次操作要求的账户 ${expectedAddress}。`);
+  }
+  let currentChain;
+  try {
+    currentChain = await provider.request({method:'eth_chainId'});
+  } catch (error) {
+    throw normalizeCapitalWalletError(error);
+  }
+  if (String(currentChain).toLowerCase() !== ARBITRUM_WALLET_CHAIN.chainId) {
+    try {
+      await provider.request({method:'wallet_switchEthereumChain', params:[{chainId:ARBITRUM_WALLET_CHAIN.chainId}]});
+    } catch (error) {
+      if (isWalletCancellation(error)) throw error;
+      if (Number(error?.code) !== 4902) throw normalizeCapitalWalletError(error);
+      try {
+        await provider.request({method:'wallet_addEthereumChain', params:[ARBITRUM_WALLET_CHAIN]});
+      } catch (addError) {
+        if (isWalletCancellation(addError)) throw addError;
+        throw capitalWalletError('WALLET_NETWORK_SWITCH_FAILED', '钱包未能切换到 Arbitrum One。', addError);
+      }
+    }
+  }
+  return {provider, account};
+}
+
+function walletHexValue(value) {
+  const amount = BigInt(String(value ?? '0'));
+  return `0x${amount.toString(16)}`;
+}
+
+async function sendWalletTransaction(transaction, expectedAddress) {
+  const expected = expectedAddress || transaction.from || transaction.sender;
+  const {provider, account} = await connectedArbitrumWallet(expected);
+  const hash = await provider.request({
+    method:'eth_sendTransaction',
+    params:[{
+      from:account,
+      to:transaction.to,
+      data:transaction.data || '0x',
+      value:walletHexValue(transaction.value),
+    }],
+  });
+  if (!/^0x[0-9a-fA-F]{64}$/.test(String(hash))) throw new Error('钱包没有返回有效的交易哈希。');
+  return String(hash);
+}
+
+function splitWalletSignature(signature) {
+  const value = String(signature || '');
+  if (!/^0x[0-9a-fA-F]{130}$/.test(value)) throw new Error('钱包没有返回有效的签名。');
+  const rawV = Number.parseInt(value.slice(130, 132), 16);
+  return {r:`0x${value.slice(2, 66)}`, s:`0x${value.slice(66, 130)}`, v:rawV < 27 ? rawV + 27 : rawV};
+}
+
+function hyperliquidSubmissionReason(body) {
+  const candidate = body?.response?.data?.message
+    || body?.response?.message
+    || body?.response
+    || body?.message
+    || body?.msg
+    || body?.error;
+  if (candidate == null) return '官方端点未返回可读原因';
+  const text = typeof candidate === 'string' ? candidate : JSON.stringify(candidate);
+  return String(text).replace(/\s+/g, ' ').slice(0, 240);
+}
+
+async function submitHyperliquidWalletAction(artifact) {
+  if (artifact.kind === 'HYPERLIQUID_ARBITRUM_DEPOSIT_UNSIGNED_TRANSACTION') {
+    return {transaction_hash:await sendWalletTransaction(artifact, artifact.from)};
+  }
+  const {provider, account} = await connectedArbitrumWallet(artifact.account);
+  let signature;
+  try {
+    signature = await provider.request({
+      method:'eth_signTypedData_v4',
+      params:[account, JSON.stringify(artifact.typedData)],
+    });
+  } catch (error) {
+    if (isWalletCancellation(error)) throw error;
+    throw normalizeCapitalWalletError(error);
+  }
+  let response;
+  try {
+    response = await fetch(artifact.exchangeEndpoint, {
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({...artifact.exchangeRequestTemplate, signature:splitWalletSignature(signature)}),
+    });
+  } catch (error) {
+    throw capitalWalletError(
+      'HYPERLIQUID_BROWSER_SUBMISSION_UNAVAILABLE',
+      '钱包签名已完成，但浏览器未能连接 Hyperliquid 官方提交端点。请先核对 Hyperliquid 记录，确认未提交后再重试。',
+      error,
+    );
+  }
+  let body = null;
+  try { body = await response.json(); } catch (_error) { body = null; }
+  if (!response.ok || body?.status === 'err' || body?.response?.type === 'error') {
+    const reason = hyperliquidSubmissionReason(body);
+    const rejection = capitalWalletError(
+      response.status === 429 ? 'HYPERLIQUID_RATE_LIMITED' : 'HYPERLIQUID_SUBMISSION_REJECTED',
+      `Hyperliquid 官方端点拒绝了已签名请求：${reason}（HTTP ${response.status}）。资金记录未标记为已提交。`,
+    );
+    rejection.details = {http_status:response.status, hyperliquid_response:body};
+    throw rejection;
+  }
+  return {nonce:Number(artifact.nonce), action_hash:body?.response?.data?.hash || body?.data?.hash || undefined};
+}
+
+async function recordDirectWalletOutcome({operationId, version, stage, outcome, evidence = {}}) {
+  return api(`/api/capital/direct-operations/${operationId}/wallet-submission`, {
+    method:'POST',
+    body:JSON.stringify({
+      ...evidence,
+      expected_version:Number(version),
+      stage,
+      outcome,
+      final_confirmed:true,
+      idempotency_key:crypto.randomUUID(),
+    }),
+  });
+}
+
+async function executeDirectWalletAction(action) {
+  let evidence;
+  const submittedHashes = [];
+  try {
+    if (action.kind === 'HYPERLIQUID') {
+      evidence = await submitHyperliquidWalletAction(action.artifact);
+    } else {
+      const transactions = action.transactions || [action.transaction];
+      let transactionHash = null;
+      for (const transaction of transactions) {
+        transactionHash = await sendWalletTransaction(transaction, action.expectedWallet);
+        submittedHashes.push(transactionHash);
+      }
+      evidence = {transaction_hash:transactionHash};
+    }
+  } catch (error) {
+    if (isWalletCancellation(error)) {
+      if (!submittedHashes.length) {
+        await recordDirectWalletOutcome({...action, outcome:'CANCELLED'});
+        throw capitalWalletError('WALLET_CONFIRMATION_CANCELLED', '已取消钱包确认，资金未发送。');
+      }
+      throw capitalWalletError('WALLET_CONFIRMATION_PARTIALLY_CANCELLED', `已取消后续钱包确认；前序交易 ${submittedHashes.at(-1)} 已提交，流程保持暂停并等待公开回执。`);
+    }
+    throw normalizeCapitalWalletError(error);
+  }
+  const recorded = await recordDirectWalletOutcome({...action, outcome:'SUBMITTED', evidence});
+  return {recorded, evidence};
+}
+
+function walletActionFromTreasuryPreview({operationId, path, preview}) {
+  const stage = path.startsWith('VAULT_TO_') ? 'TREASURY_WITHDRAWAL' : 'TREASURY_DEPOSIT';
+  if (preview.artifact) {
+    return {
+      operationId, version:preview.version, stage:'NOTILT_DESTINATION_TRANSFER',
+      kind:'TRANSACTION', transaction:preview.artifact,
+      expectedWallet:preview.artifact.from,
+    };
+  }
+  if (preview.signature_request) {
+    return {
+      operationId, version:preview.version, stage, kind:'TRANSACTION',
+      transaction:preview.signature_request,
+      expectedWallet:preview.signature_request.from || preview.signature_request.sender,
+    };
+  }
+  return {
+    operationId, version:preview.version, stage, kind:'TRANSACTIONS',
+    transactions:preview.transactions,
+    expectedWallet:preview.wallet_address,
+  };
+}
+
+function walletActionFromHyperliquidPreview({operationId, preview}) {
+  const artifact = preview.artifact;
+  return {
+    operationId,
+    version:preview.version,
+    kind:'HYPERLIQUID',
+    artifact,
+    stage:artifact.kind === 'HYPERLIQUID_ARBITRUM_DEPOSIT_UNSIGNED_TRANSACTION'
+      ? 'HYPERLIQUID_DEPOSIT'
+      : artifact.kind === 'HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST'
+        ? 'HYPERLIQUID_CLASS_TRANSFER'
+        : 'HYPERLIQUID_WITHDRAWAL',
+  };
+}
+
+function assertDirectWalletExecutionReady(preview, operationId, stage) {
+  const operation = (preview.data?.direct_operations || []).find(item => item.operation_id === operationId);
+  if (preview.data?.real_transfer_gate !== 'ENABLED') {
+    throw new Error('CAPITAL_TRANSFER 当前未启用，本次钱包请求保持阻断。');
+  }
+  const allowed = new Set([
+    'HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED',
+    // A prior wallet cancellation proves that nothing was submitted.  A fresh,
+    // explicit click must be able to reopen the exact same unsigned request.
+    'HUMAN_WALLET_CONFIRMATION_CANCELLED',
+  ]);
+  if (stage === 'TREASURY_DEPOSIT') allowed.add('TREASURY_DESTINATION_RECEIPT_REQUIRED');
+  const blockers = (operation?.blockers || preview.blockers || []).filter(code => !allowed.has(code));
+  if (blockers.length) {
+    const error = new Error(`当前仍有 ${blockers.length} 项安全阻断：${blockers.map(formatDirectCapitalBlocker).join('；')}`);
+    error.code = blockers[0];
+    throw error;
+  }
+}
+
+async function prepareTreasuryWalletAction({operationId, version, path, treasuryProvider}) {
+  const suffix = treasuryProvider === 'SAFE_SPENDING_LIMIT'
+    ? 'safe-spending-preview'
+    : 'notilt-unsigned-preview';
+  const preview = await api(`/api/capital/direct-operations/${operationId}/${suffix}`, {
+    method:'POST',
+    timeoutMs:treasuryProvider === 'SAFE_SPENDING_LIMIT' ? 45_000 : REQUEST_TIMEOUT_MS,
+    body:JSON.stringify({expected_version:Number(version), final_confirmed:true, idempotency_key:crypto.randomUUID()}),
+  });
+  const action = walletActionFromTreasuryPreview({operationId, path, preview});
+  assertDirectWalletExecutionReady(preview, operationId, action.stage);
+  return action;
+}
+
+async function prepareNoTiltReleaseExecution({operationId, version}) {
+  const preview = await api(`/api/capital/direct-operations/${operationId}/notilt-release-execution-preview`, {
+    method:'POST',
+    body:JSON.stringify({expected_version:Number(version), final_confirmed:true, idempotency_key:crypto.randomUUID()}),
+  });
+  const action = {
+    operationId,
+    version:preview.version,
+    stage:'NOTILT_RELEASE_EXECUTION',
+    kind:'TRANSACTIONS',
+    transactions:preview.transactions,
+    expectedWallet:preview.wallet_address,
+  };
+  assertDirectWalletExecutionReady(preview, operationId, action.stage);
+  return action;
+}
+
+async function prepareNoTiltDestinationTransfer({operationId, version}) {
+  const preview = await api(`/api/capital/direct-operations/${operationId}/notilt-destination-preview`, {
+    method:'POST',
+    body:JSON.stringify({expected_version:Number(version), final_confirmed:true, idempotency_key:crypto.randomUUID()}),
+  });
+  const action = walletActionFromTreasuryPreview({operationId, path:'VAULT_TO_BINANCE', preview});
+  assertDirectWalletExecutionReady(preview, operationId, action.stage);
+  return action;
+}
+
+async function prepareHyperliquidWalletAction({operationId, version}) {
+  const preview = await api(`/api/capital/direct-operations/${operationId}/hyperliquid-preview`, {
+    method:'POST',
+    timeoutMs:45_000,
+    body:JSON.stringify({expected_version:Number(version), final_confirmed:true, idempotency_key:crypto.randomUUID()}),
+  });
+  const action = walletActionFromHyperliquidPreview({operationId, preview});
+  assertDirectWalletExecutionReady(preview, operationId, action.stage);
+  return action;
+}
+
+async function prepareAndSubmitBinanceWithdrawal({operationId, version}) {
+  const preview = await api(`/api/capital/direct-operations/${operationId}/binance-preview`, {
+    method:'POST',
+    timeoutMs:60_000,
+    body:JSON.stringify({expected_version:Number(version), final_confirmed:true, idempotency_key:crypto.randomUUID()}),
+  });
+  return api(`/api/capital/direct-operations/${operationId}/binance-submit`, {
+    method:'POST',
+    body:JSON.stringify({
+      expected_version:Number(preview.version),
+      final_confirmed:true,
+      confirmation_phrase:'CONFIRM_BINANCE_WITHDRAWAL',
+      idempotency_key:crypto.randomUUID(),
+    }),
+  });
+}
+
+const PUBLIC_RECEIPT_PENDING_CODES = new Set([
+  'ARBITRUM_RECEIPT_NOT_CONFIRMED',
+  'ARBITRUM_RECEIPT_UNAVAILABLE',
+  'HYPERLIQUID_RECEIPT_NOT_CONFIRMED',
+  'BINANCE_CAPITAL_RECEIPT_NOT_FOUND',
+  'BINANCE_CAPITAL_WITHDRAWAL_PENDING',
+  'BINANCE_CAPITAL_DEPOSIT_PENDING',
+  'BINANCE_INTERNAL_TRANSFER_PENDING',
+  'BINANCE_CAPITAL_RATE_LIMITED',
+  'BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED',
+  'BINANCE_RECEIPT_CHECK_IN_PROGRESS',
+]);
+
+const waitForPublicReceipt = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+async function retryDirectPublicReceipt(request, {attempts = 20, delayMs = 3000, delaysMs = null} = {}) {
+  let lastPendingError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await request();
+    } catch (error) {
+      if (!PUBLIC_RECEIPT_PENDING_CODES.has(error?.code)) throw error;
+      lastPendingError = error;
+      if (error?.code === 'BINANCE_RECEIPT_CHECK_IN_PROGRESS') break;
+      if (attempt + 1 < attempts) {
+        const nextRetryAt = Date.parse(error?.details?.next_retry_at || '');
+        const retryAfterMs = Number(error?.details?.retry_after_seconds || 0) * 1000;
+        const serverDelayMs = Number.isFinite(nextRetryAt) ? Math.max(0, nextRetryAt - Date.now()) : 0;
+        const scheduledDelayMs = delaysMs?.[Math.min(attempt, delaysMs.length - 1)] ?? delayMs;
+        await waitForPublicReceipt(Math.max(scheduledDelayMs, retryAfterMs, serverDelayMs));
+      }
+    }
+  }
+  return {pending:true, error:lastPendingError};
+}
+
+async function verifyTreasuryWithdrawalReceipt({operationId, version, transactionHash}) {
+  return retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/treasury-withdrawal-receipt`, {
+    method:'POST',
+    timeoutMs:60_000,
+    body:JSON.stringify({
+      expected_version:Number(version),
+      transaction_hash:transactionHash,
+      idempotency_key:crypto.randomUUID(),
+    }),
+  }), {attempts:200, delayMs:3000});
+}
+
+async function verifyHyperliquidDepositReceipts({operationId, version, transactionHash}) {
+  const chain = await retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
+    method:'POST',
+    timeoutMs:30_000,
+    body:JSON.stringify({
+      expected_version:Number(version),
+      stage:'HYPERLIQUID_DEPOSIT_ARBITRUM',
+      transaction_hash:transactionHash,
+      idempotency_key:crypto.randomUUID(),
+    }),
+  }));
+  if (chain.pending) return chain;
+  return retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
+    method:'POST',
+    timeoutMs:30_000,
+    body:JSON.stringify({
+      expected_version:Number(chain.version),
+      stage:'HYPERLIQUID_DEPOSIT_LEDGER',
+      action_hash:transactionHash,
+      idempotency_key:crypto.randomUUID(),
+    }),
+  }), {attempts:24, delayMs:5000});
+}
+
+async function verifyRecordedHyperliquidDeposit(operation) {
+  const stages = operation.stages || [];
+  const submission = [...stages].reverse().find(stage => stage.code === 'HYPERLIQUID_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET');
+  if (!submission?.transaction_hash) return {pending:true};
+  const chainConfirmed = stages.some(stage => stage.code === 'HYPERLIQUID_DEPOSIT_ARBITRUM_CONFIRMED');
+  const ledgerConfirmed = stages.some(stage => stage.code === 'HYPERLIQUID_DEPOSIT_LEDGER_CONFIRMED');
+  if (chainConfirmed && ledgerConfirmed) return {pending:false, version:Number(operation.version)};
+  if (!chainConfirmed) {
+    return verifyHyperliquidDepositReceipts({
+      operationId:operation.operation_id,
+      version:Number(operation.version),
+      transactionHash:submission.transaction_hash,
+    });
+  }
+  return retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operation.operation_id}/hyperliquid-receipt`, {
+    method:'POST',
+    timeoutMs:30_000,
+    body:JSON.stringify({
+      expected_version:Number(operation.version),
+      stage:'HYPERLIQUID_DEPOSIT_LEDGER',
+      action_hash:submission.transaction_hash,
+      idempotency_key:crypto.randomUUID(),
+    }),
+  }), {attempts:24, delayMs:5000});
+}
+
+async function verifyHyperliquidWithdrawalReceipts({operationId, version, actionHash, nonce}) {
+  setDirectCapitalLiveProgress('钱包提交成功，正在核对 Hyperliquid 账本', operationId);
+  const ledger = await retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
+    method:'POST',
+    timeoutMs:30_000,
+    body:JSON.stringify({
+      expected_version:Number(version),
+      stage:'HYPERLIQUID_WITHDRAWAL_LEDGER',
+      action_hash:actionHash || undefined,
+      nonce:Number(nonce),
+      idempotency_key:crypto.randomUUID(),
+    }),
+  }), {attempts:30, delayMs:2000});
+  if (ledger.pending) return ledger;
+  setDirectCapitalLiveProgress('Hyperliquid 提现已确认，正在等待 Arbitrum / Safe 到账', operationId);
+  const chain = await retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
+    method:'POST',
+    timeoutMs:30_000,
+    body:JSON.stringify({
+      expected_version:Number(ledger.version),
+      stage:'HYPERLIQUID_WITHDRAWAL_ARBITRUM',
+      idempotency_key:crypto.randomUUID(),
+    }),
+  }), {attempts:80, delayMs:5000});
+  if (!chain.pending) setDirectCapitalLiveProgress('Safe 已到账，公开回执已确认', operationId);
+  return chain;
+}
+
+function reconcilePendingHyperliquidWithdrawals(operations) {
+  (operations || []).filter(operation => (
+    operation.path === 'HYPERLIQUID_TO_VAULT'
+    && operation.status === 'AWAITING_RECEIPT'
+  )).slice(0, 3).forEach(operation => {
+    if (directCapitalReceiptReconciliations.has(operation.operation_id)) return;
+    const stages = operation.stages || [];
+    const submission = [...stages].reverse().find(stage => stage.code === 'HYPERLIQUID_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET');
+    const settled = stages.some(stage => stage.code === 'HYPERLIQUID_WITHDRAWAL_ARBITRUM_CONFIRMED');
+    if (!submission?.nonce || settled) return;
+    const job = verifyHyperliquidWithdrawalReceipts({
+      operationId:operation.operation_id,
+      version:Number(operation.version),
+      actionHash:submission.action_hash,
+      nonce:Number(submission.nonce),
+    }).then(async receipt => {
+      if (receipt.pending) {
+        setDirectCapitalLiveProgress('公开回执仍在确认；页面会保持当前操作，稍后自动继续核对', operation.operation_id);
+        scheduleCapitalBackgroundRefresh(15_000);
+        return;
+      }
+      showToast('Safe 已到账，Hyperliquid 与 Arbitrum 回执均已确认');
+      await refreshCapitalPage();
+    }).catch(async error => {
+      if (error?.code === 'VERSION_CONFLICT') scheduleCapitalBackgroundRefresh(0);
+      else {
+        setDirectCapitalLiveProgress(`Hyperliquid 提现已提交，回执核对暂缓（${error?.code || 'RECEIPT_UNAVAILABLE'}）；系统不会重复发送`, operation.operation_id);
+        scheduleCapitalBackgroundRefresh(15_000);
+      }
+    }).finally(() => directCapitalReceiptReconciliations.delete(operation.operation_id));
+    directCapitalReceiptReconciliations.set(operation.operation_id, job);
+  });
+}
+
+function reconcilePendingHyperliquidDeposits(operations) {
+  (operations || []).filter(operation => (
+    operation.path === 'VAULT_TO_HYPERLIQUID'
+    && operation.status === 'AWAITING_RECEIPT'
+    && (operation.stages || []).some(stage => stage.code === 'HYPERLIQUID_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET')
+  )).slice(0, 3).forEach(operation => {
+    const reconciliationKey = `${operation.operation_id}:HYPERLIQUID_DEPOSIT`;
+    if (directCapitalReceiptReconciliations.has(reconciliationKey)) return;
+    const job = verifyRecordedHyperliquidDeposit(operation).then(async receipt => {
+      if (receipt.pending) {
+        setDirectCapitalLiveProgress('Hyperliquid 入金交易已提交；链上或交易所账本仍在确认，系统不会重复发送', operation.operation_id);
+        scheduleCapitalBackgroundRefresh(15_000);
+        return;
+      }
+      showToast('Hyperliquid 入金已确认，Arbitrum 与交易所账本回执一致');
+      await refreshCapitalPage();
+    }).catch(async error => {
+      if (error?.code === 'VERSION_CONFLICT') scheduleCapitalBackgroundRefresh(0);
+      else {
+        setDirectCapitalLiveProgress(`Hyperliquid 入金已提交，回执核对暂缓（${error?.code || 'RECEIPT_UNAVAILABLE'}）；不会重复发送`, operation.operation_id);
+        scheduleCapitalBackgroundRefresh(15_000);
+      }
+    }).finally(() => directCapitalReceiptReconciliations.delete(reconciliationKey));
+    directCapitalReceiptReconciliations.set(reconciliationKey, job);
+  });
+}
+
+async function verifyBinanceReceipt({operationId, version, stage, transactionHash}) {
+  const idempotencyKey = crypto.randomUUID();
+  return withBinanceReceiptBrowserSingleflight(`${operationId}:${stage}`, () => (
+    retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/binance-receipt`, {
+      method:'POST',
+      timeoutMs:60_000,
+      body:JSON.stringify({
+        expected_version:Number(version),
+        stage,
+        transaction_hash:transactionHash || undefined,
+        idempotency_key:idempotencyKey,
+      }),
+    }), {attempts:6, delaysMs:[3000, 5000, 10000, 20000, 30000]})
+  ));
+}
+
+function reconcilePendingBinanceReceipts(operations) {
+  (operations || []).filter(operation => (
+    operation.path === 'BINANCE_TO_VAULT'
+    && operation.status === 'AWAITING_RECEIPT'
+  )).slice(0, 1).forEach(operation => {
+    const stages = operation.stages || [];
+    const receiptStage = 'BINANCE_WITHDRAWAL';
+    const reconciliationKey = `${operation.operation_id}:${receiptStage}`;
+    if (directCapitalReceiptReconciliations.has(reconciliationKey)) return;
+    const confirmed = stages.some(stage => stage.code === `${receiptStage}_RECEIPT_CONFIRMED`);
+    const sourceSubmission = [...stages].reverse().find(
+      stage => stage.code === 'BINANCE_RESTRICTED_WITHDRAWAL_SUBMITTED',
+    );
+    if (confirmed || !sourceSubmission) return;
+    const transactionHash = sourceSubmission.transaction_hash || sourceSubmission.submission?.transactionHash || '';
+    const job = verifyBinanceReceipt({
+      operationId:operation.operation_id,
+      version:Number(operation.version),
+      stage:receiptStage,
+      transactionHash,
+    }).then(async receipt => {
+      if (receipt.pending) {
+        setDirectCapitalLiveProgress('币安回执仍在确认；刷新页面后会从当前阶段继续，不会并行重复核对', operation.operation_id);
+        return;
+      }
+      showToast('币安与链上公开回执已核对');
+      await refreshCapitalPage();
+    }).catch(async error => {
+      if (error?.code === 'VERSION_CONFLICT') scheduleCapitalBackgroundRefresh(0);
+      else {
+        setDirectCapitalLiveProgress(`币安资金已提交，公开回执核对暂缓（${error?.code || 'RECEIPT_UNAVAILABLE'}）；系统不会重复提交`, operation.operation_id);
+        scheduleCapitalBackgroundRefresh(30_000);
+      }
+    }).finally(() => directCapitalReceiptReconciliations.delete(reconciliationKey));
+    directCapitalReceiptReconciliations.set(reconciliationKey, job);
+  });
+}
+
+async function continueSafeOutboundExecution({operationId, version, path, transactionHash}) {
+  setDirectCapitalLiveProgress(path === 'VAULT_TO_HYPERLIQUID'
+    ? '第一笔钱包交易已提交，正在等待授权地址到账；到账后会自动打开 Hyperliquid 入金确认'
+    : '链上金库转出已提交，正在等待公开回执', operationId);
+  const treasuryReceipt = await verifyTreasuryWithdrawalReceipt({
+    operationId, version, transactionHash,
+  });
+  if (treasuryReceipt.pending) {
+    setDirectCapitalLiveProgress('链上回执仍在确认，页面会保留操作并自动续接；请保持当前页面打开', operationId);
+    return {kind:'WALLET', result:treasuryReceipt, receiptPending:Boolean(treasuryReceipt.pending)};
+  }
+  if (path === 'VAULT_TO_BINANCE') {
+    const binanceReceipt = await verifyBinanceReceipt({
+      operationId,
+      version:treasuryReceipt.version,
+      stage:'BINANCE_DEPOSIT',
+      transactionHash,
+    });
+    return {kind:'BINANCE', result:binanceReceipt, receiptPending:Boolean(binanceReceipt.pending)};
+  }
+  setDirectCapitalLiveProgress('授权地址已到账，正在准备 Hyperliquid 入金钱包确认', operationId);
+  const hyperliquidAction = await prepareHyperliquidWalletAction({
+    operationId, version:treasuryReceipt.version,
+  });
+  showToast('授权地址已到账，正在打开 Hyperliquid 入金钱包确认');
+  const hyperliquidSubmission = await executeDirectWalletAction(hyperliquidAction);
+  setDirectCapitalLiveProgress('Hyperliquid 入金已由钱包提交，正在核对 Arbitrum 与交易所账本', operationId);
+  let hyperliquidReceipt;
+  try {
+    hyperliquidReceipt = await verifyHyperliquidDepositReceipts({
+      operationId,
+      version:hyperliquidSubmission.recorded.version,
+      transactionHash:hyperliquidSubmission.evidence.transaction_hash,
+    });
+  } catch (error) {
+    // The wallet transaction is already public at this point. A transient or
+    // concurrent receipt read must never be presented as a failed transfer or
+    // trigger a duplicate submission; the reconciler resumes from the frozen hash.
+    setDirectCapitalLiveProgress(`Hyperliquid 入金已提交，回执核对暂缓（${error?.code || 'RECEIPT_UNAVAILABLE'}）；系统不会重复发送`, operationId);
+    hyperliquidReceipt = {pending:true, error};
+  }
+  return {
+    kind:'WALLET',
+    result:hyperliquidSubmission,
+    receiptPending:Boolean(hyperliquidReceipt.pending),
+  };
+}
+
+function reconcilePendingSafeHyperliquidDeposits(operations) {
+  (operations || []).filter(operation => (
+    operation.path === 'VAULT_TO_HYPERLIQUID'
+    && operation.treasury_provider === 'SAFE_SPENDING_LIMIT'
+    && operation.status !== 'SETTLED'
+  )).slice(0, 1).forEach(operation => {
+    if (directCapitalOutboundContinuations.has(operation.operation_id)) return;
+    const stages = operation.stages || [];
+    const sourceSubmission = [...stages].reverse().find(stage => stage.code === 'TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET');
+    const sourceReceiptConfirmed = stages.some(stage => stage.code === 'TREASURY_WITHDRAWAL_RECEIPT_CONFIRMED');
+    const targetPreviewReady = stages.some(stage => stage.code === 'HYPERLIQUID_DEPOSIT_WALLET_REQUEST_READY');
+    const targetSubmission = stages.some(stage => stage.code === 'HYPERLIQUID_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET');
+    const walletCancelled = stages.some(stage => stage.code?.endsWith('_WALLET_CANCELLED'));
+    if (!sourceSubmission?.transaction_hash || sourceReceiptConfirmed || targetPreviewReady || targetSubmission || walletCancelled) return;
+    const job = verifyTreasuryWithdrawalReceipt({
+      operationId:operation.operation_id,
+      version:Number(operation.version),
+      transactionHash:sourceSubmission.transaction_hash,
+    }).then(async receipt => {
+      if (receipt.pending) {
+        setDirectCapitalLiveProgress('链上回执仍在确认；确认后请点击路径按钮继续 Hyperliquid 入金', operation.operation_id);
+        scheduleCapitalBackgroundRefresh(15_000);
+        return;
+      }
+      showToast('授权地址已到账，请点击“继续入金并打开钱包”完成第二次确认');
+      await refreshCapitalPage();
+    }).catch(async error => {
+      if (error?.code === 'VERSION_CONFLICT') scheduleCapitalBackgroundRefresh(0);
+      else if (error?.code === 'WALLET_REJECTED') showApiError(error);
+      else {
+        setDirectCapitalLiveProgress(`链上转出已提交，Hyperliquid 入金续接暂缓（${error?.code || 'RECEIPT_UNAVAILABLE'}）；系统不会重复发送`, operation.operation_id);
+        scheduleCapitalBackgroundRefresh(15_000);
+      }
+    }).finally(() => directCapitalOutboundContinuations.delete(operation.operation_id));
+    directCapitalOutboundContinuations.set(operation.operation_id, job);
+  });
+}
+
+async function startDirectCapitalExecution({operationId, version, path, treasuryProvider}) {
+  if (path === 'BINANCE_TO_VAULT') {
+    const submitted = await prepareAndSubmitBinanceWithdrawal({operationId, version});
+    if (submitted.pending) {
+      return {kind:'BINANCE', result:submitted, receiptPending:true};
+    }
+    const receipt = await verifyBinanceReceipt({
+      operationId,
+      version:submitted.version,
+      stage:'BINANCE_WITHDRAWAL',
+    });
+    return {kind:'BINANCE', result:submitted, receiptPending:Boolean(receipt.pending)};
+  }
+  if (path === 'HYPERLIQUID_TO_VAULT') {
+    const action = await prepareHyperliquidWalletAction({operationId, version});
+    const submitted = await executeDirectWalletAction(action);
+    setDirectCapitalLiveProgress('钱包提交成功，正在核对 Hyperliquid 账本', operationId);
+    return {kind:'WALLET', result:submitted, receiptPending:true};
+  }
+  let currentVersion = Number(version);
+  if (path === 'VAULT_TO_BINANCE') {
+    const binancePreview = await api(`/api/capital/direct-operations/${operationId}/binance-preview`, {
+      method:'POST', timeoutMs:60_000,
+      body:JSON.stringify({expected_version:currentVersion, final_confirmed:true, idempotency_key:crypto.randomUUID()}),
+    });
+    currentVersion = Number(binancePreview.version);
+  }
+  const action = await prepareTreasuryWalletAction({
+    operationId, version:currentVersion, path, treasuryProvider,
+  });
+  const treasurySubmission = await executeDirectWalletAction(action);
+  if (path === 'VAULT_TO_HYPERLIQUID') {
+    setDirectCapitalLiveProgress('第一笔钱包交易已提交，正在等待授权地址到账；到账后请点击路径按钮继续入金', operationId);
+  }
+  if (treasuryProvider !== 'SAFE_SPENDING_LIMIT') {
+    return {kind:'WALLET', result:treasurySubmission};
+  }
+  if (path === 'VAULT_TO_HYPERLIQUID') {
+    return {kind:'WALLET', result:treasurySubmission, receiptPending:true, continuationPending:true};
+  }
+  return continueSafeOutboundExecution({
+    operationId,
+    version:treasurySubmission.recorded.version,
+    path,
+    transactionHash:treasurySubmission.evidence.transaction_hash,
+  });
+}
+
+function directCapitalExecutionSuccessMessage(execution) {
+  if (execution?.continuationPending) return '第一笔链上交易已提交；到账后请点击“继续入金并打开钱包”完成第二次钱包确认';
+  return execution?.kind === 'BINANCE'
+    ? '币安提现已直接提交，正在等待公开回执'
+    : '钱包已提交，公开交易信息已自动记录';
 }
 
 function formatDirectCapitalStage(code) {
@@ -293,6 +1172,7 @@ function formatDirectCapitalStage(code) {
     VAULT_RELEASE_TO_AUTHORIZED_OWNED_ADDRESS:'释放至已授权自有地址',
     DEPOSIT_TO_HYPERLIQUID_CONTRACT:'存入 Hyperliquid 合约',
     WITHDRAW_FROM_HYPERLIQUID_CONTRACT:'从 Hyperliquid 合约提回',
+    WITHDRAW_DIRECTLY_TO_SAFE:'Hyperliquid 直接提回 Safe',
     RECEIVE_AT_AUTHORIZED_OWNED_ADDRESS:'到达已授权自有地址',
     PREPARE_NOTILT_SDK_DEPOSIT:'由 NoTilt 官方 SDK 构建最低必要无签名入金序列',
     HUMAN_WALLET_CONFIRMATION:'独立人控钱包逐笔核对与确认',
@@ -301,8 +1181,16 @@ function formatDirectCapitalStage(code) {
     RESTRICTED_BINANCE_WITHDRAWAL_TO_AUTHORIZED_OWNED_ADDRESS:'币安受限提现至已授权自有地址',
     RESTRICTED_BINANCE_WITHDRAWAL_TO_SELECTED_TREASURY:'币安受限提现至当前链上金库',
     VERIFY_BINANCE_WITHDRAWAL_RECEIPT:'校验币安提现状态与交易哈希',
+    TRANSFER_BINANCE_USDM_TO_SPOT:'币安合约账户划转至现货账户',
+    TRANSFER_BINANCE_SPOT_TO_USDM:'币安现货入账后划转至合约账户',
     VERIFY_SELECTED_TREASURY_CREDIT:'校验当前链上金库到账',
     NOTILT_UNSIGNED_RELEASE_REQUEST_PREVIEW:'NoTilt 释放请求无签名预检',
+    NOTILT_RELEASE_REQUEST_RECEIPT_CONFIRMED:'NoTilt 释放请求回执已验证',
+    NOTILT_UNSIGNED_RELEASE_EXECUTION_PREVIEW:'NoTilt 释放执行请求已准备',
+    NOTILT_RELEASE_EXECUTION_SUBMITTED_BY_HUMAN_WALLET:'NoTilt 释放执行已由钱包提交',
+    NOTILT_RELEASE_EXECUTION_RECEIPT_CONFIRMED:'NoTilt 释放执行回执已验证',
+    NOTILT_DESTINATION_TRANSFER_PREVIEW:'NoTilt 释放资金的目标转账已准备',
+    NOTILT_DESTINATION_TRANSFER_SUBMITTED_BY_HUMAN_WALLET:'NoTilt 释放资金已由钱包转向目标',
     NOTILT_UNSIGNED_DEPOSIT_PREVIEW:'NoTilt 入金序列无签名预检',
     READ_SAFE_SPENDING_LIMIT:'读取 Safe Spending Limit',
     VERIFY_SAFE_MODULE_DELEGATE_TOKEN_NONCE:'校验官方模块、delegate、USDC 与 nonce',
@@ -322,10 +1210,13 @@ function formatDirectCapitalStage(code) {
     SAFE_DEPOSIT_UNSIGNED_TRANSACTION_READY:'Safe 入金无签名请求已准备',
     HYPERLIQUID_DEPOSIT_WALLET_REQUEST_READY:'Hyperliquid 入金请求已准备，等待主钱包或多签',
     HYPERLIQUID_WITHDRAW3_WALLET_REQUEST_READY:'Hyperliquid withdraw3 请求已准备，等待主钱包或多签',
+    HYPERLIQUID_CCTP_WITHDRAWAL_WALLET_REQUEST_READY:'Hyperliquid CCTP 提现请求已准备，固定协议费 0.2 USDC，等待主钱包或多签',
     HYPERLIQUID_CLASS_TRANSFER_WALLET_REQUEST_READY:'Hyperliquid 主账户资金归集请求已准备，等待主钱包或多签',
     HYPERLIQUID_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET:'Hyperliquid 入金已由人控钱包提交',
     HYPERLIQUID_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET:'Hyperliquid 提现已由人控钱包提交',
     HYPERLIQUID_CLASS_TRANSFER_SUBMITTED_BY_HUMAN_WALLET:'Hyperliquid 主账户资金归集已由人控钱包提交',
+    TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET:'链上金库转出已由人控钱包提交',
+    TREASURY_WITHDRAWAL_RECEIPT_CONFIRMED:'链上金库转出到账已验证',
     TREASURY_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET:'链上金库入金已由人控钱包提交',
     HYPERLIQUID_DEPOSIT_ARBITRUM_CONFIRMED:'Arbitrum 入金交易已验证',
     HYPERLIQUID_DEPOSIT_LEDGER_CONFIRMED:'Hyperliquid 入金账本已验证',
@@ -413,12 +1304,14 @@ async function renderCapitalPerformancePanel() {
     const scopeLabel = option.location_type === 'VAULT' ? localizedText('链上金库') : fmtVenueLabel(option.venue);
     return `<label class="capital-account-option ${option.selectable ? '' : 'is-disabled'}"><input type="checkbox" name="capital_account" value="${escapeHtml(option.key)}" ${selectedAccountKeys.has(option.key) ? 'checked' : ''} ${option.selectable ? '' : 'disabled'}><i class="capital-account-color color-${index % 6}" aria-hidden="true"></i><span><b title="${escapeHtml(option.label)}">${escapeHtml(option.label)}</b><small title="${escapeHtml(accountId)}">${escapeHtml(scopeLabel)} · ${escapeHtml(displayAccountId)} · ${escapeHtml(fmtStatus(option.connection_status))}</small>${option.disabled_reason ? `<em>${escapeHtml(option.disabled_reason)}</em>` : ''}</span></label>`;
   }).join('');
-  const selectedTags = accountOptions.filter(option => selectedAccountKeys.has(option.key)).map(option => `<button class="capital-account-tag color-${capitalSeriesColorIndex[option.key]}" type="button" data-remove-capital-account="${escapeHtml(option.key)}"><span>${escapeHtml(option.label)}</span><b aria-hidden="true">×</b><span class="sr-only">移除 ${escapeHtml(option.label)}</span></button>`).join('');
+  const selectedTags = accountOptions.filter(option => selectedAccountKeys.has(option.key)).map(option => `<button class="capital-account-tag color-${capitalSeriesColorIndex[option.key]}" type="button" data-remove-capital-account="${escapeHtml(option.key)}" aria-label="移除 ${escapeHtml(option.label)}"><span>${escapeHtml(option.label)}</span><span class="capital-account-remove" aria-hidden="true">移除</span></button>`).join('');
   const capitalRangeText = historySelection.complete ? '全部历史' : `最近 ${formatCapitalRangeDuration(historySelection.duration)}`;
   const rangeControl = hasHistory ? `<div class="capital-history-range" aria-label="资金曲线时间范围"><div class="capital-history-range-copy"><small>时间范围</small><output for="capital-history-range" data-capital-range-label>${escapeHtml(capitalRangeText)}</output></div><div class="capital-history-range-slider"><input id="capital-history-range" type="range" data-capital-history-range min="1" max="${CAPITAL_CHART_RANGE_MAX}" step="1" value="${Number(capitalChartRangeValue)}" aria-label="拖动选择资金曲线时间范围" aria-valuetext="${escapeHtml(capitalRangeText)}"><div aria-hidden="true"><span>较短</span><span>全部</span></div></div></div>` : '';
-  host.innerHTML = `<div class="section-heading"><div><p class="eyebrow">${escapeHtml(fmtExecutionMode(displayEnvironment))} · 账户净值</p><h2>资金绩效曲线</h2><p class="subtle">账户选择只影响绩效展示，不改变团队模式、交易权限或资金能力。</p></div><span class="status-pill">${selectedAccountKeys.size} 个账户</span></div>
+  const displayEnvironmentMeaning = fmtEnvironment(displayEnvironment, true);
+  const netWorthLabel = localizedText('账户净值');
+  host.innerHTML = `<div class="section-heading"><div><p class="eyebrow" title="${escapeHtml(displayEnvironmentMeaning)}" aria-label="${escapeHtml(displayEnvironmentMeaning)} · ${escapeHtml(netWorthLabel)}">${escapeHtml(fmtCompactEnvironment(displayEnvironment))} · ${escapeHtml(netWorthLabel)}</p><h2>资金绩效曲线</h2><p class="subtle">账户选择只影响绩效展示，不改变团队模式、交易权限或资金能力。</p></div><span class="status-pill">${selectedAccountKeys.size} 个账户</span></div>
     <details class="capital-account-picker"><summary><span>选择要叠加的账户曲线</span><small>已选 ${selectedAccountKeys.size} 个，可多选</small></summary><div class="capital-account-picker-panel"><div class="capital-account-picker-tools"><input type="search" data-capital-account-search placeholder="搜索账户名称或 ID" aria-label="搜索账户"><select data-capital-venue-filter aria-label="按交易所筛选"><option value="">全部交易所</option>${[...new Set(accountOptions.map(option => option.venue))].map(venue => `<option value="${escapeHtml(venue)}">${escapeHtml(venue === 'VAULT' ? '链上金库' : fmtVenueLabel(venue))}</option>`).join('')}</select><button class="secondary" type="button" data-capital-select-all>全选</button><button class="secondary" type="button" data-capital-clear>清空</button></div><div class="capital-account-options">${accountFilters || '<p class="subtle">当前模式尚未添加有效账户。</p>'}</div></div></details><div class="capital-account-tags" aria-label="已选账户">${selectedTags || '<span class="subtle">尚未选择账户</span>'}</div>
-    <section class="capital-overview" aria-label="当前资金净值"><article class="capital-total-card ${netWorth.complete ? 'is-current' : 'is-limited'}"><small>当前所选账户总净值</small><b>${escapeHtml(totalHeadline)}</b><p>${escapeHtml(totalSupporting)}</p></article><div class="capital-source-cards">${sourceCards}</div></section>
+    <section class="capital-overview" aria-label="当前资金净值"><article class="capital-total-card ${netWorth.complete ? 'is-current' : 'is-limited'}"><small>所选账户净值</small><b>${escapeHtml(totalHeadline)}</b><p>${escapeHtml(totalSupporting)}</p></article><div class="capital-source-cards">${sourceCards}</div></section>
     <section class="capital-trust-panel ${netWorth.complete ? 'is-current' : 'is-limited'}"><div><b>${netWorth.complete ? '所选账户数据可信，可用于当前汇总' : '当前汇总已阻断'}</b><p>${escapeHtml(trustCopy)}</p></div><span>${netWorth.complete ? '完整' : '需关注'}</span></section>
     <section class="capital-chart-panel" tabindex="-1"><div class="chart-head"><div><p class="eyebrow">净值趋势</p><h3>所选账户独立曲线与可信汇总</h3><p class="subtle">缺失、过期、错位和断档不会补零或强行连线。</p></div>${hasHistory ? '<button class="secondary capital-chart-expand" type="button" data-capital-chart-expand aria-pressed="false" aria-label="放大资金曲线"><span data-expand-label>全屏查看</span></button>' : ''}</div><div class="capital-chart-meta"><span data-capital-range-coverage>${escapeHtml(capitalHistoryCoverage(historySeries, historySelection))}</span><span>数据来自当前模式对应交易所只读事实</span></div><div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div>${hasHistory ? '<div class="capital-chart-wrap"><canvas id="capital-chart" height="300" aria-label="所选账户及汇总 USD 资金趋势"></canvas><div class="capital-chart-tooltip" role="status" hidden></div></div>' : '<div class="chart-empty">尚无可绘制的资金历史；缺失数据不会补零。</div>'}${rangeControl}</section>`;
   drawCapitalChart(visibleHistorySeries);
@@ -455,6 +1348,10 @@ async function renderCapitalPerformancePanel() {
 function renderDirectCapitalConfigurationEditor(directConfiguration, selectedTreasuryProvider) {
   if (!directConfiguration.can_manage) return '';
   const configuredPlaceholder = value => value ? '已配置；留空保持当前值' : '尚未配置';
+  const fieldValue = value => escapeHtml(value == null ? '' : String(value));
+  const exchangeAccountInput = (name, label, value, configured) => `<label>${label}<span class="field-help">直接填写与服务端生产运行绑定完全一致的 account_id；账户名称不参与校验。</span><input name="${name}" value="${fieldValue(value)}" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${configuredPlaceholder(configured)}"></label>`;
+  const binanceAccountInput = exchangeAccountInput('binance_account_id', '币安账户 ID', directConfiguration.binance_account_id, directConfiguration.binance_account_configured);
+  const hyperliquidAccountInput = exchangeAccountInput('hyperliquid_account_id', 'Hyperliquid 账户 ID', directConfiguration.hyperliquid_account_id, directConfiguration.hyperliquid_account_configured);
   const version = directConfiguration.version
     ? `版本 ${directConfiguration.version} · ${escapeHtml(directConfiguration.updated_by_username || '系统管理员')} · ${fmtDate(directConfiguration.effective_at)}`
     : '尚无数据库配置；当前读取安全环境配置';
@@ -467,61 +1364,306 @@ function renderDirectCapitalConfigurationEditor(directConfiguration, selectedTre
         <label><input type="radio" name="treasury_provider" value="SAFE_SPENDING_LIMIT" ${selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT' ? 'checked' : ''}><span><b>Safe Spending Limits</b><small>使用 Safe Allowance Module 的 delegate 额度</small></span></label>
       </fieldset>
       <p class="provider-guidance" data-provider-guidance></p>
-      <div class="capital-provider-config-grid"><section class="capital-config-section" data-provider-fields="NOTILT_VAULT"><div class="capital-config-heading"><div><h3>NoTilt Vault 配置</h3><p>填写 NoTilt 金库编号和金库地址。</p></div><span data-provider-role>已接入备用</span></div><div class="field-grid"><label>NoTilt 金库编号<input name="vault_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.vault_id_configured)}"></label><label>NoTilt 金库地址<input name="vault_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.vault_address_configured)}"></label></div></section>
-      <section class="capital-config-section" data-provider-fields="SAFE_SPENDING_LIMIT"><div class="capital-config-heading"><div><h3>Safe Spending Limits 配置</h3><p>填写公开的 Safe Smart Account 与 delegate 地址。</p></div><span data-provider-role>已接入备用</span></div><div class="field-grid"><label>Safe Smart Account<input name="safe_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.safe_address_configured)}"></label><label>Safe Spending Limit delegate<input name="safe_delegate_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.safe_delegate_configured)}"></label></div></section></div>
-      <section class="capital-config-section common-capital-fields"><h3>2. 共用账户与安全边界</h3><p>两种链上金库共用币安、Hyperliquid、自有地址和金额限制；新操作只引用当前使用的金库。</p><div class="field-grid"><label>授权自有 Arbitrum 地址<input name="owned_arbitrum_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.owned_arbitrum_address_configured)}"></label><label>币安默认账户<input name="binance_account_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_account_configured)}"></label><label>币安白名单入金地址<input name="binance_deposit_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_whitelist_destination_configured)}"></label><label>币安受限提现地址<input name="binance_withdrawal_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_withdrawal_destination_configured)}"></label><label>Hyperliquid 默认账户<input name="hyperliquid_account_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_account_configured)}"></label><label>Hyperliquid Bridge 地址<input name="hyperliquid_bridge_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_contract_configured)}"></label><label>单次金额上限（USDC）<input name="max_amount" type="number" step="any" min="0.000001" placeholder="留空保持当前值"></label><label>最大费用上限（USDC）<input name="max_fee" type="number" step="any" min="0" placeholder="留空保持当前值"></label></div></section>
-      <div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存配置并切换当前金库</button></div>
+      <div class="capital-provider-config-grid"><section class="capital-config-section" data-provider-fields="NOTILT_VAULT"><div class="capital-config-heading"><div><h3>NoTilt Vault 配置</h3><p>填写 NoTilt 金库编号和金库地址。</p></div><span data-provider-role>已接入备用</span></div><div class="field-grid"><label>NoTilt 金库编号<input name="vault_id" value="${fieldValue(directConfiguration.vault_id)}" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.vault_id_configured)}"></label><label>NoTilt 金库地址<input name="vault_address" value="${fieldValue(directConfiguration.vault_address)}" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.vault_address_configured)}"></label></div>${directConfiguration.notilt_provider_configured && selectedTreasuryProvider !== 'NOTILT_VAULT' ? '<label class="direct-capital-confirm"><input type="checkbox" name="clear_notilt_configuration"><span>清除未使用的 NoTilt 配置</span></label>' : ''}</section>
+      <section class="capital-config-section" data-provider-fields="SAFE_SPENDING_LIMIT"><div class="capital-config-heading"><div><h3>Safe Spending Limits 配置</h3><p>填写公开的 Safe Smart Account 与 delegate 地址。</p></div><span data-provider-role>已接入备用</span></div><div class="field-grid"><label>Safe Smart Account<input name="safe_address" value="${fieldValue(directConfiguration.safe_address)}" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.safe_address_configured)}"></label><label>Safe Spending Limit delegate<input name="safe_delegate_address" value="${fieldValue(directConfiguration.safe_delegate_address)}" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.safe_delegate_configured)}"></label></div>${directConfiguration.safe_provider_configured && selectedTreasuryProvider !== 'SAFE_SPENDING_LIMIT' ? '<label class="direct-capital-confirm"><input type="checkbox" name="clear_safe_configuration"><span>清除未使用的 Safe 配置</span></label>' : ''}</section></div>
+      <section class="capital-config-section common-capital-fields"><h3>2. 共用账户与安全边界</h3><p>两种链上金库共用币安、Hyperliquid、自有地址和金额限制；直接填写与服务端生产运行绑定一致的精确 account_id，不填写可编辑的账户名称。</p><div class="field-grid"><label>授权自有 Arbitrum 地址<span class="field-help">用于 Arbitrum One 原生 USDC 充值和接收资金的钱包地址。钱包需准备少量 ETH 支付链上 Gas。</span><input name="owned_arbitrum_address" value="${fieldValue(directConfiguration.owned_arbitrum_address)}" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.owned_arbitrum_address_configured)}"></label>${binanceAccountInput}<label>币安白名单入金地址<input name="binance_deposit_address" value="${fieldValue(directConfiguration.binance_deposit_address)}" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_whitelist_destination_configured)}"></label><label>币安受限提现地址<input name="binance_withdrawal_address" value="${fieldValue(directConfiguration.binance_withdrawal_address)}" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_withdrawal_destination_configured)}"><small data-withdrawal-scope-help></small></label>${hyperliquidAccountInput}<label>Hyperliquid 充值桥地址（Bridge）<span class="field-help">仅用于 Arbitrum One 原生 USDC。生产环境必须使用 Hyperliquid 官方 Bridge2 地址。</span><input name="hyperliquid_bridge_address" value="${fieldValue(directConfiguration.hyperliquid_bridge_address)}" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_contract_configured)}"></label><label>单次金额上限（USDC）<input name="max_amount" value="${fieldValue(directConfiguration.max_amount)}" type="number" step="any" min="0.000001" placeholder="留空保持当前值"></label><label>最大费用上限（USDC）<span class="field-help">仅交易所或 Hyperliquid 提现会从 USDC 到账额扣除费用；Safe 发起的链上转账使用 ETH 支付 Gas，不再误减 USDC 到账额。</span><input name="max_fee" value="${fieldValue(directConfiguration.max_fee)}" type="number" step="any" min="0" placeholder="留空保持当前值"><small>最大费用上限必须低于单次金额上限。</small></label></div></section>
+      <div class="form-error" role="alert" tabindex="-1"></div><div class="form-actions"><button class="primary">保存配置并切换当前金库</button></div>
     </form>
   </details>`;
+}
+
+function renderCapitalHandoffCard({eyebrow, title, facts = [], note = ''}) {
+  return `<article class="capital-handoff-card"><header><span>${escapeHtml(eyebrow)}</span><b>${escapeHtml(title)}</b></header><dl>${facts.map(fact => `<div><dt>${escapeHtml(fact.label)}</dt><dd class="${fact.mono ? 'is-mono' : ''}">${escapeHtml(fact.value ?? '—')}</dd></div>`).join('')}</dl>${note ? `<p>${escapeHtml(note)}</p>` : ''}</article>`;
+}
+
+function renderCapitalOperationAssurance({operationId, operationLabel, amount, asset, blockers, pendingPreflights, hardBlockers, handoffCards}) {
+  const cards = handoffCards.filter(Boolean);
+  const blockerItems = blockers.map(blocker => `<li>${escapeHtml(blocker)}</li>`).join('');
+  const healthLabel = hardBlockers.length
+    ? `${hardBlockers.length} 项阻断`
+    : pendingPreflights.length
+      ? `${pendingPreflights.length} 项预检`
+      : cards.length
+        ? '签名摘要'
+        : '校验通过';
+  const healthClass = hardBlockers.length ? 'is-blocked' : pendingPreflights.length ? 'is-pending' : 'is-ready';
+  const summaryCopy = hardBlockers.length
+    ? '需要先处理阻断条件'
+    : pendingPreflights.length
+      ? '提交前将自动完成实时校验'
+      : cards.length
+        ? '查看钱包、金额与收款范围'
+        : '当前没有待处理项';
+  if (!blockers.length && !cards.length) {
+    return `<div class="capital-operation-assurance ${healthClass}"><span class="capital-assurance-state">${healthLabel}</span><small>${summaryCopy}</small></div>`;
+  }
+  directCapitalAssuranceRecords.set(String(operationId), {
+    title:operationLabel || '资金操作',
+    meta:`${fmtNumber(amount)} ${asset || 'USDC'} · 操作 ${shortId(operationId)}`,
+    healthLabel, healthClass, summaryCopy,
+    body:`${blockers.length ? `<section class="capital-operation-blocker-panel"><b>${hardBlockers.length ? '需要处理' : '实时预检'}</b><ul>${blockerItems}</ul></section>` : ''}${cards.length ? `<div class="capital-handoff-grid">${cards.join('')}</div>` : ''}`,
+  });
+  return `<div class="capital-operation-assurance ${healthClass}"><span class="capital-assurance-state">${escapeHtml(healthLabel)}</span><small>${escapeHtml(summaryCopy)}</small><button class="secondary capital-assurance-trigger" type="button" data-capital-assurance-record="${escapeHtml(operationId)}">查看记录</button></div>`;
 }
 
 async function renderCapitalCenter() {
   const displayEnvironment = currentWorkflowEnvironment();
   if (!['TESTNET','LIVE'].includes(displayEnvironment)) {
-    main.innerHTML = `<section class="page"><div class="callout"><b>团队尚未选择运行模式</b><p>请由管理员前往模式设置选择测试模式或生产模式。</p><a class="primary" href="/team-settings" data-link>前往模式设置</a></div></section>`;
+    main.innerHTML = `<section class="page"><div class="callout"><b>团队尚未选择运行模式</b><p>请由管理员使用页眉“当前模式”选择测试模式或生产模式。</p>${hasCapability('venue.view') ? '<button class="primary" type="button" data-open-mode-switch>切换当前模式</button>' : '<span class="status-pill">由团队管理员处理</span>'}</div></section>`;
     return;
   }
-  const result = await api(`/api/capital?environment=${displayEnvironment}`);
+  const result = await api(`/api/capital?environment=${displayEnvironment}`, {
+    timeoutMs:45_000,
+  });
   const item = result.data;
+  directCapitalWalletActions = new Map();
+  directCapitalAssuranceRecords = new Map();
   const directConfiguration = item.direct_configuration || {};
   const selectedTreasuryProvider = directConfiguration.treasury_provider || 'NOTILT_VAULT';
   const selectedTreasuryProviderLabel = selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault';
   const transfers = partitionCapitalRecords(item.transfers);
   const liveInTransit = liveCapitalInTransit(transfers.live);
   const directConfigurationEditor = renderDirectCapitalConfigurationEditor(directConfiguration, selectedTreasuryProvider);
-  const directPathCards = DIRECT_CAPITAL_PATHS.map(path => `<article class="capital-route-card"><div class="capital-route-meta"><span>固定路径</span><strong>${escapeHtml(path.badge)}</strong></div><div class="capital-route-flow"><b>${escapeHtml(path.from)}</b><span aria-hidden="true">→</span><b>${escapeHtml(path.to)}</b></div><p>${escapeHtml(path.copy)}</p><ol>${path.steps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol><button class="secondary capital-route-action" type="button" data-open-capital-path="${escapeHtml(path.path)}">${escapeHtml(path.action)}</button></article>`).join('');
-  const directCapitalDialog = `<dialog id="direct-capital-dialog" aria-labelledby="direct-capital-title"><form id="direct-capital-form" class="dialog-form" data-direct-capital-form="" data-treasury-provider="${escapeHtml(selectedTreasuryProvider)}"><div class="dialog-head"><div><p class="eyebrow">资金路径安全预检</p><h2 id="direct-capital-title" data-capital-path-title>选择资金路径</h2></div><button type="button" class="icon-button" data-close-capital-dialog aria-label="关闭">×</button></div><p class="subtle" data-capital-path-copy></p><div class="selected-provider-summary"><small>当前链上金库</small><b>${escapeHtml(selectedTreasuryProviderLabel)}</b><span>如需切换，请由管理员先保存新的资金路径配置。</span></div><input name="path" type="hidden"><label>金额（USDC）<input name="amount" type="number" step="any" min="0.000001" required placeholder="输入划转金额"></label><label class="direct-capital-confirm"><input name="final_confirmed" type="checkbox" required><span>我已核对资金方向与金额</span></label><p class="safety-note">提交只会重新校验地址、网络、资产、额度和实时安全开关。任何条件缺失都会阻断；系统不会签名、广播或发送资金。</p><div class="form-error" role="alert"></div><div class="dialog-actions"><button type="button" class="secondary" data-close-capital-dialog>取消</button><button class="primary" type="submit">最终确认并检查</button></div></form></dialog>`;
-  const directRows = (item.direct_operations || []).map(operation => {
+  const directPathCards = DIRECT_CAPITAL_PATHS.map(path => {
+    const resumable = (item.direct_operations || []).find(operation => {
+      if (operation.path !== path.path || operation.treasury_provider !== 'SAFE_SPENDING_LIMIT' || operation.status === 'SETTLED') return false;
+      if (operation.path === 'VAULT_TO_HYPERLIQUID' && operation.active_configuration_match !== true) return false;
+      const stages = operation.stages || [];
+      const walletCancelled = stages.some(stage => stage.code?.endsWith('_WALLET_CANCELLED'));
+      const sourceSubmission = [...stages].reverse().find(stage => stage.code === 'TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET');
+      const targetSubmission = stages.some(stage => stage.code === 'HYPERLIQUID_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET');
+      return Boolean(sourceSubmission?.transaction_hash && !targetSubmission && !walletCancelled && ['VAULT_TO_BINANCE','VAULT_TO_HYPERLIQUID'].includes(path.path));
+    });
+    const sourceSubmission = resumable && [...(resumable.stages || [])].reverse().find(stage => stage.code === 'TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET');
+    const hyperliquidPreview = resumable && [...(resumable.stages || [])].reverse().find(stage => (
+      stage.code === 'HYPERLIQUID_DEPOSIT_WALLET_REQUEST_READY' && stage.artifact
+    ));
+    const hyperliquidActionKey = hyperliquidPreview ? `${resumable.operation_id}:HYPERLIQUID_DEPOSIT` : '';
+    if (hyperliquidActionKey) directCapitalWalletActions.set(hyperliquidActionKey, {
+      operationId:resumable.operation_id,
+      version:Number(resumable.version),
+      stage:'HYPERLIQUID_DEPOSIT',
+      kind:'HYPERLIQUID',
+      artifact:hyperliquidPreview.artifact,
+      path:resumable.path,
+      treasuryProvider:resumable.treasury_provider,
+    });
+    const actionAttributes = hyperliquidActionKey
+      ? ` data-direct-wallet-action="${escapeHtml(hyperliquidActionKey)}"`
+      : resumable
+        ? ` data-open-capital-path="${escapeHtml(path.path)}" data-resume-capital-operation="${escapeHtml(resumable.operation_id)}" data-operation-version="${Number(resumable.version)}" data-transaction-hash="${escapeHtml(sourceSubmission.transaction_hash)}"`
+        : ` data-open-capital-path="${escapeHtml(path.path)}"`;
+    const actionLabel = hyperliquidActionKey
+      ? '继续入金并打开钱包'
+      : resumable && path.path === 'VAULT_TO_HYPERLIQUID'
+        ? '核对到账并继续入金'
+        : resumable
+          ? '核对已提交链上划转'
+          : path.action;
+    return `<article class="capital-route-card"><div class="capital-route-meta"><span>固定路径</span><strong>${escapeHtml(path.badge)}</strong></div><div class="capital-route-flow"><b>${escapeHtml(path.from)}</b><span aria-hidden="true">→</span><b>${escapeHtml(path.to)}</b></div><p>${escapeHtml(path.copy)}</p><ol>${path.steps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol><button class="secondary capital-route-action" type="button"${actionAttributes}>${escapeHtml(actionLabel)}</button></article>`;
+  }).join('');
+  const directCapitalDialog = `<dialog id="direct-capital-dialog" aria-labelledby="direct-capital-title"><form id="direct-capital-form" class="dialog-form" data-direct-capital-form="" data-treasury-provider="${escapeHtml(selectedTreasuryProvider)}"><div class="dialog-head"><div><p class="eyebrow">资金路径确认</p><h2 id="direct-capital-title" data-capital-path-title>选择资金路径</h2></div><button type="button" class="icon-button" data-close-capital-dialog aria-label="关闭">×</button></div><p class="subtle" data-capital-path-copy></p><div class="selected-provider-summary"><small>当前链上金库</small><b>${escapeHtml(selectedTreasuryProviderLabel)}</b><span>如需切换，请由管理员先保存新的资金路径配置。</span></div><input name="path" type="hidden"><label>金额（USDC）<input name="amount" type="number" step="any" min="0.000001" required placeholder="输入划转金额"></label><p class="safety-note">点击“确认并继续”即确认当前资金方向与金额。系统先完成实时预检：链上操作直接唤起钱包由你签名；币安转出通过受限 API 直接提交。任何条件缺失仍会阻断。</p><div class="form-error" role="alert"></div><div class="dialog-actions"><button type="button" class="secondary" data-close-capital-dialog>取消</button><button class="primary" type="submit">确认并继续</button></div></form></dialog>`;
+  const capitalAssuranceDialog = `<dialog id="capital-assurance-dialog" class="capital-assurance-dialog" aria-labelledby="capital-assurance-title"><div class="capital-assurance-dialog-shell"><header class="capital-assurance-dialog-head"><div><p class="eyebrow">操作记录</p><h2 id="capital-assurance-title" data-capital-assurance-title>校验与签名摘要</h2><span data-capital-assurance-meta></span></div><button type="button" class="icon-button" data-close-capital-assurance aria-label="关闭">×</button></header><div class="capital-assurance-dialog-status" data-capital-assurance-status></div><div class="capital-assurance-dialog-content" data-capital-assurance-content></div><footer><button class="secondary" type="button" data-close-capital-assurance>关闭</button></footer></div></dialog>`;
+  const directOperations = item.direct_operations || [];
+  const directOperationTotal = directOperations.length;
+  const directOperationTotalPages = Math.max(1, Math.ceil(directOperationTotal / capitalOperationsPageSize));
+  capitalOperationsPage = Math.min(Math.max(1, capitalOperationsPage), directOperationTotalPages);
+  const directOperationPageItems = directOperations.slice(
+    (capitalOperationsPage - 1) * capitalOperationsPageSize,
+    capitalOperationsPage * capitalOperationsPageSize,
+  );
+  const directRows = directOperationPageItems.map(operation => {
     const pathDefinition = DIRECT_CAPITAL_PATHS.find(path => path.path === operation.path);
     const label = pathDefinition ? `${pathDefinition.from} → ${pathDefinition.to}` : operation.path;
-    const stages = (operation.stages || []).map(stage => formatDirectCapitalStage(stage.code)).join(' → ');
-    const blockers = (operation.blockers || []).map(formatDirectCapitalBlocker);
-    const blockerDetails = blockers.length
-      ? `<details class="capital-blockers"><summary>${blockers.length} 项阻断，查看详情</summary><p>${escapeHtml(blockers.join('；'))}</p></details>`
-      : '<span>无阻断</span>';
+    const stages = directCapitalCurrentPhase(operation);
+    const blockerCodes = operation.blockers || [];
+    const blockers = blockerCodes.map(formatDirectCapitalBlocker);
+    const pendingPreflights = blockerCodes.filter(code => DIRECT_CAPITAL_PREFLIGHT_BLOCKERS.has(code));
+    const hardBlockers = blockerCodes.filter(code => !DIRECT_CAPITAL_PREFLIGHT_BLOCKERS.has(code));
+    const operationExpired = blockerCodes.includes('CAPITAL_DIRECT_OPERATION_EXPIRED');
     const safeOutbound = operation.path === 'VAULT_TO_BINANCE' || operation.path === 'VAULT_TO_HYPERLIQUID';
-    const hyperliquidPath = operation.path === 'VAULT_TO_HYPERLIQUID' || operation.path === 'HYPERLIQUID_TO_VAULT';
-    const binancePath = operation.path === 'VAULT_TO_BINANCE' || operation.path === 'BINANCE_TO_VAULT';
     const frozenStages = operation.stages || [];
     const binancePreview = [...frozenStages].reverse().find(stage => stage.artifact?.kind?.startsWith('BINANCE_'));
+    const safePreview = [...frozenStages].reverse().find(stage => stage.signature_request?.kind?.startsWith('SAFE_'));
+    const notiltPreview = [...frozenStages].reverse().find(stage => ['NOTILT_UNSIGNED_RELEASE_REQUEST_PREVIEW','NOTILT_UNSIGNED_DEPOSIT_PREVIEW'].includes(stage.code));
+    const notiltExecutionPreview = [...frozenStages].reverse().find(stage => stage.code === 'NOTILT_UNSIGNED_RELEASE_EXECUTION_PREVIEW');
+    const notiltDestinationPreview = [...frozenStages].reverse().find(stage => stage.code === 'NOTILT_DESTINATION_TRANSFER_PREVIEW');
+    const notiltRequestReceipt = [...frozenStages].reverse().find(stage => stage.code === 'NOTILT_RELEASE_REQUEST_RECEIPT_CONFIRMED');
+    const notiltExecutionReceipt = [...frozenStages].reverse().find(stage => stage.code === 'NOTILT_RELEASE_EXECUTION_RECEIPT_CONFIRMED');
+    const safeWithdrawalReceipt = [...frozenStages].reverse().find(stage => stage.code === 'TREASURY_WITHDRAWAL_RECEIPT_CONFIRMED');
     const binanceSubmission = [...frozenStages].reverse().find(stage => stage.code === 'BINANCE_RESTRICTED_WITHDRAWAL_SUBMITTED');
     const binanceReceiptConfirmed = frozenStages.some(stage => ['BINANCE_DEPOSIT_RECEIPT_CONFIRMED', 'BINANCE_WITHDRAWAL_RECEIPT_CONFIRMED'].includes(stage.code));
     const hyperliquidPreview = [...frozenStages].reverse().find(stage => stage.artifact?.kind?.startsWith('HYPERLIQUID_'));
     const walletStage = operation.path === 'VAULT_TO_HYPERLIQUID' ? 'HYPERLIQUID_DEPOSIT' : hyperliquidPreview?.artifact?.kind === 'HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST' ? 'HYPERLIQUID_CLASS_TRANSFER' : 'HYPERLIQUID_WITHDRAWAL';
     const walletSubmission = [...frozenStages].reverse().find(stage => stage.code === `${walletStage}_SUBMITTED_BY_HUMAN_WALLET`);
+    const hyperliquidDepositConfirmed = frozenStages.some(stage => stage.code === 'HYPERLIQUID_DEPOSIT_ARBITRUM_CONFIRMED') && frozenStages.some(stage => stage.code === 'HYPERLIQUID_DEPOSIT_LEDGER_CONFIRMED');
+    const hyperliquidWithdrawalConfirmed = frozenStages.some(stage => stage.code === 'HYPERLIQUID_WITHDRAWAL_LEDGER_CONFIRMED') && frozenStages.some(stage => stage.code === 'HYPERLIQUID_WITHDRAWAL_ARBITRUM_CONFIRMED');
+    const hyperliquidClassTransferConfirmed = frozenStages.some(stage => stage.code === 'HYPERLIQUID_CLASS_TRANSFER_LEDGER_CONFIRMED');
     const providerPreviewReady = frozenStages.some(stage => ['NOTILT_UNSIGNED_DEPOSIT_PREVIEW', 'SAFE_DEPOSIT_UNSIGNED_TRANSACTION_READY'].includes(stage.code));
+    const treasuryWithdrawalSubmission = [...frozenStages].reverse().find(stage => stage.code === 'TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET');
+    const notiltExecutionSubmission = [...frozenStages].reverse().find(stage => stage.code === 'NOTILT_RELEASE_EXECUTION_SUBMITTED_BY_HUMAN_WALLET');
+    const notiltDestinationSubmission = [...frozenStages].reverse().find(stage => stage.code === 'NOTILT_DESTINATION_TRANSFER_SUBMITTED_BY_HUMAN_WALLET');
     const treasurySubmission = [...frozenStages].reverse().find(stage => stage.code === 'TREASURY_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET');
-    const providerButton = operation.path === 'BINANCE_TO_VAULT' ? '' : `<button class="text-button" data-capital-preview="${escapeHtml(operation.operation_id)}" data-preview-provider="${escapeHtml(operation.treasury_provider || 'NOTILT_VAULT')}" data-preview-direction="${safeOutbound ? 'OUTBOUND' : 'INBOUND'}" data-operation-version="${Number(operation.version || 1)}">${operation.treasury_provider === 'SAFE_SPENDING_LIMIT' ? (safeOutbound ? '读取 Safe 额度' : '生成 Safe 入金预检') : '生成 NoTilt 预检'}</button>`;
-    const hyperliquidButton = hyperliquidPath ? `<button class="text-button" data-hyperliquid-preview="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}">${operation.path === 'VAULT_TO_HYPERLIQUID' ? '生成 Hyperliquid 入金请求' : '生成 Hyperliquid 提现请求'}</button>` : '';
-    const binanceButton = binancePath && !binanceReceiptConfirmed ? `<button class="text-button" data-binance-preview="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}">${operation.path === 'VAULT_TO_BINANCE' ? '核对币安充值地址' : '币安受限提现预检'}</button>` : '';
-    const binanceBoundary = binancePreview ? `<details class="capital-wallet-handoff"><summary>币安资金链路</summary><div class="wallet-handoff-facts"><b>${operation.path === 'VAULT_TO_BINANCE' ? '币安 Arbitrum 充值地址已实时核对' : '币安受限提现条件已实时核对'}</b><span>网络：${escapeHtml(binancePreview.artifact.network)}</span><span>金额：${escapeHtml(binancePreview.artifact.amount)} USDC</span><span>${operation.path === 'BINANCE_TO_VAULT' ? `手续费：${escapeHtml(binancePreview.artifact.fee)} USDC` : '链上签名：独立人控钱包 / 多签'}</span><code>${escapeHtml(binancePreview.artifact.destination)}</code><p>API Key、Secret、请求签名和钱包私钥均不会显示在页面、操作记录或审计日志中。</p></div>${operation.path === 'VAULT_TO_BINANCE' ? `<form class="binance-receipt-form" data-binance-receipt="${escapeHtml(operation.operation_id)}" data-binance-stage="BINANCE_DEPOSIT" data-operation-version="${Number(operation.version || 1)}"><label>钱包广播后的 Arbitrum 交易哈希<input name="transaction_hash" required pattern="0x[0-9a-fA-F]{64}" autocomplete="off"></label><button class="secondary" type="submit">验证币安充值到账</button><div class="form-error" role="alert"></div></form>` : binanceSubmission ? `<form class="binance-receipt-form" data-binance-receipt="${escapeHtml(operation.operation_id)}" data-binance-stage="BINANCE_WITHDRAWAL" data-operation-version="${Number(operation.version || 1)}"><button class="secondary" type="submit">验证币安提现与链上到账</button><div class="form-error" role="alert"></div></form>` : `<form class="binance-submit-form" data-binance-submit="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}"><label class="direct-capital-confirm"><input name="final_confirmed" type="checkbox" required><span>再次核对币种、网络、白名单地址、金额、手续费和额度</span></label><button class="primary" type="submit" ${directConfiguration.binance_capital_submission_enabled && item.real_transfer_gate === 'ENABLED' ? '' : 'disabled title="币安提现开关或 CAPITAL_TRANSFER 当前关闭"'}>最终确认并提交币安提现</button><p class="subtle">当前按钮受币安专用提现开关与 CAPITAL_TRANSFER 双重控制。</p><div class="form-error" role="alert"></div></form>`}</details>` : '';
-    const walletBoundary = hyperliquidPreview ? `<details class="capital-wallet-handoff"><summary>主钱包 / 多签确认</summary><div class="wallet-handoff-facts"><b>${hyperliquidPreview.artifact.kind === 'HYPERLIQUID_WITHDRAW3_TYPED_REQUEST' ? 'withdraw3 人工签名请求' : hyperliquidPreview.artifact.kind === 'HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST' ? '主账户资金归集人工签名请求' : 'Arbitrum USDC 入金请求'}</b><span>网络：${escapeHtml(hyperliquidPreview.artifact.network || 'Hyperliquid Mainnet / Arbitrum')}</span><span>金额：${escapeHtml(hyperliquidPreview.artifact.amount)} USDC</span><span>方法：${escapeHtml(hyperliquidPreview.artifact.method || (walletStage === 'HYPERLIQUID_CLASS_TRANSFER' ? 'HyperliquidTransaction:UsdClassTransfer' : 'HyperliquidTransaction:Withdraw'))}</span><span>费用上限：${escapeHtml(hyperliquidPreview.artifact.maxFee || '链上钱包确认时核对')}</span><code>${escapeHtml(hyperliquidPreview.artifact.destination || hyperliquidPreview.artifact.bridge || '请在钱包中核对目标')}</code><p>API/Agent Wallet 归属已检查；该动作要求主账户或有效多签签名，因此自动进入人控钱包，不属于连接失败。系统不接收签名内容。</p></div>${walletSubmission ? `<p class="subtle">钱包提交已记录，等待逐项验证 Hyperliquid 与 Arbitrum 回执。</p>` : `<form class="wallet-result-form" data-wallet-result="${escapeHtml(operation.operation_id)}" data-wallet-stage="${walletStage}" data-operation-version="${Number(operation.version || 1)}">${walletStage === 'HYPERLIQUID_DEPOSIT' ? '<label>Arbitrum 交易哈希<input name="transaction_hash" required pattern="0x[0-9a-fA-F]{64}" autocomplete="off"></label>' : `<label>Hyperliquid action hash<input name="action_hash" required pattern="0x[0-9a-fA-F]{64}" autocomplete="off"></label><label>签名 nonce<input name="nonce" type="number" required value="${Number(hyperliquidPreview.artifact.nonce || 0)}"></label>`}<label class="direct-capital-confirm"><input name="final_confirmed" type="checkbox" required><span>钱包已显示并由我逐项核对网络、目标、金额、费用与方法</span></label><div class="compact-actions"><button class="primary" type="submit">记录钱包已提交</button><button class="secondary" type="button" data-wallet-cancel>记录取消</button></div><div class="form-error" role="alert"></div></form>`}${walletSubmission ? `<form class="receipt-result-form" data-hl-receipt="${escapeHtml(operation.operation_id)}" data-receipt-path="${walletStage}" data-operation-version="${Number(operation.version || 1)}">${walletStage === 'HYPERLIQUID_DEPOSIT' ? `<input type="hidden" name="recorded_hash" value="${escapeHtml(walletSubmission.transaction_hash || '')}"><label>验证阶段<select name="stage"><option value="HYPERLIQUID_DEPOSIT_ARBITRUM">Arbitrum 入金交易</option><option value="HYPERLIQUID_DEPOSIT_LEDGER">Hyperliquid 入金账本</option></select></label>` : `<input type="hidden" name="action_hash" value="${escapeHtml(walletSubmission.action_hash || '')}"><input type="hidden" name="nonce" value="${Number(walletSubmission.nonce || 0)}"><label>验证阶段<select name="stage">${walletStage === 'HYPERLIQUID_CLASS_TRANSFER' ? '<option value="HYPERLIQUID_CLASS_TRANSFER_LEDGER">主账户资金归集账本</option>' : '<option value="HYPERLIQUID_WITHDRAWAL_LEDGER">Hyperliquid 提现账本</option><option value="HYPERLIQUID_WITHDRAWAL_ARBITRUM">Arbitrum 钱包到账</option>'}</select></label>${walletStage === 'HYPERLIQUID_CLASS_TRANSFER' ? '' : '<label data-arbitrum-hash>Arbitrum 到账交易哈希<input name="transaction_hash" pattern="0x[0-9a-fA-F]{64}" autocomplete="off"></label>'}` }<button class="secondary" type="submit">读取并验证公开回执</button><div class="form-error" role="alert"></div></form>` : ''}</details>` : '';
-    const treasuryWallet = operation.path === 'HYPERLIQUID_TO_VAULT' && providerPreviewReady ? `<details class="capital-wallet-handoff"><summary>最终存入${operation.treasury_provider === 'SAFE_SPENDING_LIMIT' ? ' Safe' : ' NoTilt Vault'}</summary>${treasurySubmission ? `<form class="treasury-receipt-form" data-treasury-receipt="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}"><input type="hidden" name="transaction_hash" value="${escapeHtml(treasurySubmission.transaction_hash || '')}"><button class="secondary" type="submit">验证链上金库到账</button><div class="form-error" role="alert"></div></form>` : `<form class="wallet-result-form" data-wallet-result="${escapeHtml(operation.operation_id)}" data-wallet-stage="TREASURY_DEPOSIT" data-operation-version="${Number(operation.version || 1)}"><label>钱包广播后的 Arbitrum 交易哈希<input name="transaction_hash" required pattern="0x[0-9a-fA-F]{64}" autocomplete="off"></label><label class="direct-capital-confirm"><input name="final_confirmed" type="checkbox" required><span>已在钱包中核对链、金库、USDC、金额和方法</span></label><div class="compact-actions"><button class="primary" type="submit">记录金库入金</button><button class="secondary" type="button" data-wallet-cancel>记录取消</button></div><div class="form-error" role="alert"></div></form>`}</details>` : '';
-    return `<tr><td data-label="操作">${shortId(operation.operation_id)}<br><span class="subtle">${fmtDate(operation.final_confirmed_at)}</span></td><td data-label="路径 / 金额"><b>${escapeHtml(label)}</b><br><span class="subtle">${operation.treasury_provider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault'}</span><br><span class="subtle">${fmtNumber(operation.amount)} ${escapeHtml(operation.asset)}</span></td><td data-label="阶段">${escapeHtml(stages || '尚无阶段')}</td><td data-label="状态 / 回执"><b>${escapeHtml(fmtStatus(operation.status))}</b><br><span class="subtle">回执：${escapeHtml(fmtStatus(operation.receipt_status))}</span></td><td data-label="精确阻断">${blockerDetails}<div class="capital-operation-actions">${hyperliquidButton}${binanceButton}${providerButton}</div>${walletBoundary}${binanceBoundary}${treasuryWallet}</td></tr>`;
+    const treasuryReceiptConfirmed = frozenStages.some(stage => stage.code === 'TREASURY_DESTINATION_RECEIPT_CONFIRMED');
+    const treasuryPreview = safePreview || notiltPreview;
+    const treasuryStage = safeOutbound ? 'TREASURY_WITHDRAWAL' : 'TREASURY_DEPOSIT';
+    const treasuryAlreadySubmitted = safeOutbound ? treasuryWithdrawalSubmission : treasurySubmission;
+    const treasuryPreviewExecutable = safePreview
+      ? Boolean(safePreview.signature_request?.to && safePreview.signature_request?.data)
+      : Boolean(notiltPreview?.wallet_address && notiltPreview?.transactions?.length);
+    const treasuryActionKey = !operationExpired && treasuryPreview && treasuryPreviewExecutable && !treasuryAlreadySubmitted ? `${operation.operation_id}:${treasuryStage}` : '';
+    if (treasuryActionKey) {
+      directCapitalWalletActions.set(treasuryActionKey, safePreview ? {
+        operationId:operation.operation_id, version:operation.version, stage:treasuryStage,
+        kind:'TRANSACTION', transaction:safePreview.signature_request,
+        expectedWallet:safePreview.signature_request.from || safePreview.signature_request.sender,
+        path:operation.path, treasuryProvider:operation.treasury_provider,
+      } : {
+        operationId:operation.operation_id, version:operation.version, stage:treasuryStage,
+        kind:'TRANSACTIONS', transactions:notiltPreview.transactions,
+        expectedWallet:notiltPreview.wallet_address,
+        path:operation.path, treasuryProvider:operation.treasury_provider,
+      });
+    }
+    const notiltExecutionActionKey = !operationExpired && notiltExecutionPreview && !notiltExecutionSubmission ? `${operation.operation_id}:NOTILT_RELEASE_EXECUTION` : '';
+    if (notiltExecutionActionKey) directCapitalWalletActions.set(notiltExecutionActionKey, {
+      operationId:operation.operation_id, version:operation.version, stage:'NOTILT_RELEASE_EXECUTION',
+      kind:'TRANSACTIONS', transactions:notiltExecutionPreview.transactions,
+      expectedWallet:notiltExecutionPreview.wallet_address,
+    });
+    const notiltDestinationActionKey = !operationExpired && notiltDestinationPreview && !notiltDestinationSubmission ? `${operation.operation_id}:NOTILT_DESTINATION_TRANSFER` : '';
+    if (notiltDestinationActionKey) directCapitalWalletActions.set(notiltDestinationActionKey, {
+      operationId:operation.operation_id, version:operation.version, stage:'NOTILT_DESTINATION_TRANSFER',
+      kind:'TRANSACTION', transaction:notiltDestinationPreview.artifact,
+      expectedWallet:notiltDestinationPreview.artifact?.from,
+    });
+    const hyperliquidActionKey = !operationExpired && hyperliquidPreview && !walletSubmission ? `${operation.operation_id}:${walletStage}` : '';
+    if (hyperliquidActionKey) directCapitalWalletActions.set(hyperliquidActionKey, {
+      operationId:operation.operation_id, version:operation.version, stage:walletStage,
+      kind:'HYPERLIQUID', artifact:hyperliquidPreview.artifact,
+      path:operation.path, treasuryProvider:operation.treasury_provider,
+    });
+    const startButton = !operationExpired && !treasuryActionKey && !hyperliquidActionKey && !binanceSubmission && !(operation.path === 'BINANCE_TO_VAULT' && binancePreview) && !treasuryWithdrawalSubmission && !walletSubmission
+      ? `<button class="primary" type="button" data-direct-capital-start="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}" data-operation-path="${escapeHtml(operation.path)}" data-treasury-provider="${escapeHtml(operation.treasury_provider || 'NOTILT_VAULT')}">${operation.path === 'BINANCE_TO_VAULT' ? '继续并提交币安提现' : '继续并打开钱包'}</button>` : '';
+    const treasuryWalletButton = treasuryActionKey ? `<button class="primary" type="button" data-direct-wallet-action="${escapeHtml(treasuryActionKey)}">打开钱包确认</button>` : '';
+    const notiltExecutionWalletButton = notiltExecutionActionKey ? `<button class="primary" type="button" data-direct-wallet-action="${escapeHtml(notiltExecutionActionKey)}">执行释放并打开钱包</button>` : '';
+    const notiltDestinationWalletButton = notiltDestinationActionKey ? `<button class="primary" type="button" data-direct-wallet-action="${escapeHtml(notiltDestinationActionKey)}">转入币安并打开钱包</button>` : '';
+    const hyperliquidWalletButton = hyperliquidActionKey ? `<button class="primary" type="button" data-direct-wallet-action="${escapeHtml(hyperliquidActionKey)}">打开钱包确认</button>` : '';
+    const binanceSubmitButton = !operationExpired && operation.status === 'UNSIGNED_PLAN_READY' && operation.path === 'BINANCE_TO_VAULT' && binancePreview && !binanceSubmission ? `<button class="primary" type="button" data-binance-submit-direct="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}" ${directConfiguration.binance_capital_submission_enabled && item.real_transfer_gate === 'ENABLED' ? '' : 'disabled title="币安提现开关或 CAPITAL_TRANSFER 当前关闭"'}>直接提交币安提现</button>` : '';
+    const binanceDepositSubmission = operation.treasury_provider === 'NOTILT_VAULT' ? notiltDestinationSubmission : treasuryWithdrawalSubmission;
+    const binanceReceiptButton = binancePreview && !binanceReceiptConfirmed && operation.path === 'BINANCE_TO_VAULT' && binanceSubmission ? `<button class="secondary" type="button" data-binance-receipt-direct="${escapeHtml(operation.operation_id)}" data-binance-stage="BINANCE_WITHDRAWAL" data-operation-version="${Number(operation.version || 1)}" data-transaction-hash="">自动核对到账</button>` : '';
+    const notiltReceiptSubmission = notiltExecutionSubmission && !notiltExecutionReceipt ? notiltExecutionSubmission : treasuryWithdrawalSubmission;
+    const notiltReceiptButton = operation.treasury_provider === 'NOTILT_VAULT' && notiltReceiptSubmission && !(notiltExecutionSubmission ? notiltExecutionReceipt : notiltRequestReceipt) ? `<button class="secondary" type="button" data-notilt-receipt-direct="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}" data-transaction-hash="${escapeHtml(notiltReceiptSubmission.transaction_hash || '')}">${notiltExecutionSubmission ? '验证释放执行回执' : '验证释放请求回执'}</button>` : '';
+    const safeWithdrawalReceiptButton = operation.path === 'VAULT_TO_HYPERLIQUID' && operation.treasury_provider === 'SAFE_SPENDING_LIMIT' && treasuryWithdrawalSubmission && !safeWithdrawalReceipt ? `<button class="secondary" type="button" data-treasury-withdrawal-receipt-direct="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}" data-transaction-hash="${escapeHtml(treasuryWithdrawalSubmission.transaction_hash || '')}">验证 Safe 转出到账</button>` : '';
+    const walletReceiptConfirmed = walletStage === 'HYPERLIQUID_DEPOSIT' ? hyperliquidDepositConfirmed : walletStage === 'HYPERLIQUID_CLASS_TRANSFER' ? hyperliquidClassTransferConfirmed : hyperliquidWithdrawalConfirmed;
+    const hyperliquidReceiptButton = walletSubmission && !walletReceiptConfirmed ? `<button class="secondary" type="button" data-hl-receipt-direct="${escapeHtml(operation.operation_id)}" data-wallet-stage="${walletStage}" data-operation-version="${Number(operation.version || 1)}" data-transaction-hash="${escapeHtml(walletSubmission.transaction_hash || '')}" data-action-hash="${escapeHtml(walletSubmission.action_hash || '')}" data-nonce="${Number(walletSubmission.nonce || 0)}">自动读取公开回执</button>` : '';
+    const treasuryReceiptButton = treasurySubmission && !treasuryReceiptConfirmed ? `<button class="secondary" type="button" data-treasury-receipt-direct="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}" data-transaction-hash="${escapeHtml(treasurySubmission.transaction_hash || '')}">自动验证金库到账</button>` : '';
+    const nextAction = operation.path === 'VAULT_TO_HYPERLIQUID' && operation.treasury_provider === 'SAFE_SPENDING_LIMIT' && safeWithdrawalReceipt && !walletSubmission
+      ? 'HYPERLIQUID'
+      : operation.treasury_provider === 'NOTILT_VAULT' && safeOutbound && notiltRequestReceipt && !notiltExecutionPreview && !notiltExecutionSubmission && !notiltExecutionReceipt
+        ? 'NOTILT_EXECUTION'
+        : operation.path === 'VAULT_TO_BINANCE' && operation.treasury_provider === 'NOTILT_VAULT' && notiltExecutionReceipt && !notiltDestinationPreview && !notiltDestinationSubmission
+          ? 'NOTILT_DESTINATION'
+          : operation.path === 'VAULT_TO_HYPERLIQUID' && operation.treasury_provider === 'NOTILT_VAULT' && notiltExecutionReceipt && !walletSubmission
+            ? 'HYPERLIQUID'
+      : operation.path === 'HYPERLIQUID_TO_VAULT' && walletStage === 'HYPERLIQUID_CLASS_TRANSFER' && hyperliquidClassTransferConfirmed
+        ? 'HYPERLIQUID'
+        : operation.path === 'HYPERLIQUID_TO_VAULT' && walletStage === 'HYPERLIQUID_WITHDRAWAL' && hyperliquidWithdrawalConfirmed && !treasurySubmission && !treasuryActionKey
+          ? 'TREASURY_DEPOSIT'
+          : '';
+    const nextActionLabel = nextAction === 'NOTILT_EXECUTION'
+      ? '协议解锁后执行并打开钱包'
+      : nextAction === 'NOTILT_DESTINATION'
+        ? '继续转入币安并打开钱包'
+        : nextAction === 'HYPERLIQUID'
+          ? (walletStage === 'HYPERLIQUID_CLASS_TRANSFER' ? '继续提现并打开钱包' : '到账后继续并打开钱包')
+          : '继续存入金库并打开钱包';
+    const nextActionButton = !operationExpired && nextAction ? `<button class="primary" type="button" data-direct-capital-next="${escapeHtml(operation.operation_id)}" data-next-action="${nextAction}" data-operation-version="${Number(operation.version || 1)}" data-operation-path="${escapeHtml(operation.path)}" data-treasury-provider="${escapeHtml(operation.treasury_provider || 'NOTILT_VAULT')}">${nextActionLabel}</button>` : '';
+    const binanceBoundary = binancePreview ? renderCapitalHandoffCard({
+      eyebrow:'交易所链路',
+      title:operation.path === 'VAULT_TO_BINANCE' ? '币安充值范围已核对' : binanceSubmission ? '币安提现已提交' : '币安提现条件已核对',
+      facts:[
+        {label:'网络', value:binancePreview.artifact.network},
+        {label:'金额', value:`${binancePreview.artifact.amount} USDC`},
+        {label:operation.path === 'BINANCE_TO_VAULT' ? '手续费' : '链上确认', value:operation.path === 'BINANCE_TO_VAULT' ? `${binancePreview.artifact.fee} USDC` : '浏览器钱包'},
+        {label:'目标地址', value:binancePreview.artifact.destination, mono:true},
+      ],
+      note:'币安转出直接提交；API Secret 与请求签名不会显示或写入操作记录。',
+    }) : '';
+    const safeBoundary = safePreview ? renderCapitalHandoffCard({
+      eyebrow:'钱包确认',
+      title:safeOutbound ? 'Safe Allowance Module 已核对' : 'Safe 入金交易已构建',
+      facts:[
+        {label:'金额', value:`${operation.amount} USDC`},
+        {label:'Safe', value:safePreview.signature_request.safe, mono:true},
+        ...(safeOutbound ? [
+          {label:'Nonce', value:safePreview.signature_request.nonce},
+          {label:'Delegate', value:safePreview.signature_request.delegate, mono:true},
+          {label:'收款地址', value:safePreview.signature_request.recipient, mono:true},
+        ] : []),
+      ],
+      note:'钱包只确认冻结后的公开交易；控制台不接收私钥或签名内容。',
+    }) : '';
+    const notiltBoundary = notiltPreview ? renderCapitalHandoffCard({
+      eyebrow:'钱包确认',
+      title:safeOutbound ? 'NoTilt 释放请求已构建' : 'NoTilt 入金序列已构建',
+      facts:[
+        {label:'签名账户', value:notiltPreview.wallet_address || '连接钱包', mono:true},
+        {label:'交易数', value:String(Number(notiltPreview.transactions?.length || 0))},
+      ],
+      note:safeOutbound ? '释放请求确认后校验公开回执；协议解锁后再由钱包执行。' : '固定交易顺序逐笔由钱包核对。',
+    }) : '';
+    const walletBoundary = hyperliquidPreview ? renderCapitalHandoffCard({
+      eyebrow:'钱包确认',
+      title:hyperliquidPreview.artifact.kind === 'HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST'
+        ? 'Hyperliquid CCTP 提现（0.2 USDC）'
+        : hyperliquidPreview.artifact.kind === 'HYPERLIQUID_WITHDRAW3_TYPED_REQUEST'
+          ? 'Hyperliquid Bridge 提现（1 USDC）'
+          : hyperliquidPreview.artifact.kind === 'HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST'
+            ? 'Hyperliquid 主账户资金归集'
+            : 'Hyperliquid Arbitrum 入金',
+      facts:[
+        {label:'金额', value:`${hyperliquidPreview.artifact.amount} USDC`},
+        {label:'账户', value:hyperliquidPreview.artifact.account || hyperliquidPreview.artifact.from || '', mono:true},
+        ...(hyperliquidPreview.artifact.action?.token ? [{label:'协议资产', value:hyperliquidPreview.artifact.action.token, mono:true}] : []),
+      ],
+      note:'主钱包或有效多签只需在钱包中核对 EIP-712 或链上交易。',
+    }) : '';
+    const treasuryWallet = operation.path === 'HYPERLIQUID_TO_VAULT' && providerPreviewReady ? renderCapitalHandoffCard({
+      eyebrow:'最终入账',
+      title:`存入 ${operation.treasury_provider === 'SAFE_SPENDING_LIMIT' ? 'Safe' : 'NoTilt Vault'}`,
+      facts:[{label:'到账状态', value:treasuryReceiptConfirmed ? '链上金库到账已验证' : '等待公开回执'}],
+      note:'链上确认后自动更新，无需在回执区再次操作。',
+    }) : '';
+    const operationAssurance = renderCapitalOperationAssurance({
+      operationId:operation.operation_id,
+      operationLabel:label,
+      amount:operation.amount,
+      asset:operation.asset,
+      blockers,
+      pendingPreflights,
+      hardBlockers,
+      handoffCards:[safeBoundary, notiltBoundary, walletBoundary, binanceBoundary, treasuryWallet],
+    });
+    const chainConfirmed = frozenStages.some(stage => stage.status === 'CONFIRMED' && (stage.code.includes('ARBITRUM') || stage.code === 'TREASURY_WITHDRAWAL_RECEIPT_CONFIRMED' || stage.code.startsWith('BINANCE_') && stage.code.endsWith('_RECEIPT_CONFIRMED')));
+    const chainSubmitted = frozenStages.some(stage => stage.transaction_hash || stage.submission?.transactionHash
+      || String(stage.code || '').endsWith('_SUBMITTED_BY_HUMAN_WALLET'));
+    const operationStatus = operation.status === 'SETTLED'
+      ? fmtStatus(operation.status)
+      : chainConfirmed
+        ? '链上已确认'
+        : chainSubmitted && operation.status === 'AWAITING_RECEIPT'
+          ? '链上确认中'
+          : operation.status === 'BLOCKED' && pendingPreflights.length && !hardBlockers.length
+            ? '等待安全预检'
+            : fmtStatus(operation.status);
+    const receiptStatus = operation.status === 'SETTLED' ? fmtStatus(operation.receipt_status) : chainConfirmed ? '链上已确认，后续入账处理中' : chainSubmitted ? '链上确认中' : fmtStatus(operation.receipt_status);
+    return `<tr><td data-label="操作">${shortId(operation.operation_id)}<br><span class="subtle">${fmtDate(operation.final_confirmed_at)}</span></td><td data-label="路径 / 金额"><b>${escapeHtml(label)}</b><br><span class="subtle">${operation.treasury_provider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault'}</span><br><span class="subtle">${fmtNumber(operation.amount)} ${escapeHtml(operation.asset)}</span></td><td data-label="阶段">${escapeHtml(stages || '尚无阶段')}</td><td data-label="状态 / 回执"><b>${escapeHtml(operationStatus)}</b><br><span class="subtle">回执：${escapeHtml(receiptStatus)}</span></td><td data-label="校验 / 签名">${operationAssurance}</td></tr>`;
   }).join('');
+  const directOperationPagination = directOperationTotal ? `<nav class="capital-operation-pagination" aria-label="操作与回执分页"><span>第 ${capitalOperationsPage} / ${directOperationTotalPages} 页 · 共 ${directOperationTotal} 条</span><div><label>每页<select data-capital-operation-page-size aria-label="每页记录数"><option value="50" ${capitalOperationsPageSize === 50 ? 'selected' : ''}>50</option><option value="100" ${capitalOperationsPageSize === 100 ? 'selected' : ''}>100</option></select>条</label><button class="secondary" type="button" data-capital-operation-page="${capitalOperationsPage - 1}" ${capitalOperationsPage <= 1 ? 'disabled' : ''}>上一页</button><button class="secondary" type="button" data-capital-operation-page="${capitalOperationsPage + 1}" ${capitalOperationsPage >= directOperationTotalPages ? 'disabled' : ''}>下一页</button></div></nav>` : '';
   const legacyRows = transfers.live.map(transfer => `<tr><td data-label="记录">${shortId(transfer.capital_transfer_id)}</td><td data-label="方向">${escapeHtml(fmtCapitalDirection(transfer.direction))}</td><td data-label="金额">${fmtNumber(transfer.gross_amount)} ${escapeHtml(transfer.asset)}</td><td data-label="状态">${escapeHtml(fmtStatus(transfer.status))}</td><td data-label="外部回执">${escapeHtml(transfer.external_transfer_id || '未提交')}</td></tr>`).join('');
   const selectedProviderReady = selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT'
-    ? directConfiguration.safe_spending_scope_configured
+    ? directConfiguration.safe_spending_scope_configured && item.net_worth?.onchain_probe?.status === 'SUCCESS'
     : directConfiguration.notilt_scope_configured;
   const selectedProviderStatus = selectedProviderReady
     ? '已配置'
@@ -529,17 +1671,29 @@ async function renderCapitalCenter() {
       ? '缺少 Safe、delegate 或可信 RPC'
       : '缺少官方金库或 Agent 范围';
   const vaultReady = Boolean(directConfiguration.notilt_scope_configured);
-  const safeReady = Boolean(directConfiguration.safe_spending_scope_configured);
+  const safeProbe = item.net_worth?.onchain_probe?.provider === 'SAFE_SPENDING_LIMIT' ? item.net_worth.onchain_probe : {};
+  const safeReady = Boolean(directConfiguration.safe_spending_scope_configured && directConfiguration.safe_gateway_available && safeProbe.status === 'SUCCESS');
+  const safeHyperliquidReady = safeReady && Number(safeProbe.available_limit || 0) >= 5 && Number(safeProbe.balance || 0) >= 5;
+  const safeReadinessNote = safeReady && !safeHyperliquidReady
+    ? `<p class="callout is-warning"><b>Hyperliquid 入金额度不足</b><span>当前 Safe 可用额度 ${escapeHtml(safeProbe.available_limit || '0')} USDC、余额 ${escapeHtml(safeProbe.balance || '0')} USDC；Hyperliquid Arbitrum 入金最低为 5 USDC。请先在 Safe Allowance Module 提升 delegate 可用额度。</span></p>`
+    : '';
   const providerCards = `<div class="capital-provider-grid">
     <article class="card capital-provider-card ${selectedTreasuryProvider === 'NOTILT_VAULT' ? 'is-selected' : ''}"><div class="card-heading"><div><p class="eyebrow">生产链上金库</p><h2>Vault</h2></div><span class="status-pill ${vaultReady ? 'status-APPROVED' : 'status-DISABLED'}">${vaultReady ? '已配置' : '待配置'}</span></div><p>NoTilt Vault 用于受控资金保管与固定路径划转。页面只显示配置状态，不回显合约地址、Agent 范围或凭据。</p><dl class="definition-grid">${definition('当前使用', selectedTreasuryProvider === 'NOTILT_VAULT' ? '是' : '否')}${definition('官方 SDK', directConfiguration.notilt_sdk_available ? '可用' : '未就绪')}${definition('Vault 范围', vaultReady ? '已验证' : '不完整')}${definition('签名 / 广播', '始终由人控钱包或有效多签确认')}</dl></article>
-    <article class="card capital-provider-card ${selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT' ? 'is-selected' : ''}"><div class="card-heading"><div><p class="eyebrow">生产多签金库</p><h2>Safe</h2></div><span class="status-pill ${safeReady ? 'status-APPROVED' : 'status-DISABLED'}">${safeReady ? '已配置' : '待配置'}</span></div><p>Safe Spending Limits 使用 Safe、delegate 与可信 RPC 范围。控制台只读取额度与回执，不接收或保存钱包签名。</p><dl class="definition-grid">${definition('当前使用', selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT' ? '是' : '否')}${definition('Safe Gateway', directConfiguration.safe_gateway_available ? '可用' : '未就绪')}${definition('Safe / delegate', directConfiguration.safe_address_configured && directConfiguration.safe_delegate_configured ? '已配置' : '不完整')}${definition('Spending Limit', safeReady ? '可读取' : '尚未就绪')}</dl></article>
+    <article class="card capital-provider-card ${selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT' ? 'is-selected' : ''}"><div class="card-heading"><div><p class="eyebrow">生产多签金库</p><h2>Safe</h2></div><span class="status-pill ${safeReady ? 'status-APPROVED' : 'status-DISABLED'}">${safeReady ? '实时可读' : '待配置'}</span></div><p>Safe Spending Limits 使用 Safe、delegate 与可信 RPC 范围。控制台只读取额度与回执，不接收或保存钱包签名。</p><dl class="definition-grid">${definition('当前使用', selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT' ? '是' : '否')}${definition('Safe Gateway', directConfiguration.safe_gateway_available ? '可用' : '未就绪')}${definition('Safe / delegate', directConfiguration.safe_address_configured && directConfiguration.safe_delegate_configured ? '已配置' : '不完整')}${definition('Spending Limit', safeReady ? `${safeProbe.available_limit} USDC 可用` : safeProbe.error_code ? formatDirectCapitalBlocker(safeProbe.error_code) : '尚未就绪')}${definition('Safe 余额', safeReady ? `${safeProbe.balance} USDC` : '尚未读取')}${definition('重置周期 / nonce', safeReady ? `${safeProbe.reset_time_minutes} 分钟 / ${safeProbe.nonce}` : '尚未读取')}</dl>${safeReadinessNote}</article>
   </div>`;
-  const liveContent = `<section class="capital-provider-section"><div class="section-heading"><div><p class="eyebrow">Vault / Safe</p><h2>生产资金保管</h2><p>资金中心只保留 Vault、Safe 和相关受控资金路径；账户汇总与净值曲线已移至绩效报表。</p></div><a class="secondary" href="/results" data-link>查看绩效曲线</a></div>${providerCards}${directConfigurationEditor}</section>
-    <section class="capital-routes-section"><div class="card-heading"><div><p class="eyebrow">受控资金路径</p><h2>Vault / Safe 与交易所</h2><p class="subtle">先选路径，再填写金额；每次都会重新校验地址、网络、资产、额度、实时状态和安全开关。</p></div><span class="status-pill ${item.real_transfer_gate === 'ENABLED' ? 'status-APPROVED' : 'status-DISABLED'}">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</span></div><div class="callout direct-capital-boundary" data-provider-boundary><b>当前提供方：${escapeHtml(selectedTreasuryProviderLabel)}。</b> 链上私钥不进入控制台；真实币安提现继续受专用开关和 CAPITAL_TRANSFER 双重门禁。</div><div class="capital-route-grid">${directPathCards}</div></section>${directCapitalDialog}
-    <details class="capital-activity-disclosure"><summary><span>操作与回执</span><small>${Number(item.direct_operations?.length || 0)} 条直达操作</small></summary><div><section><h2>操作日志、阶段与回执</h2>${directRows ? `<div class="table-wrap is-scrollable capital-operation-table"><table><thead><tr><th>操作</th><th>路径 / 金额</th><th>阶段</th><th>状态 / 回执</th><th>精确阻断</th></tr></thead><tbody>${directRows}</tbody></table></div>` : '<div class="callout">尚无直达资金操作。</div>'}</section>${legacyRows ? `<section><h2>历史资金划转</h2><div class="table-wrap is-scrollable capital-history-table"><table><thead><tr><th>记录</th><th>方向</th><th>金额</th><th>状态</th><th>外部回执</th></tr></thead><tbody>${legacyRows}</tbody></table></div></section>` : ''}</div></details>`;
-  const testnetContent = `<section class="empty-state compact-empty capital-testnet-empty"><div><p class="eyebrow">生产专属</p><h2>Vault 与 Safe 不适用于测试模式</h2><p>测试资产、交易所账户汇总与净值曲线请在绩效报表查看；测试模式不显示生产资金路径。</p><div class="toolbar empty-actions"><a class="primary" href="/results" data-link>前往绩效报表</a><a class="secondary" href="/team-settings" data-link>查看当前模式</a></div></div></section>`;
+  const capitalNetworkScope = `<dl class="capital-network-scope" aria-label="资金网络与结算资产"><div><dt>资金网络</dt><dd>Arbitrum One（Chain ID 42161）</dd></div><div><dt>结算资产</dt><dd>原生 USDC</dd></div><div class="capital-network-scope-note"><dt>支持范围</dt><dd>当前默认仅支持 Arbitrum One 原生 USDC，不支持 USDT、其他网络资产或跨链版本 USDC。</dd></div></dl>`;
+  const liveContent = `<section class="capital-provider-section"><div class="section-heading"><div><p class="eyebrow">Vault / Safe</p><h2>生产资金保管</h2><p>资金中心只保留 Vault、Safe 和相关受控资金路径；账户汇总与净值曲线已移至绩效报表。</p></div><a class="secondary" href="/results" data-link>查看绩效曲线</a></div>${capitalNetworkScope}${providerCards}${directConfigurationEditor}</section>
+    <section class="capital-routes-section"><div class="card-heading"><div><p class="eyebrow">受控资金路径</p><h2>Vault / Safe 与交易所</h2><p class="subtle">先选路径，再填写金额；每次都会重新校验地址、网络、资产、额度、实时状态和安全开关。</p></div><span class="status-pill ${item.real_transfer_gate === 'ENABLED' ? 'status-APPROVED' : 'status-DISABLED'}">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</span></div>${renderDirectCapitalLiveProgress(item.direct_operations)}<div class="callout direct-capital-boundary" data-provider-boundary><b>当前提供方：${escapeHtml(selectedTreasuryProviderLabel)}。</b> 链上私钥不进入控制台；真实币安提现继续受专用开关和 CAPITAL_TRANSFER 双重门禁。</div><div class="capital-route-grid">${directPathCards}</div></section>${directCapitalDialog}${capitalAssuranceDialog}
+    <details class="capital-activity-disclosure" open><summary><span>操作与回执</span><small>${directOperationTotal} 条直达操作</small></summary><div><section><div class="capital-operation-heading"><div><h2>操作日志、阶段与回执</h2><p>提交、确认与入账状态会自动核对；回执区仅用于查看，不再承载二次操作。</p></div></div>${directRows ? `<div class="table-wrap is-scrollable capital-operation-table"><table><thead><tr><th>操作</th><th>路径 / 金额</th><th>阶段</th><th>状态 / 回执</th><th>校验 / 签名</th></tr></thead><tbody>${directRows}</tbody></table></div>${directOperationPagination}` : '<div class="callout">尚无直达资金操作。</div>'}</section>${legacyRows ? `<section><h2>历史资金划转</h2><div class="table-wrap is-scrollable capital-history-table"><table><thead><tr><th>记录</th><th>方向</th><th>金额</th><th>状态</th><th>外部回执</th></tr></thead><tbody>${legacyRows}</tbody></table></div></section>` : ''}</div></details>`;
+  const testnetContent = `<section class="empty-state compact-empty capital-testnet-empty"><div><p class="eyebrow">生产专属</p><h2>Vault 与 Safe 不适用于测试模式</h2><p>测试资产、交易所账户汇总与净值曲线请在绩效报表查看；测试模式不显示生产资金路径。</p><div class="toolbar empty-actions"><a class="primary" href="/results" data-link>前往绩效报表</a>${hasCapability('venue.view') ? '<button class="secondary" type="button" data-open-mode-switch>查看当前模式</button>' : ''}</div></div></section>`;
   main.innerHTML = `<section class="page capital-page"><header class="page-head capital-page-head"><div><p class="eyebrow">${fmtExecutionMode(displayEnvironment)} · 资金保管</p><h1>资金中心</h1><p class="lede">集中查看 Vault、Safe 与生产资金路径；资金账户汇总和曲线统一在绩效报表展示。</p></div>${displayEnvironment === 'LIVE' ? `<div class="capital-gate-summary"><small>生产资金操作</small><b>${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b><span>在途 / 占用 ${fmtNumber(liveInTransit)} USDC</span></div>` : ''}</header>${displayEnvironment === 'LIVE' ? liveContent : testnetContent}</section>`;
   bindCapitalActions();
+  if (displayEnvironment === 'LIVE') {
+    reconcilePendingBinanceReceipts(item.direct_operations);
+    reconcilePendingHyperliquidWithdrawals(item.direct_operations);
+    reconcilePendingSafeHyperliquidDeposits(item.direct_operations);
+    reconcilePendingHyperliquidDeposits(item.direct_operations);
+  }
 }
 
 function drawCapitalChart(series) {
@@ -729,128 +1883,187 @@ function bindCapitalPerformanceChart(historySeries = [], rangeContext = null) {
 }
 
 function bindCapitalActions() {
-  document.querySelectorAll('[data-capital-preview]').forEach(button => button.addEventListener('click', async event => {
-    const target = event.currentTarget;
-    const isSafe = target.dataset.previewProvider === 'SAFE_SPENDING_LIMIT';
-    const safeOutbound = target.dataset.previewDirection === 'OUTBOUND';
-    const safeMessage = safeOutbound ? '只会读取官方 Allowance Module、当前 USDC 额度、余额、重置周期与 nonce，并构建待人控 delegate 钱包签名的精确哈希。' : '只会构建从已授权自有地址到配置 Safe 的精确 Arbitrum USDC 无签名交易。';
-    const confirmed = await confirmAction({title:isSafe ? (safeOutbound ? '读取 Safe Spending Limit？' : '生成 Safe 入金预检？') : '生成 NoTilt SDK 无签名预检？', message:isSafe ? `${safeMessage} 不会读取私钥、签名或广播。` : '只会调用官方可信部署和资产目录构建固定用途的无签名交易。不会签名或广播；当前仍有任何阻断时，不得交给钱包执行。', confirmLabel:'确认并生成预检'});
-    if (!confirmed) return;
-    await withPending(target, '预检中…', async () => {
-      try {
-        const suffix = isSafe ? 'safe-spending-preview' : 'notilt-unsigned-preview';
-        const result = await api(`/api/capital/direct-operations/${target.dataset.capitalPreview}/${suffix}`, {method:'POST', body:JSON.stringify({expected_version:Number(target.dataset.operationVersion), final_confirmed:true, idempotency_key:crypto.randomUUID()})});
-        showToast(result.execution_blocked ? `已生成无签名预检，但仍被 ${result.blockers.length} 项条件阻断` : '无签名计划已生成；仍需独立人控钱包逐笔确认');
-        await route();
-      } catch (error) { showApiError(error); }
-    });
+  const assuranceDialog = document.querySelector('#capital-assurance-dialog');
+  const closeAssuranceDialog = () => assuranceDialog?.close();
+  document.querySelectorAll('[data-capital-assurance-record]').forEach(button => button.addEventListener('click', event => {
+    const record = directCapitalAssuranceRecords.get(event.currentTarget.dataset.capitalAssuranceRecord);
+    if (!record || !assuranceDialog) return;
+    assuranceDialog.querySelector('[data-capital-assurance-title]').textContent = record.title;
+    assuranceDialog.querySelector('[data-capital-assurance-meta]').textContent = record.meta;
+    const status = assuranceDialog.querySelector('[data-capital-assurance-status]');
+    status.className = `capital-assurance-dialog-status ${record.healthClass}`;
+    status.innerHTML = `<span class="capital-assurance-state">${escapeHtml(record.healthLabel)}</span><p>${escapeHtml(record.summaryCopy)}</p>`;
+    assuranceDialog.querySelector('[data-capital-assurance-content]').innerHTML = record.body;
+    assuranceDialog.showModal();
   }));
-  document.querySelectorAll('[data-binance-preview]').forEach(button => button.addEventListener('click', async event => {
-    const target = event.currentTarget;
-    const confirmed = await confirmAction({title:'执行币安资金预检？', message:'只读取官方 Wallet API 的实时权限、IP 限制、USDC Arbitrum 网络、白名单、余额、额度、手续费或充值地址。不会提交提现，也不会回显 API Key、Secret 或签名。', confirmLabel:'确认并预检'});
-    if (!confirmed) return;
-    await withPending(target, '币安预检中…', async () => {
-      try {
-        await api(`/api/capital/direct-operations/${target.dataset.binancePreview}/binance-preview`, {method:'POST', body:JSON.stringify({expected_version:Number(target.dataset.operationVersion), final_confirmed:true, idempotency_key:crypto.randomUUID()})});
-        showToast('币安实时预检已完成；尚未提交任何资金操作');
-        await route();
-      } catch (error) { showApiError(error); }
-    });
-  }));
-  document.querySelectorAll('.binance-submit-form').forEach(form => form.addEventListener('submit', async event => {
-    event.preventDefault();
-    const current = event.currentTarget;
-    const confirmed = await confirmAction({title:'最终提交币安提现？', message:'这是实际资金操作。系统会使用已核对的专用受限 API，提交后只能通过固定 withdrawOrderId 查询状态，不会自动重试未知结果。', confirmLabel:'确认提交提现'});
-    if (!confirmed) return;
-    await withPending(event.submitter, '提交中…', async () => {
-      try {
-        await api(`/api/capital/direct-operations/${current.dataset.binanceSubmit}/binance-submit`, {method:'POST', body:JSON.stringify({expected_version:Number(current.dataset.operationVersion), final_confirmed:true, confirmation_phrase:'CONFIRM_BINANCE_WITHDRAWAL', idempotency_key:crypto.randomUUID()})});
-        showToast('币安提现已提交；等待币安与 Arbitrum 双重回执');
-        await route();
-      } catch (error) { showApiError(error, current.querySelector('.form-error')); }
-    });
-  }));
-  document.querySelectorAll('.binance-receipt-form').forEach(form => form.addEventListener('submit', async event => {
-    event.preventDefault();
-    const current = event.currentTarget;
-    const transactionHash = new FormData(current).get('transaction_hash');
-    const payload = {expected_version:Number(current.dataset.operationVersion), stage:current.dataset.binanceStage, idempotency_key:crypto.randomUUID()};
-    if (transactionHash) payload.transaction_hash = transactionHash;
-    await withPending(event.submitter, '核对回执中…', async () => {
-      try {
-        await api(`/api/capital/direct-operations/${current.dataset.binanceReceipt}/binance-receipt`, {method:'POST', body:JSON.stringify(payload)});
-        showToast('币安与链上回执已按冻结范围核对');
-        await route();
-      } catch (error) { showApiError(error, current.querySelector('.form-error')); }
-    });
-  }));
-  document.querySelectorAll('[data-hyperliquid-preview]').forEach(button => button.addEventListener('click', async event => {
-    const target = event.currentTarget;
-    const confirmed = await confirmAction({title:'生成 Hyperliquid 人控钱包请求？', message:'系统会先验证 API/Agent Wallet 与主账户归属、当前余额、官方 Bridge2、白名单、金额和费用。withdraw3 或链上入金不接受代理钱包时会自动转为主钱包/有效多签确认，不会记录私钥、签名或广播。', confirmLabel:'确认并生成'});
-    if (!confirmed) return;
-    await withPending(target, '协议预检中…', async () => {
-      try {
-        const result = await api(`/api/capital/direct-operations/${target.dataset.hyperliquidPreview}/hyperliquid-preview`, {method:'POST', body:JSON.stringify({expected_version:Number(target.dataset.operationVersion), final_confirmed:true, idempotency_key:crypto.randomUUID()})});
-        showToast(result.automatic_fallback ? '协议权限已核对：已自动切换为主钱包 / 多签逐笔确认' : 'Hyperliquid 预检已完成');
-        await route();
-      } catch (error) { showApiError(error); }
-    });
-  }));
-  document.querySelectorAll('.wallet-result-form').forEach(form => {
-    form.addEventListener('submit', async event => {
-      event.preventDefault();
-      const current = event.currentTarget;
-      const values = Object.fromEntries([...new FormData(current).entries()].filter(([, value]) => String(value).trim() && value !== 'on'));
-      if (values.nonce) values.nonce = Number(values.nonce);
-      const confirmed = await confirmAction({title:'记录人控钱包提交结果？', message:'只记录公开交易哈希或 action hash 与 nonce，不上传签名内容。系统随后仍会独立验证 Hyperliquid、Arbitrum 与链上金库回执。', confirmLabel:'确认记录'});
-      if (!confirmed) return;
-      await withPending(event.submitter, '记录中…', async () => {
-        try {
-          await api(`/api/capital/direct-operations/${current.dataset.walletResult}/wallet-submission`, {method:'POST', body:JSON.stringify({...values, expected_version:Number(current.dataset.operationVersion), stage:current.dataset.walletStage, outcome:'SUBMITTED', final_confirmed:true, idempotency_key:crypto.randomUUID()})});
-          showToast('钱包提交已记录；资金状态仍等待公开回执验证');
-          await route();
-        } catch (error) { showApiError(error, current.querySelector('.form-error')); }
-      });
-    });
-    form.querySelector('[data-wallet-cancel]')?.addEventListener('click', async event => {
-      const current = event.currentTarget.closest('.wallet-result-form');
-      const confirmed = await confirmAction({title:'记录钱包取消？', message:'取消后系统保持 fail-closed，不会将其记为协议故障，也不会继续资金流程。', confirmLabel:'确认取消'});
-      if (!confirmed) return;
-      try {
-        await api(`/api/capital/direct-operations/${current.dataset.walletResult}/wallet-submission`, {method:'POST', body:JSON.stringify({expected_version:Number(current.dataset.operationVersion), stage:current.dataset.walletStage, outcome:'CANCELLED', final_confirmed:true, idempotency_key:crypto.randomUUID()})});
-        showToast('已记录钱包取消；资金未由系统发送');
-        await route();
-      } catch (error) { showApiError(error, current.querySelector('.form-error')); }
-    });
+  document.querySelectorAll('[data-close-capital-assurance]').forEach(button => button.addEventListener('click', closeAssuranceDialog));
+  assuranceDialog?.addEventListener('click', event => {
+    if (event.target === assuranceDialog) closeAssuranceDialog();
   });
-  document.querySelectorAll('.receipt-result-form').forEach(form => form.addEventListener('submit', async event => {
-    event.preventDefault();
-    const current = event.currentTarget;
-    const values = Object.fromEntries([...new FormData(current).entries()].filter(([, value]) => String(value).trim()));
-    const stage = values.stage;
-    const payload = {expected_version:Number(current.dataset.operationVersion), stage, idempotency_key:crypto.randomUUID()};
-    if (stage === 'HYPERLIQUID_DEPOSIT_ARBITRUM') payload.transaction_hash = values.recorded_hash;
-    if (stage === 'HYPERLIQUID_DEPOSIT_LEDGER') payload.action_hash = values.recorded_hash;
-    if (stage === 'HYPERLIQUID_WITHDRAWAL_LEDGER' || stage === 'HYPERLIQUID_CLASS_TRANSFER_LEDGER') { payload.action_hash = values.action_hash; payload.nonce = Number(values.nonce); }
-    if (stage === 'HYPERLIQUID_WITHDRAWAL_ARBITRUM') payload.transaction_hash = values.transaction_hash;
-    await withPending(event.submitter, '验证中…', async () => {
+  document.querySelectorAll('[data-capital-operation-page]').forEach(button => button.addEventListener('click', async event => {
+    const page = Number(event.currentTarget.dataset.capitalOperationPage);
+    if (!Number.isInteger(page) || page < 1 || page === capitalOperationsPage) return;
+    capitalOperationsPage = page;
+    await route();
+    document.querySelector('.capital-activity-disclosure')?.scrollIntoView({block:'start'});
+  }));
+  document.querySelector('[data-capital-operation-page-size]')?.addEventListener('change', async event => {
+    const requested = Number(event.currentTarget.value);
+    capitalOperationsPageSize = requested === 100 ? 100 : 50;
+    capitalOperationsPage = 1;
+    await route();
+    document.querySelector('.capital-activity-disclosure')?.scrollIntoView({block:'start'});
+  });
+  document.querySelectorAll('[data-direct-capital-start]').forEach(button => button.addEventListener('click', async event => {
+    const target = event.currentTarget;
+    await withPending(target, target.dataset.operationPath === 'BINANCE_TO_VAULT' ? '正在提交币安提现…' : '正在唤起钱包…', async () => {
       try {
-        await api(`/api/capital/direct-operations/${current.dataset.hlReceipt}/hyperliquid-receipt`, {method:'POST', body:JSON.stringify(payload)});
-        showToast('公开回执已验证；其他阶段仍按状态逐项等待');
-        await route();
-      } catch (error) { showApiError(error, current.querySelector('.form-error')); }
+        const result = await startDirectCapitalExecution({
+          operationId:target.dataset.directCapitalStart,
+          version:Number(target.dataset.operationVersion),
+          path:target.dataset.operationPath,
+          treasuryProvider:target.dataset.treasuryProvider,
+        });
+        showToast(directCapitalExecutionSuccessMessage(result));
+        await refreshCapitalPage();
+      } catch (error) { showApiError(error); await refreshCapitalPage(); }
     });
   }));
-  document.querySelectorAll('.treasury-receipt-form').forEach(form => form.addEventListener('submit', async event => {
-    event.preventDefault();
-    const current = event.currentTarget;
-    const transactionHash = new FormData(current).get('transaction_hash');
-    await withPending(event.submitter, '验证金库到账…', async () => {
+  document.querySelectorAll('[data-direct-wallet-action]').forEach(button => button.addEventListener('click', async event => {
+    const target = event.currentTarget;
+    const action = directCapitalWalletActions.get(target.dataset.directWalletAction);
+    if (!action) return;
+    await withPending(target, '正在唤起钱包…', async () => {
       try {
-        await api(`/api/capital/direct-operations/${current.dataset.treasuryReceipt}/treasury-receipt`, {method:'POST', body:JSON.stringify({expected_version:Number(current.dataset.operationVersion), transaction_hash:transactionHash, idempotency_key:crypto.randomUUID()})});
-        showToast('链上金库到账已验证；仅在全部回执一致后标记完成');
-        await route();
-      } catch (error) { showApiError(error, current.querySelector('.form-error')); }
+        const refreshedAction = action.stage === 'NOTILT_RELEASE_EXECUTION'
+          ? await prepareNoTiltReleaseExecution({operationId:action.operationId, version:action.version})
+          : action.stage === 'NOTILT_DESTINATION_TRANSFER'
+            ? await prepareNoTiltDestinationTransfer({operationId:action.operationId, version:action.version})
+            : action.kind === 'HYPERLIQUID'
+              ? await prepareHyperliquidWalletAction({operationId:action.operationId, version:action.version})
+              : await prepareTreasuryWalletAction({
+              operationId:action.operationId,
+              version:action.version,
+              path:action.path,
+              treasuryProvider:action.treasuryProvider,
+            });
+        await executeDirectWalletAction(refreshedAction);
+        showToast('钱包已提交，公开交易信息已自动记录');
+        await refreshCapitalPage();
+      } catch (error) { showApiError(error); await refreshCapitalPage(); }
+    });
+  }));
+  document.querySelectorAll('[data-direct-capital-next]').forEach(button => button.addEventListener('click', async event => {
+    const target = event.currentTarget;
+    await withPending(target, '正在唤起钱包…', async () => {
+      try {
+        const action = target.dataset.nextAction === 'HYPERLIQUID'
+          ? await prepareHyperliquidWalletAction({operationId:target.dataset.directCapitalNext, version:Number(target.dataset.operationVersion)})
+          : target.dataset.nextAction === 'NOTILT_EXECUTION'
+            ? await prepareNoTiltReleaseExecution({operationId:target.dataset.directCapitalNext, version:Number(target.dataset.operationVersion)})
+            : target.dataset.nextAction === 'NOTILT_DESTINATION'
+              ? await prepareNoTiltDestinationTransfer({operationId:target.dataset.directCapitalNext, version:Number(target.dataset.operationVersion)})
+              : await prepareTreasuryWalletAction({
+              operationId:target.dataset.directCapitalNext,
+              version:Number(target.dataset.operationVersion),
+              path:target.dataset.operationPath,
+              treasuryProvider:target.dataset.treasuryProvider,
+            });
+        await executeDirectWalletAction(action);
+        showToast('钱包已提交，公开交易信息已自动记录');
+        await refreshCapitalPage();
+      } catch (error) { showApiError(error); await refreshCapitalPage(); }
+    });
+  }));
+  document.querySelectorAll('[data-binance-submit-direct]').forEach(button => button.addEventListener('click', async event => {
+    const target = event.currentTarget;
+    await withPending(target, '正在提交币安提现…', async () => {
+      try {
+        await api(`/api/capital/direct-operations/${target.dataset.binanceSubmitDirect}/binance-submit`, {
+          method:'POST',
+          body:JSON.stringify({expected_version:Number(target.dataset.operationVersion), final_confirmed:true, confirmation_phrase:'CONFIRM_BINANCE_WITHDRAWAL', idempotency_key:crypto.randomUUID()}),
+        });
+        showToast('币安提现已直接提交，正在等待币安与 Arbitrum 回执');
+        await refreshCapitalPage();
+      } catch (error) { showApiError(error); await refreshCapitalPage(); }
+    });
+  }));
+  document.querySelectorAll('[data-notilt-receipt-direct]').forEach(button => button.addEventListener('click', async event => {
+    const target = event.currentTarget;
+    await withPending(target, '验证 NoTilt 公开回执…', async () => {
+      try {
+        await api(`/api/capital/direct-operations/${target.dataset.notiltReceiptDirect}/notilt-release-receipt`, {
+          method:'POST',
+          body:JSON.stringify({expected_version:Number(target.dataset.operationVersion), transaction_hash:target.dataset.transactionHash, idempotency_key:crypto.randomUUID()}),
+        });
+        showToast('NoTilt 公开回执已验证，下一步会在协议允许时直接打开钱包');
+        await refreshCapitalPage();
+      } catch (error) { showApiError(error); }
+    });
+  }));
+  document.querySelectorAll('[data-treasury-withdrawal-receipt-direct]').forEach(button => button.addEventListener('click', async event => {
+    const target = event.currentTarget;
+    await withPending(target, '验证 Safe 转出到账…', async () => {
+      try {
+        await api(`/api/capital/direct-operations/${target.dataset.treasuryWithdrawalReceiptDirect}/treasury-withdrawal-receipt`, {
+          method:'POST',
+          body:JSON.stringify({expected_version:Number(target.dataset.operationVersion), transaction_hash:target.dataset.transactionHash, idempotency_key:crypto.randomUUID()}),
+        });
+        showToast('Safe 转出公开回执已验证，可以继续目标入金');
+        await refreshCapitalPage();
+      } catch (error) { showApiError(error); }
+    });
+  }));
+  document.querySelectorAll('[data-binance-receipt-direct]').forEach(button => button.addEventListener('click', async event => {
+    const target = event.currentTarget;
+    await withPending(target, '自动核对到账…', async () => {
+      try {
+        const receipt = await verifyBinanceReceipt({
+          operationId:target.dataset.binanceReceiptDirect,
+          version:Number(target.dataset.operationVersion),
+          stage:target.dataset.binanceStage,
+          transactionHash:target.dataset.transactionHash,
+        });
+        showToast(receipt.pending ? '币安回执仍在确认，刷新页面后会继续核对' : '币安与链上公开回执已核对');
+        await refreshCapitalPage();
+      } catch (error) { showApiError(error); }
+    });
+  }));
+  document.querySelectorAll('[data-hl-receipt-direct]').forEach(button => button.addEventListener('click', async event => {
+    const target = event.currentTarget;
+    await withPending(target, '自动读取公开回执…', async () => {
+      try {
+        const operationId = target.dataset.hlReceiptDirect;
+        const walletStage = target.dataset.walletStage;
+        let version = Number(target.dataset.operationVersion);
+        if (walletStage === 'HYPERLIQUID_DEPOSIT') {
+          const transactionHash = target.dataset.transactionHash;
+          const chain = await api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {method:'POST', body:JSON.stringify({expected_version:version, stage:'HYPERLIQUID_DEPOSIT_ARBITRUM', transaction_hash:transactionHash, idempotency_key:crypto.randomUUID()})});
+          version = Number(chain.version);
+          await api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {method:'POST', body:JSON.stringify({expected_version:version, stage:'HYPERLIQUID_DEPOSIT_LEDGER', action_hash:transactionHash, idempotency_key:crypto.randomUUID()})});
+        } else {
+          const ledgerStage = walletStage === 'HYPERLIQUID_CLASS_TRANSFER' ? 'HYPERLIQUID_CLASS_TRANSFER_LEDGER' : 'HYPERLIQUID_WITHDRAWAL_LEDGER';
+          const payload = {expected_version:version, stage:ledgerStage, nonce:Number(target.dataset.nonce), idempotency_key:crypto.randomUUID()};
+          if (target.dataset.actionHash) payload.action_hash = target.dataset.actionHash;
+          const ledger = await api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {method:'POST', body:JSON.stringify(payload)});
+          version = Number(ledger.version);
+          if (walletStage === 'HYPERLIQUID_WITHDRAWAL' && /^0x[0-9a-fA-F]{64}$/.test(String(ledger.receipt?.hash || ''))) {
+            await api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {method:'POST', body:JSON.stringify({expected_version:version, stage:'HYPERLIQUID_WITHDRAWAL_ARBITRUM', transaction_hash:ledger.receipt.hash, idempotency_key:crypto.randomUUID()})});
+          }
+        }
+        showToast('Hyperliquid 与链上公开回执已自动读取');
+        await refreshCapitalPage();
+      } catch (error) { showApiError(error); }
+    });
+  }));
+  document.querySelectorAll('[data-treasury-receipt-direct]').forEach(button => button.addEventListener('click', async event => {
+    const target = event.currentTarget;
+    await withPending(target, '自动验证金库到账…', async () => {
+      try {
+        await api(`/api/capital/direct-operations/${target.dataset.treasuryReceiptDirect}/treasury-receipt`, {method:'POST', body:JSON.stringify({expected_version:Number(target.dataset.operationVersion), transaction_hash:target.dataset.transactionHash, idempotency_key:crypto.randomUUID()})});
+        showToast('链上金库到账已自动验证');
+        await refreshCapitalPage();
+      } catch (error) { showApiError(error); }
     });
   }));
   const directCapitalConfigForm = document.querySelector('#direct-capital-config-form');
@@ -865,6 +2078,10 @@ function bindCapitalActions() {
     });
     const guidance = directCapitalConfigForm.querySelector('[data-provider-guidance]');
     if (guidance) guidance.textContent = `当前使用 ${provider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault'}；NoTilt 与 Safe 的配置都会独立保存，未选中的金库不会参与新建资金操作。`;
+    const withdrawalScopeHelp = directCapitalConfigForm.querySelector('[data-withdrawal-scope-help]');
+    if (withdrawalScopeHelp) withdrawalScopeHelp.textContent = localizedText(provider === 'SAFE_SPENDING_LIMIT'
+      ? '必须与当前 Safe Smart Account 完全一致'
+      : '必须与当前 NoTilt 金库地址完全一致');
     const boundary = document.querySelector('[data-provider-boundary]');
     if (boundary) boundary.innerHTML = `<b>当前使用：${provider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault'}。</b> 两种金库可同时保持接入；每条新路径只冻结当前金库，并重新校验地址、网络、资产、额度、实时状态与安全开关，且不在服务内签名或广播。`;
   };
@@ -874,6 +2091,28 @@ function bindCapitalActions() {
     event.preventDefault();
     const form = event.currentTarget;
     const values = Object.fromEntries([...new FormData(form).entries()].filter(([, value]) => String(value).trim()));
+    if (form.elements.clear_notilt_configuration) values.clear_notilt_configuration = form.elements.clear_notilt_configuration.checked;
+    if (form.elements.clear_safe_configuration) values.clear_safe_configuration = form.elements.clear_safe_configuration.checked;
+    const errorBox = form.querySelector('.form-error');
+    errorBox.textContent = '';
+    const maxAmount = values.max_amount === undefined ? null : Number(values.max_amount);
+    const maxFee = values.max_fee === undefined ? null : Number(values.max_fee);
+    if (maxAmount !== null && maxFee !== null && maxFee >= maxAmount) {
+      errorBox.textContent = localizedText('最大费用上限必须低于单次金额上限，请调整后重新保存。');
+      errorBox.focus();
+      return;
+    }
+    const selectedTreasuryAddress = values.treasury_provider === 'SAFE_SPENDING_LIMIT'
+      ? values.safe_address
+      : values.vault_address;
+    if (selectedTreasuryAddress && values.binance_withdrawal_address
+      && String(selectedTreasuryAddress).toLowerCase() !== String(values.binance_withdrawal_address).toLowerCase()) {
+      errorBox.textContent = localizedText(values.treasury_provider === 'SAFE_SPENDING_LIMIT'
+        ? '币安受限提现地址必须与当前 Safe Smart Account 完全一致，请核对后重新保存。'
+        : '币安受限提现地址必须与当前 NoTilt 金库地址完全一致，请核对后重新保存。');
+      errorBox.focus();
+      return;
+    }
     values.network = 'ARBITRUM'; values.asset = 'USDC'; values.idempotency_key = crypto.randomUUID();
     const confirmed = await confirmAction({title:'保存新的资金路径配置版本？', message:'系统只保存公开账户范围、地址和额度，不接收任何密钥或签名材料。新版本只影响之后创建的资金操作；现有操作继续使用冻结引用。', confirmLabel:'确认保存配置'});
     if (!confirmed) return;
@@ -882,12 +2121,28 @@ function bindCapitalActions() {
         await api('/api/capital/direct-configuration', {method:'PUT', body:JSON.stringify(values)});
         showToast('资金路径配置新版本已保存并写入审计');
         await route();
-      } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+      } catch (error) { showApiError(error, errorBox); errorBox.focus(); }
     });
   });
   const directCapitalDialog = document.querySelector('#direct-capital-dialog');
   const directCapitalForm = document.querySelector('#direct-capital-form');
-  document.querySelectorAll('[data-open-capital-path]').forEach(button => button.addEventListener('click', event => {
+  document.querySelectorAll('[data-open-capital-path]').forEach(button => button.addEventListener('click', async event => {
+    const target = event.currentTarget;
+    if (target.dataset.resumeCapitalOperation) {
+      await withPending(target, '正在核对链上回执…', async () => {
+        try {
+          const result = await continueSafeOutboundExecution({
+            operationId:target.dataset.resumeCapitalOperation,
+            version:Number(target.dataset.operationVersion),
+            path:target.dataset.openCapitalPath,
+            transactionHash:target.dataset.transactionHash,
+          });
+          showToast(result.receiptPending ? '交易已提交，链上或 Hyperliquid 公开回执仍在确认' : '链上回执已确认，资金路径已完成');
+          await refreshCapitalPage();
+        } catch (error) { showApiError(error); await refreshCapitalPage(); }
+      });
+      return;
+    }
     const path = DIRECT_CAPITAL_PATHS.find(item => item.path === event.currentTarget.dataset.openCapitalPath);
     if (!path || !directCapitalDialog || !directCapitalForm) return;
     directCapitalForm.reset();
@@ -905,25 +2160,34 @@ function bindCapitalActions() {
     const amount = new FormData(currentForm).get('amount');
     const treasuryProvider = currentForm.dataset.treasuryProvider || 'NOTILT_VAULT';
     const path = currentForm.dataset.directCapitalForm;
-    const pathDefinition = DIRECT_CAPITAL_PATHS.find(item => item.path === path);
-    const pathLabel = pathDefinition ? `${pathDefinition.from} → ${pathDefinition.to}` : path;
     directCapitalDialog?.close();
-    const providerLabel = treasuryProvider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault';
-    const confirmed = await confirmAction({title:'最终确认资金路径？', message:`使用 ${providerLabel} 检查 ${pathLabel}，金额 ${amount} USDC。系统会重新校验地址、网络、额度和安全开关；任何缺失都会阻断，不会发送资金。`, confirmLabel:'确认并执行安全检查'});
-    if (!confirmed) { directCapitalDialog?.showModal(); return; }
     const button = currentForm.querySelector('button[type="submit"], button:not([type])');
+    let operationCreated = false;
     await withPending(button, '正在安全校验…', async () => {
       try {
         const result = await api('/api/capital/direct-operations', {
           method:'POST',
           body:JSON.stringify({path, amount, final_confirmed:true, idempotency_key:crypto.randomUUID()}),
         });
-        const blockers = (result.blockers || []).map(formatDirectCapitalBlocker).join('；');
-        showToast(result.status === 'BLOCKED' ? `已安全阻断：${blockers}` : '资金操作已记录');
-        await route();
+        operationCreated = true;
+        const operation = (result.data?.direct_operations || []).find(item => item.operation_id === result.operation_id);
+        if (!operation) throw new Error('新建资金操作未返回可继续执行的版本。');
+        const execution = await startDirectCapitalExecution({
+          operationId:result.operation_id,
+          version:operation.version,
+          path,
+          treasuryProvider,
+        });
+        showToast(directCapitalExecutionSuccessMessage(execution));
+        await refreshCapitalPage();
       } catch (error) {
-        showApiError(error, currentForm.querySelector('.form-error'));
-        directCapitalDialog?.showModal();
+        if (operationCreated) {
+          showApiError(error);
+          await refreshCapitalPage();
+        } else {
+          showApiError(error, currentForm.querySelector('.form-error'));
+          directCapitalDialog?.showModal();
+        }
       }
     });
   }));

@@ -24,6 +24,7 @@ PROJECT_LICENSE = "GPL-3.0-only OR LicenseRef-TradingOPS-Commercial-1.0"
 LOCKED_LICENSE_OVERRIDES = {
     ("colorama", "0.4.6"): "BSD-3-Clause",
     ("greenlet", "3.5.3"): "MIT AND PSF-2.0",
+    ("winloop", "0.6.3"): "MIT",
 }
 
 CLASSIFIER_LICENSES = {
@@ -60,7 +61,9 @@ def _license_for_distribution(distribution: importlib.metadata.Distribution) -> 
     aliases = {
         "Apache": "Apache-2.0",
         "Apache 2.0": "Apache-2.0",
+        "Apache License 2.0": "Apache-2.0",
         "Apache-2.0": "Apache-2.0",
+        "Apache-2.0 AND MIT": "Apache-2.0 AND MIT",
         "BSD, Public Domain": "BSD-3-Clause OR LicenseRef-Public-Domain",
         "Dual License": "BSD-3-Clause OR Apache-2.0",
         "ISC license": "ISC",

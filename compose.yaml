@@ -19,26 +19,51 @@ services:
   migrate:
     build:
       context: .
-    profiles: ["console", "runtime", "notifications"]
+    profiles: ["console", "runtime", "notifications", "execution"]
     command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
     environment: &control-plane-environment
-      TRADING_ENVIRONMENT: local
+      TRADING_ENVIRONMENT: ${TRADING_ENVIRONMENT:-local}
       TRADING_DATABASE_URL: ${TRADING_DATABASE_URL:?set by scripts/run_compose.sh}
       TRADING_SESSION_SIGNING_SECRET: ${TRADING_SESSION_SIGNING_SECRET:?set by scripts/run_compose.sh}
       TRADING_CREDENTIAL_ENCRYPTION_KEY: ${TRADING_CREDENTIAL_ENCRYPTION_KEY:?set by scripts/run_compose.sh}
       TRADING_LOCAL_ADMIN_USERNAME: ${TRADING_LOCAL_ADMIN_USERNAME:-trading-admin}
+      TRADING_LOCAL_PRESERVE_ENABLED_CAPABILITY_GATES: ${TRADING_LOCAL_PRESERVE_ENABLED_CAPABILITY_GATES:-}
       TRADING_ALLOW_MOCK_IDENTITY: "false"
       TRADING_RUNTIME_SYNC_ENABLED: "false"
+      TRADING_FACT_ADAPTER_ENABLED: "false"
       TRADING_NOTIFICATION_WORKER_ENABLED: "false"
+      TRADING_EXECUTION_WORKER_ENABLED: "false"
+      TRADING_CAPITAL_CONTINUATION_WORKER_ENABLED: "false"
+      TRADING_RUNTIME_BINANCE_SYMBOL: ${TRADING_RUNTIME_BINANCE_SYMBOL:-BTCUSDT}
+      TRADING_RUNTIME_HYPERLIQUID_SYMBOL: ${TRADING_RUNTIME_HYPERLIQUID_SYMBOL:-BTC}
+      TRADING_RUNTIME_OKX_SYMBOL: ${TRADING_RUNTIME_OKX_SYMBOL:-BTC-USDT-SWAP}
+      TRADING_RUNTIME_BYBIT_SYMBOL: ${TRADING_RUNTIME_BYBIT_SYMBOL:-BTCUSDT}
       TRADING_NOTIFICATION_EMAIL_SMTP_ALLOWED_HOSTS: ${TRADING_NOTIFICATION_EMAIL_SMTP_ALLOWED_HOSTS:-}
       TRADING_PERPTAPE_WEBSOCKET_ENABLED: "false"
-      TRADING_FREQTRADE_WORKERS_ENABLED: "false"
-      TRADING_FREQTRADE_LIVE_ORDER_SEND_ENABLED: "false"
-      TRADING_BINANCE_LIVE_ORDER_SEND_ENABLED: "false"
-      TRADING_BINANCE_TESTNET_ORDER_SEND_ENABLED: "false"
-      TRADING_HYPERLIQUID_LIVE_ORDER_SEND_ENABLED: "false"
-      TRADING_HYPERLIQUID_TESTNET_ORDER_SEND_ENABLED: "false"
-      TRADING_BINANCE_CAPITAL_WITHDRAW_ENABLED: "false"
+      TRADING_FREQTRADE_WORKERS_ENABLED: ${TRADING_FREQTRADE_WORKERS_ENABLED:-false}
+      TRADING_TELEGRAM_ENABLED: ${TRADING_TELEGRAM_ENABLED:-false}
+      TRADING_TELEGRAM_BOT_TOKEN: ${TRADING_TELEGRAM_BOT_TOKEN:-}
+      TRADING_TELEGRAM_BOT_USERNAME: ${TRADING_TELEGRAM_BOT_USERNAME:-}
+      TRADING_TELEGRAM_ALLOWED_USERNAME: ${TRADING_TELEGRAM_ALLOWED_USERNAME:-}
+      TRADING_TELEGRAM_INTERNAL_USERNAME: ${TRADING_TELEGRAM_INTERNAL_USERNAME:-}
+      TRADING_TELEGRAM_POLL_TIMEOUT_SECONDS: ${TRADING_TELEGRAM_POLL_TIMEOUT_SECONDS:-20}
+      TRADING_BINANCE_CAPITAL_WITHDRAW_ENABLED: ${TRADING_BINANCE_CAPITAL_WITHDRAW_ENABLED:-false}
+      TRADING_BINANCE_CAPITAL_API_KEY: ${TRADING_BINANCE_CAPITAL_API_KEY:-}
+      TRADING_BINANCE_CAPITAL_API_SECRET: ${TRADING_BINANCE_CAPITAL_API_SECRET:-}
+      TRADING_BINANCE_CAPITAL_ACCOUNT_ID: ${TRADING_BINANCE_CAPITAL_ACCOUNT_ID:-}
+      TRADING_NOTILT_ENABLED: ${TRADING_NOTILT_ENABLED:-false}
+      TRADING_NOTILT_AGENT_ADDRESS: ${TRADING_NOTILT_AGENT_ADDRESS:-}
+      TRADING_NOTILT_ETHEREUM_VAULT_ADDRESS: ${TRADING_NOTILT_ETHEREUM_VAULT_ADDRESS:-}
+      TRADING_NOTILT_BSC_VAULT_ADDRESS: ${TRADING_NOTILT_BSC_VAULT_ADDRESS:-}
+      TRADING_NOTILT_ARBITRUM_VAULT_ADDRESS: ${TRADING_NOTILT_ARBITRUM_VAULT_ADDRESS:-}
+      TRADING_SAFE_SPENDING_ENABLED: ${TRADING_SAFE_SPENDING_ENABLED:-false}
+      TRADING_SAFE_SPENDING_ARBITRUM_RPC_URL: ${TRADING_SAFE_SPENDING_ARBITRUM_RPC_URL:-}
+      TRADING_SAFE_SPENDING_GATEWAY_TIMEOUT_SECONDS: ${TRADING_SAFE_SPENDING_GATEWAY_TIMEOUT_SECONDS:-20}
+      TRADING_CAPITAL_ARBITRUM_RPC_URL: ${TRADING_CAPITAL_ARBITRUM_RPC_URL:-}
+      TRADING_HYPERLIQUID_BASE_URL: ${TRADING_HYPERLIQUID_BASE_URL:-https://api.hyperliquid.xyz}
+      TRADING_HYPERLIQUID_ACCOUNT_ADDRESS: ${TRADING_HYPERLIQUID_ACCOUNT_ADDRESS:-}
+      TRADING_HYPERLIQUID_API_WALLET_ADDRESS: ${TRADING_HYPERLIQUID_API_WALLET_ADDRESS:-}
+      TRADING_HYPERLIQUID_SUBACCOUNT_ADDRESS: ${TRADING_HYPERLIQUID_SUBACCOUNT_ADDRESS:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,7 +78,7 @@ services:
   setup:
     build:
       context: .
-    profiles: ["console", "runtime", "notifications"]
+    profiles: ["console", "runtime", "notifications", "execution"]
     command: ["uv", "run", "--no-sync", "python", "scripts/setup_local.py"]
     environment:
       <<: *control-plane-environment
@@ -104,6 +129,38 @@ services:
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
 
+  capital-continuation-worker:
+    build:
+      context: .
+    profiles: ["console"]
+    command: ["uv", "run", "--no-sync", "trading-capital-worker"]
+    environment:
+      <<: *control-plane-environment
+      TRADING_CAPITAL_CONTINUATION_WORKER_ENABLED: "true"
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - --no-sync
+        - trading-capital-worker
+        - --healthcheck
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 20s
+
   runtime-worker:
     build:
       context: .
@@ -112,6 +169,8 @@ services:
     environment:
       <<: *control-plane-environment
       TRADING_RUNTIME_SYNC_ENABLED: "true"
+      TRADING_FACT_ADAPTER_ENABLED: "true"
+      TRADING_FACT_ADAPTER_BEARER_TOKEN: ${TRADING_FACT_ADAPTER_BEARER_TOKEN:?set by scripts/run_compose.sh}
       TRADING_PERPTAPE_WEBSOCKET_ENABLED: ${TRADING_PERPTAPE_WEBSOCKET_ENABLED:-false}
     depends_on:
       setup:
@@ -128,6 +187,42 @@ services:
       timeout: 10s
       retries: 3
       start_period: 5s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 45s
+
+  fact-adapter:
+    build:
+      context: .
+    profiles: ["runtime"]
+    command: ["uv", "run", "--no-sync", "trading-fact-adapter"]
+    environment:
+      <<: *control-plane-environment
+      TRADING_RUNTIME_SYNC_ENABLED: "true"
+      TRADING_FACT_ADAPTER_ENABLED: "true"
+      TRADING_FACT_ADAPTER_HOST: 0.0.0.0
+      TRADING_FACT_ADAPTER_PORT: 8010
+      TRADING_FACT_ADAPTER_BEARER_TOKEN: ${TRADING_FACT_ADAPTER_BEARER_TOKEN:?set by scripts/run_compose.sh}
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8010/health/ready', timeout=2).read()
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     init: true
     read_only: true
     tmpfs:
@@ -169,6 +264,39 @@ services:
     restart: unless-stopped
     stop_grace_period: 20s
 
+  execution-worker:
+    build:
+      context: .
+    profiles: ["execution"]
+    command: ["uv", "run", "--no-sync", "trading-execution-worker"]
+    environment:
+      <<: *control-plane-environment
+      TRADING_EXECUTION_WORKER_ENABLED: "true"
+      TRADING_FREQTRADE_WORKERS_ENABLED: "true"
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - --no-sync
+        - trading-execution-worker
+        - --healthcheck
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 20s
+
   freqtrade-binance:
     image: freqtradeorg/freqtrade:2026.7
     profiles: ["execution-workers"]
@@ -181,8 +309,11 @@ services:
       - --strategy-path
       - /freqtrade/strategies
     environment:
-      FREQTRADE__API_SERVER__USERNAME: ${TRADING_FREQTRADE_API_USERNAME:-trading-control}
-      FREQTRADE__API_SERVER__PASSWORD: ${TRADING_FREQTRADE_API_PASSWORD:-local-dry-run-only}
+      FREQTRADE__API_SERVER__USERNAME: ${FREQTRADE_BINANCE_API_USERNAME:-trading-control}
+      FREQTRADE__API_SERVER__PASSWORD: ${FREQTRADE_BINANCE_API_PASSWORD:-local-dry-run-only}
+      FREQTRADE__API_SERVER__WS_TOKEN: ${FREQTRADE_BINANCE_WS_TOKEN:-local-dry-run-rpc-token}
+      FREQTRADE__TELEGRAM__ENABLED: "false"
+      FREQTRADE__TELEGRAM__AUTHORIZED_USERS: "[]"
     ports:
       - "127.0.0.1:8081:8080"
     volumes:
@@ -202,8 +333,11 @@ services:
       - --strategy-path
       - /freqtrade/strategies
     environment:
-      FREQTRADE__API_SERVER__USERNAME: ${TRADING_FREQTRADE_API_USERNAME:-trading-control}
-      FREQTRADE__API_SERVER__PASSWORD: ${TRADING_FREQTRADE_API_PASSWORD:-local-dry-run-only}
+      FREQTRADE__API_SERVER__USERNAME: ${FREQTRADE_HYPERLIQUID_API_USERNAME:-trading-control}
+      FREQTRADE__API_SERVER__PASSWORD: ${FREQTRADE_HYPERLIQUID_API_PASSWORD:-local-dry-run-only}
+      FREQTRADE__API_SERVER__WS_TOKEN: ${FREQTRADE_HYPERLIQUID_WS_TOKEN:-local-dry-run-rpc-token}
+      FREQTRADE__TELEGRAM__ENABLED: "false"
+      FREQTRADE__TELEGRAM__AUTHORIZED_USERS: "[]"
     ports:
       - "127.0.0.1:8082:8080"
     volumes:
@@ -224,14 +358,17 @@ services:
       - /freqtrade/strategies
     environment:
       PYTHONPATH: /freqtrade/patches
-      FREQTRADE__API_SERVER__USERNAME: ${TRADING_FREQTRADE_API_USERNAME:-trading-control}
-      FREQTRADE__API_SERVER__PASSWORD: ${TRADING_FREQTRADE_API_PASSWORD:-local-live-smoke-only}
-      FREQTRADE__API_SERVER__JWT_SECRET_KEY: ${TRADING_FREQTRADE_LIVE_JWT_SECRET:-local-live-smoke-jwt-override-required}
-      FREQTRADE__DRY_RUN: ${TRADING_FREQTRADE_BINANCE_LIVE_DRY_RUN:-true}
-      FREQTRADE__FORCE_ENTRY_ENABLE: ${TRADING_FREQTRADE_BINANCE_FORCE_ENTRY_ENABLE:-false}
-      FREQTRADE__INITIAL_STATE: ${TRADING_FREQTRADE_BINANCE_INITIAL_STATE:-stopped}
-      FREQTRADE__EXCHANGE__KEY: ${TRADING_BINANCE_API_KEY:-}
-      FREQTRADE__EXCHANGE__SECRET: ${TRADING_BINANCE_API_SECRET:-}
+      FREQTRADE__API_SERVER__USERNAME: ${FREQTRADE_BINANCE_API_USERNAME:-trading-control}
+      FREQTRADE__API_SERVER__PASSWORD: ${FREQTRADE_BINANCE_API_PASSWORD:-local-live-smoke-only}
+      FREQTRADE__API_SERVER__JWT_SECRET_KEY: ${FREQTRADE_BINANCE_JWT_SECRET:-local-live-smoke-jwt-override-required}
+      FREQTRADE__API_SERVER__WS_TOKEN: ${FREQTRADE_BINANCE_WS_TOKEN:-local-live-smoke-rpc-token}
+      FREQTRADE__TELEGRAM__ENABLED: "false"
+      FREQTRADE__TELEGRAM__AUTHORIZED_USERS: "[]"
+      FREQTRADE__DRY_RUN: ${FREQTRADE_BINANCE_DRY_RUN:-true}
+      FREQTRADE__FORCE_ENTRY_ENABLE: ${FREQTRADE_BINANCE_FORCE_ENTRY_ENABLE:-false}
+      FREQTRADE__INITIAL_STATE: ${FREQTRADE_BINANCE_INITIAL_STATE:-stopped}
+      FREQTRADE__EXCHANGE__KEY: ${FREQTRADE_BINANCE_EXCHANGE_KEY:-}
+      FREQTRADE__EXCHANGE__SECRET: ${FREQTRADE_BINANCE_EXCHANGE_SECRET:-}
     ports:
       - "127.0.0.1:8083:8080"
     volumes:
@@ -252,14 +389,17 @@ services:
       - --strategy-path
       - /freqtrade/strategies
     environment:
-      FREQTRADE__API_SERVER__USERNAME: ${TRADING_FREQTRADE_API_USERNAME:-trading-control}
-      FREQTRADE__API_SERVER__PASSWORD: ${TRADING_FREQTRADE_API_PASSWORD:-local-live-smoke-only}
-      FREQTRADE__API_SERVER__JWT_SECRET_KEY: ${TRADING_FREQTRADE_LIVE_JWT_SECRET:-local-live-smoke-jwt-override-required}
-      FREQTRADE__DRY_RUN: ${TRADING_FREQTRADE_HYPERLIQUID_LIVE_DRY_RUN:-true}
-      FREQTRADE__FORCE_ENTRY_ENABLE: ${TRADING_FREQTRADE_HYPERLIQUID_FORCE_ENTRY_ENABLE:-false}
-      FREQTRADE__INITIAL_STATE: ${TRADING_FREQTRADE_HYPERLIQUID_INITIAL_STATE:-stopped}
-      FREQTRADE__EXCHANGE__WALLET_ADDRESS: ${TRADING_HYPERLIQUID_FREQTRADE_WALLET_ADDRESS:-}
-      FREQTRADE__EXCHANGE__PRIVATE_KEY: ${TRADING_HYPERLIQUID_API_WALLET_PRIVATE_KEY:-}
+      FREQTRADE__API_SERVER__USERNAME: ${FREQTRADE_HYPERLIQUID_API_USERNAME:-trading-control}
+      FREQTRADE__API_SERVER__PASSWORD: ${FREQTRADE_HYPERLIQUID_API_PASSWORD:-local-live-smoke-only}
+      FREQTRADE__API_SERVER__JWT_SECRET_KEY: ${FREQTRADE_HYPERLIQUID_JWT_SECRET:-local-live-smoke-jwt-override-required}
+      FREQTRADE__API_SERVER__WS_TOKEN: ${FREQTRADE_HYPERLIQUID_WS_TOKEN:-local-live-smoke-rpc-token}
+      FREQTRADE__TELEGRAM__ENABLED: "false"
+      FREQTRADE__TELEGRAM__AUTHORIZED_USERS: "[]"
+      FREQTRADE__DRY_RUN: ${FREQTRADE_HYPERLIQUID_DRY_RUN:-true}
+      FREQTRADE__FORCE_ENTRY_ENABLE: ${FREQTRADE_HYPERLIQUID_FORCE_ENTRY_ENABLE:-false}
+      FREQTRADE__INITIAL_STATE: ${FREQTRADE_HYPERLIQUID_INITIAL_STATE:-stopped}
+      FREQTRADE__EXCHANGE__WALLET_ADDRESS: ${FREQTRADE_HYPERLIQUID_WALLET_ADDRESS:-}
+      FREQTRADE__EXCHANGE__PRIVATE_KEY: ${FREQTRADE_HYPERLIQUID_PRIVATE_KEY:-}
     ports:
       - "127.0.0.1:8084:8080"
     volumes:
@@ -267,9 +407,40 @@ services:
       - ./freqtrade/strategies:/freqtrade/strategies:ro
       - freqtrade-hyperliquid-live-smoke-data:/freqtrade/user_data
 
+  freqtrade-bybit-testnet:
+    image: freqtradeorg/freqtrade:2026.7
+    profiles: ["testnet-workers"]
+    command:
+      - trade
+      - --config
+      - /freqtrade/config.json
+      - --strategy
+      - ControlPlaneOnlyStrategy
+      - --strategy-path
+      - /freqtrade/strategies
+    environment:
+      FREQTRADE__API_SERVER__USERNAME: ${FREQTRADE_BYBIT_TESTNET_API_USERNAME:-trading-control}
+      FREQTRADE__API_SERVER__PASSWORD: ${FREQTRADE_BYBIT_TESTNET_API_PASSWORD:-local-testnet-only}
+      FREQTRADE__API_SERVER__JWT_SECRET_KEY: ${FREQTRADE_BYBIT_TESTNET_JWT_SECRET:-local-testnet-jwt-override-required}
+      FREQTRADE__API_SERVER__WS_TOKEN: ${FREQTRADE_BYBIT_TESTNET_WS_TOKEN:-local-testnet-rpc-token}
+      FREQTRADE__TELEGRAM__ENABLED: "false"
+      FREQTRADE__TELEGRAM__AUTHORIZED_USERS: "[]"
+      FREQTRADE__DRY_RUN: "false"
+      FREQTRADE__FORCE_ENTRY_ENABLE: ${FREQTRADE_BYBIT_TESTNET_FORCE_ENTRY_ENABLE:-false}
+      FREQTRADE__INITIAL_STATE: ${FREQTRADE_BYBIT_TESTNET_INITIAL_STATE:-stopped}
+      FREQTRADE__EXCHANGE__KEY: ${FREQTRADE_BYBIT_TESTNET_EXCHANGE_KEY:-}
+      FREQTRADE__EXCHANGE__SECRET: ${FREQTRADE_BYBIT_TESTNET_EXCHANGE_SECRET:-}
+    ports:
+      - "127.0.0.1:8085:8080"
+    volumes:
+      - ./freqtrade/config-bybit-testnet.json:/freqtrade/config.json:ro
+      - ./freqtrade/strategies:/freqtrade/strategies:ro
+      - freqtrade-bybit-testnet-data:/freqtrade/user_data
+
 volumes:
   trading-postgres-local:
   freqtrade-binance-data:
   freqtrade-hyperliquid-data:
   freqtrade-binance-live-smoke-data:
   freqtrade-hyperliquid-live-smoke-data:
+  freqtrade-bybit-testnet-data:

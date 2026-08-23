@@ -1,4 +1,4 @@
-const CACHE = 'trading-shell-v220';
+const CACHE = 'trading-shell-v240';
 const SHELL = [
   '/assets/styles-base.css',
   '/assets/styles-components.css',
@@ -18,6 +18,7 @@ const SHELL = [
   '/assets/capital.js',
   '/assets/reporting.js',
   '/assets/accounts.js',
+  '/assets/positions.js',
   '/assets/router.js',
   '/assets/app.js',
   '/assets/fonts/IBMPlexSansSC-Regular.woff2',

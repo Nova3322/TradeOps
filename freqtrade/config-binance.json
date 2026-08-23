@@ -11,23 +11,41 @@
   "timeframe": "5m",
   "initial_state": "running",
   "process_only_new_candles": true,
-  "position_adjustment_enable": false,
-  "force_entry_enable": false,
+  "position_adjustment_enable": true,
+  "force_entry_enable": true,
   "cancel_open_orders_on_exit": true,
   "exchange": {
     "name": "binance",
     "key": "",
     "secret": "",
-    "pair_whitelist": [".*/USDT:USDT"],
-    "pair_blacklist": []
+    "pair_whitelist": [
+      ".+/USDT:USDT"
+    ],
+    "pair_blacklist": [],
+    "ccxt_config": {
+      "enableRateLimit": true
+    },
+    "ccxt_async_config": {
+      "enableRateLimit": true
+    }
   },
-  "pairlists": [{"method": "StaticPairList"}],
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    },
+    {
+      "method": "PrecisionFilter"
+    }
+  ],
   "entry_pricing": {
     "price_side": "same",
     "use_order_book": true,
     "order_book_top": 1,
     "price_last_balance": 0,
-    "check_depth_of_market": {"enabled": false, "bids_to_ask_delta": 1}
+    "check_depth_of_market": {
+      "enabled": false,
+      "bids_to_ask_delta": 1
+    }
   },
   "exit_pricing": {
     "price_side": "same",
@@ -43,7 +61,34 @@
     "stoploss": "market",
     "stoploss_on_exchange": false
   },
-  "unfilledtimeout": {"entry": 10, "exit": 10, "unit": "minutes"},
+  "unfilledtimeout": {
+    "entry": 10,
+    "exit": 10,
+    "unit": "minutes"
+  },
+  "telegram": {
+    "enabled": false,
+    "token": "",
+    "chat_id": "",
+    "authorized_users": [],
+    "allow_custom_messages": true,
+    "notification_settings": {
+      "status": "on",
+      "warning": "on",
+      "startup": "on",
+      "entry": "on",
+      "entry_fill": "on",
+      "entry_cancel": "on",
+      "exit": "on",
+      "exit_fill": "on",
+      "exit_cancel": "on",
+      "protection_trigger": "on",
+      "protection_trigger_global": "on",
+      "strategy_msg": "on",
+      "show_candle": "off"
+    },
+    "reload": false
+  },
   "api_server": {
     "enabled": true,
     "listen_ip_address": "0.0.0.0",
@@ -51,6 +96,7 @@
     "verbosity": "error",
     "enable_openapi": false,
     "jwt_secret_key": "local-dry-run-jwt-secret-change-me",
+    "ws_token": "overridden-by-environment",
     "CORS_origins": [],
     "username": "overridden-by-environment",
     "password": "overridden-by-environment"

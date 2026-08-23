@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-from trading_control_plane.service_component import ServiceComponent
+from datetime import datetime
+from decimal import Decimal
+from uuid import UUID, uuid4
 
-# The domain implementation intentionally consumes the explicit service_core export surface.
-# ruff: noqa: F403, F405
-from trading_control_plane.service_core import *
+from sqlalchemy import select, text
+
+from trading_control_plane import capital, domain, models, notilt, rejections
+from trading_control_plane import execution_scope as scope_rules
+from trading_control_plane.service_component import ServiceComponent
+from trading_control_plane.service_domains.execution_facts import record_account_equity_observation
 
 
 class NoTiltCapitalService(ServiceComponent):
@@ -12,14 +17,14 @@ class NoTiltCapitalService(ServiceComponent):
         self,
         *,
         actor_id: UUID,
-        snapshot: NoTiltVaultSnapshot,
-        valuations: dict[str, UsdValuation],
+        snapshot: notilt.NoTiltVaultSnapshot,
+        valuations: dict[str, notilt.UsdValuation],
         now: datetime,
     ) -> tuple[UUID, ...]:
         if not snapshot.budgets:
-            _reject("NOTILT_FACT_INVALID", "NoTilt snapshot must contain catalog assets")
+            rejections.reject("NOTILT_FACT_INVALID", "NoTilt snapshot must contain catalog assets")
         with self.database.session_factory.begin() as session:
-            team = self.transactions._require_role(session, actor_id, "capital.fact.record")
+            team = self.transactions.require_role(session, actor_id, "capital.fact.record")
             fact_ids: list[UUID] = []
             for budget in snapshot.budgets:
                 if (
@@ -28,15 +33,20 @@ class NoTiltCapitalService(ServiceComponent):
                     or budget.vault.lower() != snapshot.vault.lower()
                     or budget.agent.lower() != snapshot.agent.lower()
                 ):
-                    _reject(
+                    rejections.reject(
                         "NOTILT_VAULT_UNVERIFIED",
                         "NoTilt facts must belong to one official configured Vault",
                     )
-                if budget.block_timestamp > now + MAX_FACT_CLOCK_SKEW:
-                    _reject("FACT_TIME_INVALID", "NoTilt block time cannot be in the future")
+                if budget.block_timestamp > now + scope_rules.MAX_FACT_CLOCK_SKEW:
+                    rejections.reject(
+                        "FACT_TIME_INVALID", "NoTilt block time cannot be in the future"
+                    )
                 valuation = valuations.get(budget.asset)
-                if valuation is None or valuation.observed_at > now + MAX_FACT_CLOCK_SKEW:
-                    _reject(
+                if (
+                    valuation is None
+                    or valuation.observed_at > now + scope_rules.MAX_FACT_CLOCK_SKEW
+                ):
+                    rejections.reject(
                         "NOTILT_VALUATION_UNKNOWN",
                         "every NoTilt asset requires a current USD valuation",
                     )
@@ -49,22 +59,22 @@ class NoTiltCapitalService(ServiceComponent):
                     min(budget.balance, budget.max_release_net) if controlled else Decimal(0)
                 )
                 fact = session.scalar(
-                    select(AccountEquity)
+                    select(models.AccountEquity)
                     .where(
-                        AccountEquity.team_id == team.team_id,
-                        AccountEquity.environment == ExecutionEnvironment.LIVE.value,
-                        AccountEquity.account_id == snapshot.vault,
-                        AccountEquity.venue == "VAULT",
-                        AccountEquity.currency == budget.asset,
+                        models.AccountEquity.team_id == team.team_id,
+                        models.AccountEquity.environment == domain.ExecutionEnvironment.LIVE.value,
+                        models.AccountEquity.account_id == snapshot.vault,
+                        models.AccountEquity.venue == "VAULT",
+                        models.AccountEquity.currency == budget.asset,
                     )
                     .with_for_update()
                 )
                 if fact is None:
-                    fact = AccountEquity(
+                    fact = models.AccountEquity(
                         team_id=team.team_id,
                         account_id=snapshot.vault,
                         venue="VAULT",
-                        environment=ExecutionEnvironment.LIVE.value,
+                        environment=domain.ExecutionEnvironment.LIVE.value,
                         equity=budget.balance,
                         available_balance=budget.balance,
                         withdrawable_balance=withdrawable,
@@ -78,7 +88,7 @@ class NoTiltCapitalService(ServiceComponent):
                         valuation_price=valuation.price,
                         valuation_equity=valuation.value,
                         valuation_observed_at=valuation.observed_at,
-                        fact_status=FactStatus.KNOWN.value,
+                        fact_status=domain.FactStatus.KNOWN.value,
                         observed_at=budget.block_timestamp,
                         updated_at=now,
                     )
@@ -97,11 +107,11 @@ class NoTiltCapitalService(ServiceComponent):
                     fact.valuation_price = valuation.price
                     fact.valuation_equity = valuation.value
                     fact.valuation_observed_at = valuation.observed_at
-                    fact.fact_status = FactStatus.KNOWN.value
+                    fact.fact_status = domain.FactStatus.KNOWN.value
                     fact.observed_at = budget.block_timestamp
                     fact.updated_at = now
-                self._record_account_equity_observation(session, fact, recorded_at=now)
-                self.transactions._audit(
+                record_account_equity_observation(session, fact, recorded_at=now)
+                self.transactions.audit(
                     session,
                     actor_id=str(actor_id),
                     event_type="NOTILT_VAULT_FACT_RECORDED",
@@ -130,40 +140,45 @@ class NoTiltCapitalService(ServiceComponent):
         observed_at: datetime,
         now: datetime,
     ) -> UUID:
-        """Persist one read-only Safe balance as the selected on-chain treasury fact."""
+        """Persist one Safe balance and its on-chain spending-limit control state."""
         if balance < 0 or available_limit < 0:
-            _reject("SAFE_FACT_INVALID", "Safe balance and spending limit cannot be negative")
-        if observed_at > now + MAX_FACT_CLOCK_SKEW:
-            _reject("FACT_TIME_INVALID", "Safe block time cannot be in the future")
+            rejections.reject(
+                "SAFE_FACT_INVALID", "Safe balance and spending limit cannot be negative"
+            )
+        if observed_at > now + scope_rules.MAX_FACT_CLOCK_SKEW:
+            rejections.reject("FACT_TIME_INVALID", "Safe block time cannot be in the future")
         normalized_asset = asset.upper()
-        if normalized_asset not in USD_STABLE_ASSETS:
-            _reject("SAFE_ASSET_UNSUPPORTED", "Safe treasury snapshot requires a USD asset")
+        if normalized_asset not in notilt.USD_STABLE_ASSETS:
+            rejections.reject(
+                "SAFE_ASSET_UNSUPPORTED", "Safe treasury snapshot requires a USD asset"
+            )
         with self.database.session_factory.begin() as session:
-            team = self.transactions._require_role(session, actor_id, "capital.fact.record")
+            team = self.transactions.require_role(session, actor_id, "capital.fact.record")
             fact = session.scalar(
-                select(AccountEquity)
+                select(models.AccountEquity)
                 .where(
-                    AccountEquity.team_id == team.team_id,
-                    AccountEquity.environment == ExecutionEnvironment.LIVE.value,
-                    AccountEquity.account_id == safe_address,
-                    AccountEquity.venue == "VAULT",
-                    AccountEquity.currency == normalized_asset,
+                    models.AccountEquity.team_id == team.team_id,
+                    models.AccountEquity.environment == domain.ExecutionEnvironment.LIVE.value,
+                    models.AccountEquity.account_id == safe_address,
+                    models.AccountEquity.venue == "VAULT",
+                    models.AccountEquity.currency == normalized_asset,
                 )
                 .with_for_update()
             )
             withdrawable = min(balance, available_limit) if module_enabled else Decimal(0)
+            control_status = "CONTROLLED" if module_enabled else "READ_ONLY"
             if fact is None:
-                fact = AccountEquity(
+                fact = models.AccountEquity(
                     team_id=team.team_id,
                     account_id=safe_address,
                     venue="VAULT",
-                    environment=ExecutionEnvironment.LIVE.value,
+                    environment=domain.ExecutionEnvironment.LIVE.value,
                     equity=balance,
                     available_balance=balance,
                     withdrawable_balance=withdrawable,
                     currency=normalized_asset,
                     location_type="VAULT",
-                    control_status="READ_ONLY",
+                    control_status=control_status,
                     deposit_status="READY",
                     network="ARBITRUM",
                     address_reference=safe_address,
@@ -171,7 +186,7 @@ class NoTiltCapitalService(ServiceComponent):
                     valuation_price=Decimal(1),
                     valuation_equity=balance,
                     valuation_observed_at=observed_at,
-                    fact_status=FactStatus.KNOWN.value,
+                    fact_status=domain.FactStatus.KNOWN.value,
                     observed_at=observed_at,
                     updated_at=now,
                 )
@@ -182,7 +197,7 @@ class NoTiltCapitalService(ServiceComponent):
                 fact.available_balance = balance
                 fact.withdrawable_balance = withdrawable
                 fact.location_type = "VAULT"
-                fact.control_status = "READ_ONLY"
+                fact.control_status = control_status
                 fact.deposit_status = "READY"
                 fact.network = "ARBITRUM"
                 fact.address_reference = safe_address
@@ -190,27 +205,28 @@ class NoTiltCapitalService(ServiceComponent):
                 fact.valuation_price = Decimal(1)
                 fact.valuation_equity = balance
                 fact.valuation_observed_at = observed_at
-                fact.fact_status = FactStatus.KNOWN.value
+                fact.fact_status = domain.FactStatus.KNOWN.value
                 fact.observed_at = observed_at
                 fact.updated_at = now
             observation_exists = session.scalar(
-                select(AccountEquityObservation.observation_id).where(
-                    AccountEquityObservation.team_id == team.team_id,
-                    AccountEquityObservation.account_equity_id == fact.account_equity_id,
-                    AccountEquityObservation.observed_at == observed_at,
+                select(models.AccountEquityObservation.observation_id).where(
+                    models.AccountEquityObservation.team_id == team.team_id,
+                    models.AccountEquityObservation.account_equity_id == fact.account_equity_id,
+                    models.AccountEquityObservation.observed_at == observed_at,
                 )
             )
-            self._record_account_equity_observation(session, fact, recorded_at=now)
+            record_account_equity_observation(session, fact, recorded_at=now)
             if observation_exists is None:
-                self.transactions._audit(
+                self.transactions.audit(
                     session,
                     actor_id=str(actor_id),
                     event_type="CAPITAL_SAFE_BALANCE_RECORDED",
                     object_type="AccountEquity",
                     object_id=fact.account_equity_id,
                     reason=(
-                        "read-only Safe Spending Limits treasury snapshot; "
+                        "Safe Spending Limits treasury snapshot; "
                         f"module_enabled={str(module_enabled).lower()}; "
+                        f"control_status={control_status}; "
                         "signing=false; broadcast=false"
                     ),
                     correlation_id=uuid4(),
@@ -221,15 +237,19 @@ class NoTiltCapitalService(ServiceComponent):
 
     def notilt_transfer_command(
         self, capital_transfer_id: UUID, actor_id: UUID
-    ) -> CapitalTransferCommand:
+    ) -> capital.CapitalTransferCommand:
         with self.database.session_factory() as session:
-            transfer = session.get(CapitalTransfer, capital_transfer_id)
+            transfer = session.get(models.CapitalTransfer, capital_transfer_id)
             if transfer is None:
-                _reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
-            authorization = session.get(TransferAuthorization, transfer.transfer_authorization_id)
+                rejections.reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
+            authorization = session.get(
+                models.TransferAuthorization, transfer.transfer_authorization_id
+            )
             if authorization is None:
-                _reject("TRANSFER_AUTHORIZATION_NOT_FOUND", "transfer authorization is missing")
-            self.transactions._require_role(
+                rejections.reject(
+                    "TRANSFER_AUTHORIZATION_NOT_FOUND", "transfer authorization is missing"
+                )
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "capital.execute",
@@ -239,13 +259,15 @@ class NoTiltCapitalService(ServiceComponent):
             )
             if (
                 transfer.transport != "NOTILT"
-                or transfer.environment != ExecutionEnvironment.LIVE.value
+                or transfer.environment != domain.ExecutionEnvironment.LIVE.value
             ):
-                _reject("NOTILT_TRANSFER_STATE_INVALID", "capital transfer is not a NoTilt flow")
-            return CapitalTransferCommand(
+                rejections.reject(
+                    "NOTILT_TRANSFER_STATE_INVALID", "capital transfer is not a NoTilt flow"
+                )
+            return capital.CapitalTransferCommand(
                 capital_transfer_id=transfer.capital_transfer_id,
-                environment=ExecutionEnvironment(transfer.environment),
-                direction=CapitalDirection(transfer.direction),
+                environment=domain.ExecutionEnvironment(transfer.environment),
+                direction=domain.CapitalDirection(transfer.direction),
                 source_id=transfer.source_id,
                 destination_id=transfer.destination_id,
                 asset=transfer.asset,
@@ -263,7 +285,7 @@ class NoTiltCapitalService(ServiceComponent):
         *,
         chain_id: int,
         transport_state: str,
-        transactions: tuple[NoTiltUnsignedTransaction, ...],
+        transactions: tuple[notilt.NoTiltUnsignedTransaction, ...],
         now: datetime,
     ) -> None:
         expected_functions = {
@@ -274,7 +296,7 @@ class NoTiltCapitalService(ServiceComponent):
         }
         allowed_functions = expected_functions.get(transport_state)
         if allowed_functions is None or not transactions:
-            _reject("NOTILT_PLAN_INVALID", "NoTilt transaction plan is invalid")
+            rejections.reject("NOTILT_PLAN_INVALID", "NoTilt transaction plan is invalid")
         function_names = {item.function_name for item in transactions}
         if (
             not function_names.issubset(allowed_functions)
@@ -287,13 +309,17 @@ class NoTiltCapitalService(ServiceComponent):
             }
             or any(item.chain_id != chain_id for item in transactions)
         ):
-            _reject("NOTILT_PLAN_INVALID", "NoTilt plan contains an unexpected transaction")
+            rejections.reject(
+                "NOTILT_PLAN_INVALID", "NoTilt plan contains an unexpected transaction"
+            )
         planned = [item.to_dict() for item in transactions]
         with self.database.session_factory.begin() as session:
-            transfer = session.get(CapitalTransfer, capital_transfer_id, with_for_update=True)
+            transfer = session.get(
+                models.CapitalTransfer, capital_transfer_id, with_for_update=True
+            )
             if transfer is None:
-                _reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
-            self.transactions._require_role(
+                rejections.reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
+            self.transactions.require_role(
                 session,
                 actor_id,
                 "capital.execute",
@@ -301,18 +327,20 @@ class NoTiltCapitalService(ServiceComponent):
                 transfer.venue,
                 team_id=transfer.team_id,
             )
-            if transfer.environment != ExecutionEnvironment.LIVE.value:
-                _reject(
+            if transfer.environment != domain.ExecutionEnvironment.LIVE.value:
+                rejections.reject(
                     "NOTILT_TRANSFER_ENVIRONMENT_INVALID",
                     "NoTilt plans require a LIVE capital transfer",
                 )
             expected_direction = (
-                CapitalDirection.VENUE_TO_VAULT.value
+                domain.CapitalDirection.VENUE_TO_VAULT.value
                 if transport_state == "DEPOSIT_PLAN_READY"
-                else CapitalDirection.VAULT_TO_VENUE.value
+                else domain.CapitalDirection.VAULT_TO_VENUE.value
             )
             if transfer.direction != expected_direction:
-                _reject("NOTILT_PLAN_DIRECTION_INVALID", "NoTilt plan direction does not match")
+                rejections.reject(
+                    "NOTILT_PLAN_DIRECTION_INVALID", "NoTilt plan direction does not match"
+                )
             allowed_previous_by_state: dict[str, set[str | None]] = {
                 "DEPOSIT_PLAN_READY": {None, "DEPOSIT_PLAN_READY"},
                 "RELEASE_REQUEST_PLAN_READY": {None, "RELEASE_REQUEST_PLAN_READY"},
@@ -327,24 +355,30 @@ class NoTiltCapitalService(ServiceComponent):
             }
             allowed_previous = allowed_previous_by_state[transport_state]
             if transfer.transport_state not in allowed_previous:
-                _reject("NOTILT_PLAN_STATE_INVALID", "NoTilt plan is not valid in this state")
+                rejections.reject(
+                    "NOTILT_PLAN_STATE_INVALID", "NoTilt plan is not valid in this state"
+                )
             if (
                 transport_state
                 in {
                     "DEPOSIT_PLAN_READY",
                     "RELEASE_REQUEST_PLAN_READY",
                 }
-                and transfer.status != CapitalTransferStatus.SOURCE_RESERVED.value
+                and transfer.status != domain.CapitalTransferStatus.SOURCE_RESERVED.value
             ):
-                _reject("NOTILT_PLAN_STATE_INVALID", "initial NoTilt plan is no longer available")
+                rejections.reject(
+                    "NOTILT_PLAN_STATE_INVALID", "initial NoTilt plan is no longer available"
+                )
             if transport_state in {
                 "RELEASE_EXECUTION_PLAN_READY",
                 "RELEASE_CANCELLATION_PLAN_READY",
             } and transfer.status not in {
-                CapitalTransferStatus.IN_FLIGHT.value,
-                CapitalTransferStatus.MANUAL_REQUIRED.value,
+                domain.CapitalTransferStatus.IN_FLIGHT.value,
+                domain.CapitalTransferStatus.MANUAL_REQUIRED.value,
             }:
-                _reject("NOTILT_PLAN_STATE_INVALID", "release request is not awaiting resolution")
+                rejections.reject(
+                    "NOTILT_PLAN_STATE_INVALID", "release request is not awaiting resolution"
+                )
             if transfer.transport_state == transport_state:
                 if (
                     transfer.transport == "NOTILT"
@@ -352,14 +386,16 @@ class NoTiltCapitalService(ServiceComponent):
                     and transfer.planned_transactions == planned
                 ):
                     return
-                _reject("NOTILT_PLAN_IDENTITY_CONFLICT", "NoTilt plan changed for the same stage")
+                rejections.reject(
+                    "NOTILT_PLAN_IDENTITY_CONFLICT", "NoTilt plan changed for the same stage"
+                )
             transfer.transport = "NOTILT"
             transfer.chain_id = chain_id
             transfer.transport_state = transport_state
             transfer.planned_transactions = planned
             transfer.updated_at = now
             transfer.version += 1
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="NOTILT_UNSIGNED_PLAN_RECORDED",
@@ -375,37 +411,45 @@ class NoTiltCapitalService(ServiceComponent):
         self,
         capital_transfer_id: UUID,
         actor_id: UUID,
-        receipt: NoTiltReceipt,
+        receipt: notilt.NoTiltReceipt,
         *,
         now: datetime,
     ) -> str:
         with self.database.session_factory.begin() as session:
-            transfer = session.get(CapitalTransfer, capital_transfer_id, with_for_update=True)
+            transfer = session.get(
+                models.CapitalTransfer, capital_transfer_id, with_for_update=True
+            )
             if transfer is None:
-                _reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
-            self.transactions._require_role(
+                rejections.reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
+            self.transactions.require_role(
                 session, actor_id, "capital.reconcile", transfer.account_id, transfer.venue
             )
-            authorization = session.get(TransferAuthorization, transfer.transfer_authorization_id)
+            authorization = session.get(
+                models.TransferAuthorization, transfer.transfer_authorization_id
+            )
             if authorization is None:
-                _reject("TRANSFER_AUTHORIZATION_NOT_FOUND", "transfer authorization is missing")
+                rejections.reject(
+                    "TRANSFER_AUTHORIZATION_NOT_FOUND", "transfer authorization is missing"
+                )
             if (
                 transfer.transport != "NOTILT"
                 or transfer.chain_id != receipt.chain_id
-                or transfer.environment != ExecutionEnvironment.LIVE.value
+                or transfer.environment != domain.ExecutionEnvironment.LIVE.value
             ):
-                _reject("NOTILT_RECEIPT_SCOPE_MISMATCH", "receipt is outside the NoTilt transfer")
+                rejections.reject(
+                    "NOTILT_RECEIPT_SCOPE_MISMATCH", "receipt is outside the NoTilt transfer"
+                )
             vault = (
                 transfer.source_id
-                if transfer.direction == CapitalDirection.VAULT_TO_VENUE.value
+                if transfer.direction == domain.CapitalDirection.VAULT_TO_VENUE.value
                 else transfer.destination_id
             )
             if receipt.vault.lower() != vault.lower():
-                _reject("NOTILT_RECEIPT_SCOPE_MISMATCH", "receipt Vault does not match")
+                rejections.reject("NOTILT_RECEIPT_SCOPE_MISMATCH", "receipt Vault does not match")
             session.execute(
                 text("SELECT pg_advisory_xact_lock(:key)"),
                 {
-                    "key": _advisory_lock_key(
+                    "key": scope_rules.advisory_lock_key(
                         str(receipt.chain_id),
                         "notilt-receipt",
                         receipt.transaction_hash,
@@ -413,18 +457,18 @@ class NoTiltCapitalService(ServiceComponent):
                 },
             )
             replay = session.scalar(
-                select(CapitalTransfer.capital_transfer_id)
+                select(models.CapitalTransfer.capital_transfer_id)
                 .where(
-                    CapitalTransfer.capital_transfer_id != capital_transfer_id,
-                    CapitalTransfer.chain_id == receipt.chain_id,
-                    CapitalTransfer.confirmed_transaction_hashes.contains(
+                    models.CapitalTransfer.capital_transfer_id != capital_transfer_id,
+                    models.CapitalTransfer.chain_id == receipt.chain_id,
+                    models.CapitalTransfer.confirmed_transaction_hashes.contains(
                         [receipt.transaction_hash]
                     ),
                 )
                 .limit(1)
             )
             if replay is not None:
-                _reject(
+                rejections.reject(
                     "NOTILT_RECEIPT_REPLAY",
                     "NoTilt transaction receipt is already bound to another transfer",
                 )
@@ -438,35 +482,39 @@ class NoTiltCapitalService(ServiceComponent):
                 "RELEASE_CANCELLATION": "RELEASE_CANCELLATION_PLAN_READY",
             }[receipt.receipt_kind]
             if transfer.transport_state != expected_state:
-                _reject("NOTILT_RECEIPT_STATE_INVALID", "receipt is unexpected for this transfer")
-            if receipt.block_timestamp > now + MAX_FACT_CLOCK_SKEW:
-                _reject("FACT_TIME_INVALID", "NoTilt receipt time cannot be in the future")
+                rejections.reject(
+                    "NOTILT_RECEIPT_STATE_INVALID", "receipt is unexpected for this transfer"
+                )
+            if receipt.block_timestamp > now + scope_rules.MAX_FACT_CLOCK_SKEW:
+                rejections.reject(
+                    "FACT_TIME_INVALID", "NoTilt receipt time cannot be in the future"
+                )
 
             if receipt.receipt_kind == "DEPOSIT":
                 if (
-                    transfer.direction != CapitalDirection.VENUE_TO_VAULT.value
+                    transfer.direction != domain.CapitalDirection.VENUE_TO_VAULT.value
                     or receipt.asset != transfer.asset
                     or receipt.requested_amount != authorization.min_received
                     or receipt.credited_amount != authorization.min_received
                 ):
-                    _reject(
+                    rejections.reject(
                         "NOTILT_RECEIPT_AMOUNT_INVALID",
                         "NoTilt deposit receipt is outside the authorization",
                     )
                 fee = transfer.gross_amount - receipt.credited_amount
                 if fee < 0 or fee > authorization.max_fee:
-                    _reject(
+                    rejections.reject(
                         "CAPITAL_DESTINATION_AMOUNT_INVALID",
                         "NoTilt credited amount exceeds the authorized fee budget",
                     )
                 transfer.fee_amount = fee
                 transfer.net_received = receipt.credited_amount
-                transfer.status = CapitalTransferStatus.DESTINATION_CONFIRMED.value
+                transfer.status = domain.CapitalTransferStatus.DESTINATION_CONFIRMED.value
                 transfer.transport_state = "DEPOSIT_CONFIRMED"
                 transfer.external_transfer_id = receipt.transaction_hash
             elif receipt.receipt_kind == "RELEASE_REQUEST":
                 if (
-                    transfer.direction != CapitalDirection.VAULT_TO_VENUE.value
+                    transfer.direction != domain.CapitalDirection.VAULT_TO_VENUE.value
                     or receipt.asset != transfer.asset
                     or receipt.request_id is None
                     or receipt.net_amount != authorization.min_received
@@ -475,7 +523,7 @@ class NoTiltCapitalService(ServiceComponent):
                     or receipt.expires_at is None
                     or receipt.execute_after >= receipt.expires_at
                 ):
-                    _reject(
+                    rejections.reject(
                         "NOTILT_RECEIPT_AMOUNT_INVALID",
                         "NoTilt release request is outside the authorization",
                     )
@@ -486,16 +534,16 @@ class NoTiltCapitalService(ServiceComponent):
                 transfer.external_transfer_id = receipt.request_id
                 transfer.transport_state = "RELEASE_REQUEST_CONFIRMED"
                 transfer.status = (
-                    CapitalTransferStatus.MANUAL_REQUIRED.value
+                    domain.CapitalTransferStatus.MANUAL_REQUIRED.value
                     if (
                         receipt.fee > authorization.max_fee
                         or receipt.net_amount + receipt.fee > transfer.gross_amount
                     )
-                    else CapitalTransferStatus.IN_FLIGHT.value
+                    else domain.CapitalTransferStatus.IN_FLIGHT.value
                 )
             elif receipt.receipt_kind == "RELEASE_EXECUTION":
                 if (
-                    transfer.direction != CapitalDirection.VAULT_TO_VENUE.value
+                    transfer.direction != domain.CapitalDirection.VAULT_TO_VENUE.value
                     or receipt.request_id != transfer.protocol_request_id
                     or transfer.protocol_execute_after is None
                     or transfer.protocol_expires_at is None
@@ -504,20 +552,20 @@ class NoTiltCapitalService(ServiceComponent):
                     or transfer.fee_amount is None
                     or transfer.fee_amount > authorization.max_fee
                 ):
-                    _reject(
+                    rejections.reject(
                         "NOTILT_RECEIPT_REQUEST_INVALID",
                         "NoTilt release execution is outside the authorized request",
                     )
                 transfer.transport_state = "RELEASE_EXECUTION_CONFIRMED"
-                transfer.status = CapitalTransferStatus.IN_FLIGHT.value
+                transfer.status = domain.CapitalTransferStatus.IN_FLIGHT.value
             else:
                 if receipt.request_id != transfer.protocol_request_id:
-                    _reject(
+                    rejections.reject(
                         "NOTILT_RECEIPT_REQUEST_INVALID",
                         "NoTilt cancellation request identity does not match",
                     )
                 transfer.transport_state = "RELEASE_CANCELLED"
-                transfer.status = CapitalTransferStatus.FAILED_SOURCE_RESTORED.value
+                transfer.status = domain.CapitalTransferStatus.FAILED_SOURCE_RESTORED.value
 
             confirmed.append(receipt.transaction_hash)
             transfer.confirmed_transaction_hashes = confirmed
@@ -525,7 +573,7 @@ class NoTiltCapitalService(ServiceComponent):
             transfer.observed_at = receipt.block_timestamp
             transfer.updated_at = now
             transfer.version += 1
-            self.transactions._audit(
+            self.transactions.audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="NOTILT_RECEIPT_VERIFIED",

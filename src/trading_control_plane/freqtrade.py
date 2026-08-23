@@ -1,104 +1,64 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import http.client
 import json
-import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from trading_control_plane.domain import DomainRejected
+from trading_control_plane.freqtrade_contracts import (
+    FREQTRADE_TRANSACTION_RPC_TYPES as FREQTRADE_TRANSACTION_RPC_TYPES,
+)
+from trading_control_plane.freqtrade_contracts import (
+    FreqtradeEntryCommand as FreqtradeEntryCommand,
+)
+from trading_control_plane.freqtrade_contracts import (
+    FreqtradeExitCommand as FreqtradeExitCommand,
+)
+from trading_control_plane.freqtrade_contracts import (
+    FreqtradeOrder as FreqtradeOrder,
+)
+from trading_control_plane.freqtrade_contracts import (
+    FreqtradeRpcMessage as FreqtradeRpcMessage,
+)
+from trading_control_plane.freqtrade_contracts import (
+    FreqtradeTrade as FreqtradeTrade,
+)
+from trading_control_plane.freqtrade_contracts import (
+    freqtrade_active_stop_order as freqtrade_active_stop_order,
+)
+from trading_control_plane.freqtrade_contracts import (
+    freqtrade_execution_order as freqtrade_execution_order,
+)
+from trading_control_plane.freqtrade_contracts import (
+    freqtrade_pair as freqtrade_pair,
+)
+from trading_control_plane.freqtrade_contracts import (
+    parse_freqtrade_rpc_message as parse_freqtrade_rpc_message,
+)
+from trading_control_plane.freqtrade_contracts import (
+    parse_freqtrade_trade as parse_freqtrade_trade,
+)
+from trading_control_plane.freqtrade_contracts import (
+    parse_hip3_dexes as parse_hip3_dexes,
+)
+from trading_control_plane.freqtrade_contracts import (
+    validate_worker_url as validate_worker_url,
+)
 
 JsonObject = dict[str, Any]
 JsonValue = JsonObject | list[Any]
 JsonFetcher = Callable[[str, str, JsonObject | None, dict[str, str], float], JsonValue]
-
-BINANCE_PERPETUAL_PATTERN = re.compile(r"^(?P<base>[^\s/:]{1,64})USDT$")
-OKX_PERPETUAL_PATTERN = re.compile(r"^(?P<base>[A-Z0-9]{1,64})-USDT-SWAP$")
-BYBIT_PERPETUAL_PATTERN = re.compile(r"^(?P<base>[A-Z0-9]{1,64})USDT$")
-HYPERLIQUID_CORE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-HYPERLIQUID_HIP3_PATTERN = re.compile(
-    r"^(?P<dex>[a-z0-9][a-z0-9_-]{0,31}):(?P<coin>[A-Za-z0-9][A-Za-z0-9._-]{0,63})$"
-)
-HIP3_DEX_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
-
-
-def parse_hip3_dexes(value: str) -> tuple[str, ...]:
-    """Parse an explicit, rate-limit-conscious HIP-3 allowlist."""
-
-    values = tuple(item.strip().lower() for item in value.split(",") if item.strip())
-    if len(values) != len(set(values)) or any(
-        not HIP3_DEX_PATTERN.fullmatch(item) for item in values
-    ):
-        raise ValueError("Freqtrade HIP-3 DEX names must be unique lowercase identifiers")
-    return values
-
-
-def freqtrade_pair(venue: str, symbol: str, *, hip3_dexes: tuple[str, ...] = ()) -> str:
-    """Map the exact Trading Catalog identity to Freqtrade/CCXT pair identity."""
-
-    if venue == "BINANCE":
-        match = BINANCE_PERPETUAL_PATTERN.fullmatch(symbol)
-        if match is None or symbol != symbol.upper():
-            raise DomainRejected(
-                "FREQTRADE_INSTRUMENT_UNSUPPORTED",
-                "Binance Freqtrade routing requires an exact USDⓈ-M USDT perpetual symbol",
-            )
-        return f"{match.group('base')}/USDT:USDT"
-    if venue == "OKX":
-        match = OKX_PERPETUAL_PATTERN.fullmatch(symbol)
-        if match is None:
-            raise DomainRejected(
-                "FREQTRADE_INSTRUMENT_UNSUPPORTED",
-                "OKX Freqtrade routing requires an exact USDT linear SWAP symbol",
-            )
-        return f"{match.group('base')}/USDT:USDT"
-    if venue == "BYBIT":
-        match = BYBIT_PERPETUAL_PATTERN.fullmatch(symbol)
-        if match is None:
-            raise DomainRejected(
-                "FREQTRADE_INSTRUMENT_UNSUPPORTED",
-                "Bybit Freqtrade routing requires an exact USDT linear perpetual symbol",
-            )
-        return f"{match.group('base')}/USDT:USDT"
-    if venue != "HYPERLIQUID":
-        raise DomainRejected(
-            "FREQTRADE_VENUE_UNSUPPORTED",
-            "Freqtrade execution is restricted to supported TradingOPS venues",
-        )
-    hip3 = HYPERLIQUID_HIP3_PATTERN.fullmatch(symbol)
-    if hip3 is not None:
-        dex = hip3.group("dex")
-        if dex not in hip3_dexes:
-            raise DomainRejected(
-                "FREQTRADE_HIP3_DEX_NOT_ALLOWED",
-                "the HIP-3 DEX is not in the configured Freqtrade worker allowlist",
-            )
-        return f"{dex.upper()}-{hip3.group('coin')}/USDC:USDC"
-    if not HYPERLIQUID_CORE_PATTERN.fullmatch(symbol):
-        raise DomainRejected(
-            "FREQTRADE_INSTRUMENT_UNSUPPORTED",
-            "Hyperliquid Freqtrade routing requires a Core or configured HIP-3 symbol",
-        )
-    return f"{symbol}/USDC:USDC"
-
-
-def validate_worker_url(value: str) -> str:
-    parsed = urllib.parse.urlparse(value)
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ValueError("Freqtrade worker URL must not embed credentials, query, or fragment")
-    if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost"}:
-        raise ValueError("non-loopback Freqtrade workers require HTTPS")
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or not parsed.port:
-        raise ValueError("Freqtrade worker URL must include an explicit HTTP(S) host and port")
-    return value.rstrip("/")
+WebSocketConnector = Callable[[str, float], Any]
 
 
 def _default_fetcher(
@@ -118,6 +78,12 @@ def _default_fetcher(
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             raw = response.read()
     except urllib.error.HTTPError as exc:
+        response_body = exc.read().decode(errors="replace").lower()
+        if "leverage" in response_body:
+            raise DomainRejected(
+                "FREQTRADE_LEVERAGE_UNSUPPORTED",
+                "Freqtrade or the bound exchange account rejected the frozen leverage",
+            ) from exc
         raise DomainRejected(
             "FREQTRADE_WORKER_REJECTED",
             f"Freqtrade worker rejected the request with HTTP {exc.code}",
@@ -147,6 +113,17 @@ def _default_fetcher(
     return value
 
 
+def _default_websocket_connector(url: str, timeout: float) -> Any:
+    from websockets.asyncio.client import connect
+
+    return connect(
+        url,
+        open_timeout=timeout,
+        close_timeout=timeout,
+        max_size=1_000_000,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class FreqtradeWorkerSpec:
     name: str
@@ -154,6 +131,7 @@ class FreqtradeWorkerSpec:
     base_url: str
     username: str | None
     password: str | None = field(repr=False)
+    ws_token: str | None = field(default=None, repr=False)
     hip3_dexes: tuple[str, ...] = ()
     exchange_account_id: str | None = None
     team_id: str | None = None
@@ -172,190 +150,6 @@ class FreqtradeWorkerSpec:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class FreqtradeEntryCommand:
-    pair: str
-    side: Literal["long", "short"]
-    stake_amount: Decimal
-    max_quantity: Decimal
-    leverage: Decimal
-    enter_tag: str
-    client_order_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class FreqtradeExitCommand:
-    pair: str
-    max_quantity: Decimal
-    client_order_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class FreqtradeTrade:
-    trade_id: str
-    pair: str
-    side: Literal["long", "short"]
-    amount: Decimal
-    stake_amount: Decimal
-    open_rate: Decimal
-    current_rate: Decimal
-    close_rate: Decimal | None
-    is_open: bool
-    enter_tag: str
-    leverage: Decimal
-    stop_loss_abs: Decimal | None
-    stoploss_order_id: str | None
-    entry_order_id: str | None
-    exit_order_id: str | None
-    observed_at: datetime
-
-
-def _decimal(raw: Any, field_name: str, *, positive: bool = False) -> Decimal:
-    try:
-        value = Decimal(str(raw))
-    except (InvalidOperation, TypeError, ValueError) as exc:
-        raise DomainRejected(
-            "FREQTRADE_WORKER_RESPONSE_INVALID",
-            f"Freqtrade field {field_name} is not numeric",
-        ) from exc
-    if positive and value <= 0:
-        raise DomainRejected(
-            "FREQTRADE_WORKER_RESPONSE_INVALID",
-            f"Freqtrade field {field_name} must be positive",
-        )
-    return value
-
-
-def _trade_timestamp(value: JsonObject) -> datetime:
-    raw = value.get("close_timestamp") or value.get("open_timestamp")
-    if raw is None:
-        return datetime.now(UTC)
-    try:
-        return datetime.fromtimestamp(int(raw) / 1000, UTC)
-    except (OSError, OverflowError, TypeError, ValueError) as exc:
-        raise DomainRejected(
-            "FREQTRADE_WORKER_RESPONSE_INVALID",
-            "Freqtrade trade timestamp is invalid",
-        ) from exc
-
-
-def _stoploss_order_id(value: JsonObject) -> str | None:
-    direct = value.get("stoploss_order_id")
-    if direct is not None:
-        return str(direct)
-    orders = value.get("orders")
-    if orders is None:
-        return None
-    if not isinstance(orders, list) or any(not isinstance(item, dict) for item in orders):
-        raise DomainRejected(
-            "FREQTRADE_WORKER_RESPONSE_INVALID",
-            "Freqtrade trade orders are invalid",
-        )
-    active = [
-        item
-        for item in orders
-        if item.get("ft_order_side") == "stoploss"
-        and (item.get("is_open") is True or item.get("status") == "open")
-    ]
-    if len(active) > 1:
-        raise DomainRejected(
-            "FREQTRADE_WORKER_RESPONSE_INVALID",
-            "Freqtrade trade exposes multiple active stop-loss orders",
-        )
-    if not active:
-        return None
-    order_id = active[0].get("order_id")
-    if order_id is None:
-        raise DomainRejected(
-            "FREQTRADE_WORKER_RESPONSE_INVALID",
-            "Freqtrade active stop-loss order identity is missing",
-        )
-    return str(order_id)
-
-
-def _execution_order_id(
-    value: JsonObject,
-    *,
-    is_short: bool,
-    phase: Literal["entry", "exit"],
-) -> str | None:
-    orders = value.get("orders")
-    if orders is None:
-        return None
-    if not isinstance(orders, list) or any(not isinstance(item, dict) for item in orders):
-        raise DomainRejected(
-            "FREQTRADE_WORKER_RESPONSE_INVALID",
-            "Freqtrade trade orders are invalid",
-        )
-    entry_side = "sell" if is_short else "buy"
-    expected_side = entry_side if phase == "entry" else ("buy" if is_short else "sell")
-    matches = [
-        str(item["order_id"])
-        for item in orders
-        if item.get("ft_order_side") == expected_side
-        and item.get("order_id") is not None
-        and (item.get("status") == "closed" or item.get("is_open") is False)
-    ]
-    if len(matches) > 1:
-        raise DomainRejected(
-            "FREQTRADE_WORKER_RESPONSE_INVALID",
-            f"Freqtrade trade exposes multiple {phase} execution orders",
-        )
-    return None if not matches else matches[0]
-
-
-def parse_freqtrade_trade(value: JsonObject) -> FreqtradeTrade:
-    trade_id = value.get("trade_id") or value.get("tradeid") or value.get("id")
-    pair = value.get("pair")
-    enter_tag = value.get("enter_tag") or value.get("buy_tag")
-    if trade_id is None or not isinstance(pair, str) or not isinstance(enter_tag, str):
-        raise DomainRejected(
-            "FREQTRADE_WORKER_RESPONSE_INVALID",
-            "Freqtrade trade identity is incomplete",
-        )
-    is_short = value.get("is_short")
-    if not isinstance(is_short, bool):
-        direction = value.get("trade_direction") or value.get("direction")
-        if direction not in {"long", "short"}:
-            raise DomainRejected(
-                "FREQTRADE_WORKER_RESPONSE_INVALID",
-                "Freqtrade trade direction is invalid",
-            )
-        is_short = direction == "short"
-    close_rate_raw = value.get("close_rate")
-    stop_loss_raw = value.get("stop_loss_abs")
-    return FreqtradeTrade(
-        trade_id=str(trade_id),
-        pair=pair,
-        side="short" if is_short else "long",
-        amount=_decimal(value.get("amount"), "amount", positive=True),
-        stake_amount=_decimal(value.get("stake_amount"), "stake_amount", positive=True),
-        open_rate=_decimal(value.get("open_rate"), "open_rate", positive=True),
-        current_rate=_decimal(
-            value.get("current_rate", value.get("open_rate")),
-            "current_rate",
-            positive=True,
-        ),
-        close_rate=(
-            None
-            if close_rate_raw in {None, 0, "0", "0.0"}
-            else _decimal(close_rate_raw, "close_rate", positive=True)
-        ),
-        is_open=bool(value.get("is_open")),
-        enter_tag=enter_tag,
-        leverage=_decimal(value.get("leverage", 1), "leverage", positive=True),
-        stop_loss_abs=(
-            None
-            if stop_loss_raw in {None, 0, "0", "0.0"}
-            else _decimal(stop_loss_raw, "stop_loss_abs", positive=True)
-        ),
-        stoploss_order_id=_stoploss_order_id(value),
-        entry_order_id=_execution_order_id(value, is_short=is_short, phase="entry"),
-        exit_order_id=_execution_order_id(value, is_short=is_short, phase="exit"),
-        observed_at=_trade_timestamp(value),
-    )
-
-
 class FreqtradeWorkerClient:
     """Bounded, authenticated control client for a venue-scoped Freqtrade worker."""
 
@@ -366,6 +160,7 @@ class FreqtradeWorkerClient:
         timeout_seconds: float = 5,
         confirmation_timeout_seconds: float = 90,
         fetcher: JsonFetcher = _default_fetcher,
+        websocket_connector: WebSocketConnector = _default_websocket_connector,
     ) -> None:
         if timeout_seconds <= 0 or confirmation_timeout_seconds < 10:
             raise ValueError("Freqtrade timeouts are outside their bounded range")
@@ -375,6 +170,7 @@ class FreqtradeWorkerClient:
             base_url=validate_worker_url(spec.base_url),
             username=spec.username,
             password=spec.password,
+            ws_token=spec.ws_token,
             hip3_dexes=spec.hip3_dexes,
             exchange_account_id=spec.exchange_account_id,
             team_id=spec.team_id,
@@ -383,6 +179,54 @@ class FreqtradeWorkerClient:
         self.timeout_seconds = timeout_seconds
         self.confirmation_timeout_seconds = confirmation_timeout_seconds
         self._fetcher = fetcher
+        self._websocket_connector = websocket_connector
+
+    def rpc_websocket_url(self) -> str:
+        if not self.spec.ws_token:
+            raise DomainRejected(
+                "FREQTRADE_RPC_AUTH_NOT_CONFIGURED",
+                "Freqtrade RPC WebSocket token is not configured",
+            )
+        parsed = urllib.parse.urlparse(self.spec.base_url)
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        query = urllib.parse.urlencode({"token": self.spec.ws_token})
+        return urllib.parse.urlunparse((scheme, parsed.netloc, "/api/v1/message/ws", "", query, ""))
+
+    async def rpc_messages(
+        self,
+        event_types: tuple[str, ...] = FREQTRADE_TRANSACTION_RPC_TYPES,
+    ) -> AsyncIterator[FreqtradeRpcMessage]:
+        """Yield official Freqtrade RPC messages; account facts still come from CCXT Pro."""
+
+        if (
+            not event_types
+            or len(event_types) != len(set(event_types))
+            or any(not item or len(item) > 120 for item in event_types)
+        ):
+            raise ValueError("Freqtrade RPC subscriptions must be non-empty unique event types")
+        url = self.rpc_websocket_url()
+        try:
+            async with self._websocket_connector(url, self.timeout_seconds) as websocket:
+                await websocket.send(
+                    json.dumps(
+                        {"type": "subscribe", "data": list(event_types)},
+                        separators=(",", ":"),
+                    )
+                )
+                async for raw in websocket:
+                    if not isinstance(raw, (str, bytes)):
+                        raise DomainRejected(
+                            "FREQTRADE_RPC_MESSAGE_INVALID",
+                            "Freqtrade RPC WebSocket returned an invalid frame",
+                        )
+                    yield parse_freqtrade_rpc_message(raw)
+        except DomainRejected:
+            raise
+        except Exception as exc:
+            raise DomainRejected(
+                "FREQTRADE_RPC_UNAVAILABLE",
+                "Freqtrade RPC WebSocket could not be consumed within its bounded connection",
+            ) from exc
 
     def _request(
         self,
@@ -444,7 +288,7 @@ class FreqtradeWorkerClient:
     def probe(
         self,
         *,
-        expected_mode: Literal["DRY_RUN", "LIVE"] = "DRY_RUN",
+        expected_mode: Literal["DRY_RUN", "TESTNET", "LIVE"] = "DRY_RUN",
         required_pair: str | None = None,
     ) -> JsonObject:
         """Verify worker identity, mode and exact tradable scope without sending an order."""
@@ -486,9 +330,21 @@ class FreqtradeWorkerClient:
                 (
                     "FREQTRADE_LIVE_MODE_REQUIRED"
                     if expected_mode == "LIVE"
-                    else "FREQTRADE_LIVE_MODE_FORBIDDEN"
+                    else (
+                        "FREQTRADE_EXTERNAL_TESTNET_REQUIRED"
+                        if expected_mode == "TESTNET"
+                        else "FREQTRADE_LIVE_MODE_FORBIDDEN"
+                    )
                 ),
                 "Freqtrade worker mode does not match the requested execution boundary",
+            )
+        if expected_mode == "TESTNET" and (
+            config.get("demo_trading") is not False
+            or config.get("bot_name") != f"tradeops-{self.spec.venue.lower()}-testnet"
+        ):
+            raise DomainRejected(
+                "FREQTRADE_TESTNET_IDENTITY_MISMATCH",
+                "Freqtrade TESTNET worker identity is not the pinned exchange sandbox",
             )
         whitelist = whitelist_response.get("whitelist")
         if not isinstance(whitelist, list) or any(not isinstance(pair, str) for pair in whitelist):
@@ -511,17 +367,21 @@ class FreqtradeWorkerClient:
                 "FREQTRADE_INSTRUMENT_NOT_ALLOWED",
                 "the exact Freqtrade pair is not in the worker whitelist",
             )
-        if expected_mode == "LIVE":
-            if config.get("force_entry_enable") is not True:
-                raise DomainRejected(
-                    "FREQTRADE_FORCE_ENTRY_DISABLED",
-                    "Freqtrade LIVE worker does not permit controlled force entry",
-                )
-            if str(config.get("state", "")).lower() != "running":
-                raise DomainRejected(
-                    "FREQTRADE_WORKER_NOT_RUNNING",
-                    "Freqtrade LIVE worker is not running",
-                )
+        if config.get("force_entry_enable") is not True:
+            raise DomainRejected(
+                "FREQTRADE_FORCE_ENTRY_DISABLED",
+                "Freqtrade worker does not permit controlled force entry",
+            )
+        if config.get("position_adjustment_enable") is not True:
+            raise DomainRejected(
+                "FREQTRADE_POSITION_ADJUSTMENT_DISABLED",
+                "Freqtrade worker cannot execute approved Add or partial-reduction intents",
+            )
+        if str(config.get("state", "")).lower() != "running":
+            raise DomainRejected(
+                "FREQTRADE_WORKER_NOT_RUNNING",
+                "Freqtrade worker is not running",
+            )
         result: JsonObject = {
             "name": self.spec.name,
             "venue": self.spec.venue,
@@ -530,13 +390,43 @@ class FreqtradeWorkerClient:
             "exchange": exchange,
             "trading_mode": "futures",
             "dry_run": expected_dry_run,
+            "demo_trading": config.get("demo_trading"),
             "worker_state": config.get("state"),
             "version": version.get("version"),
+            "bot_name": config.get("bot_name"),
+            "whitelist": sorted(whitelist),
             "hip3_dexes": list(self.spec.hip3_dexes),
             "active_pair_count": len(whitelist),
             "hip3_pair_count": len(hip3_pairs),
-            "order_send": expected_mode == "LIVE",
+            "worker_command_available": True,
+            "force_entry_enabled": True,
+            "position_adjustment_enabled": True,
+            "external_order_send": expected_mode in {"TESTNET", "LIVE"},
+            "network": expected_mode,
         }
+        fingerprint_payload = {
+            key: result[key]
+            for key in (
+                "exchange",
+                "trading_mode",
+                "dry_run",
+                "demo_trading",
+                "worker_state",
+                "version",
+                "bot_name",
+                "whitelist",
+                "force_entry_enabled",
+                "position_adjustment_enabled",
+                "network",
+            )
+        }
+        result["runtime_fingerprint"] = hashlib.sha256(
+            json.dumps(
+                fingerprint_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
         if self.spec.exchange_account_id is not None:
             result["exchange_account_id"] = self.spec.exchange_account_id
             result["team_id"] = self.spec.team_id
@@ -550,7 +440,29 @@ class FreqtradeWorkerClient:
                 "FREQTRADE_WORKER_RESPONSE_INVALID",
                 "Freqtrade open-trade response is invalid",
             )
-        return tuple(parse_freqtrade_trade(item) for item in value)
+        parsed: list[FreqtradeTrade] = []
+        for item in value:
+            try:
+                amount = Decimal(str(item.get("amount")))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise DomainRejected(
+                    "FREQTRADE_WORKER_RESPONSE_INVALID",
+                    "Freqtrade pending entry amount is invalid",
+                ) from exc
+            if amount < 0:
+                raise DomainRejected(
+                    "FREQTRADE_WORKER_RESPONSE_INVALID",
+                    "Freqtrade pending entry amount cannot be negative",
+                )
+            if amount == 0:
+                continue
+            parsed.append(parse_freqtrade_trade(item))
+        return tuple(parsed)
+
+    def open_trades(self) -> tuple[FreqtradeTrade, ...]:
+        """Query current worker trades without issuing an execution command."""
+
+        return self._open_trades()
 
     def find_open_trade(
         self,
@@ -570,44 +482,48 @@ class FreqtradeWorkerClient:
             )
         return matches[0] if matches else None
 
-    def _find_filled_entry(self, *, pair: str, enter_tag: str) -> FreqtradeTrade | None:
-        """Read a force-entry result while tolerating Freqtrade's transient zero fill row."""
+    def _find_filled_entry(
+        self,
+        command: FreqtradeEntryCommand,
+        *,
+        trade_id: str | None,
+        dispatch_started_at: datetime,
+    ) -> FreqtradeTrade | None:
+        """Read the order tagged by one intent, including position adjustments."""
 
-        value = self._authorized_request("status")
-        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
-            raise DomainRejected(
-                "FREQTRADE_WORKER_RESPONSE_INVALID",
-                "Freqtrade open-trade response is invalid",
-            )
-        scoped = [item for item in value if item.get("pair") == pair]
-        matching = [item for item in scoped if item.get("enter_tag") == enter_tag]
-        if len(scoped) > 1 or len(matching) > 1:
+        scoped = tuple(item for item in self._open_trades() if item.pair == command.pair)
+        if len(scoped) > 1:
             raise DomainRejected(
                 "FREQTRADE_SCOPE_AMBIGUOUS",
                 "multiple live Freqtrade trades match the controlled entry scope",
             )
-        if scoped and not matching:
-            raise DomainRejected(
-                "FREQTRADE_SCOPE_BUSY",
-                "another Freqtrade trade appeared during controlled entry",
-            )
-        if not matching:
+        if not scoped:
             return None
-        try:
-            amount = Decimal(str(matching[0].get("amount", 0)))
-        except (InvalidOperation, TypeError, ValueError) as exc:
+        trade = scoped[0]
+        if trade_id is not None and trade.trade_id != trade_id:
             raise DomainRejected(
-                "FREQTRADE_WORKER_RESPONSE_INVALID",
-                "Freqtrade pending entry amount is invalid",
-            ) from exc
-        if amount == 0:
-            return None
-        if amount < 0:
-            raise DomainRejected(
-                "FREQTRADE_WORKER_RESPONSE_INVALID",
-                "Freqtrade pending entry amount cannot be negative",
+                "FREQTRADE_ORDER_IDENTITY_CONFLICT",
+                "Freqtrade position adjustment changed the bound trade identity",
             )
-        return parse_freqtrade_trade(matching[0])
+        if trade.side != command.side:
+            raise DomainRejected(
+                "FREQTRADE_ORDER_IDENTITY_CONFLICT",
+                "Freqtrade entry changed the frozen direction",
+            )
+        tagged = tuple(item for item in trade.orders if item.tag == command.enter_tag)
+        if not tagged:
+            if not command.position_adjustment and trade.enter_tag != command.enter_tag:
+                raise DomainRejected(
+                    "FREQTRADE_SCOPE_BUSY",
+                    "another Freqtrade trade appeared during controlled entry",
+                )
+            return None
+        freqtrade_execution_order(
+            trade,
+            command,
+            dispatch_started_at=dispatch_started_at,
+        )
+        return trade
 
     def wait_for_protection(
         self,
@@ -626,7 +542,13 @@ class FreqtradeWorkerClient:
                     "Freqtrade trade changed before native protection was confirmed",
                 )
             if current.stop_loss_abs is not None and current.stoploss_order_id:
-                return current
+                try:
+                    freqtrade_active_stop_order(current)
+                except DomainRejected as exc:
+                    if exc.code != "FREQTRADE_PROTECTION_UNCONFIRMED":
+                        raise
+                else:
+                    return current
             time.sleep(0.25)
         raise DomainRejected(
             "FREQTRADE_PROTECTION_UNCONFIRMED",
@@ -642,26 +564,54 @@ class FreqtradeWorkerClient:
             )
         return parse_freqtrade_trade(value)
 
-    def force_enter(self, command: FreqtradeEntryCommand) -> FreqtradeTrade:
+    def force_enter(
+        self,
+        command: FreqtradeEntryCommand,
+        *,
+        expected_mode: Literal["DRY_RUN", "TESTNET", "LIVE"] = "LIVE",
+        trade_id: str | None = None,
+        dispatch_started_at: datetime | None = None,
+    ) -> FreqtradeTrade:
         if command.stake_amount <= 0 or command.max_quantity <= 0 or command.leverage <= 0:
             raise DomainRejected(
                 "FREQTRADE_ORDER_INVALID",
-                "Freqtrade LIVE entry values must be positive",
+                "Freqtrade entry values must be positive",
             )
-        self.probe(expected_mode="LIVE", required_pair=command.pair)
-        existing = self.find_open_trade(pair=command.pair, enter_tag=command.enter_tag)
-        if existing is not None:
-            if existing.side != command.side or existing.amount > command.max_quantity:
+        started_at = dispatch_started_at or datetime.now(UTC)
+        self.probe(expected_mode=expected_mode, required_pair=command.pair)
+        existing = self.find_open_trade(pair=command.pair)
+        if command.position_adjustment:
+            if existing is None or trade_id is None or existing.trade_id != trade_id:
+                raise DomainRejected(
+                    "FREQTRADE_POSITION_NOT_FOUND",
+                    "approved Add requires the exact existing Freqtrade trade",
+                )
+            if existing.side != command.side:
                 raise DomainRejected(
                     "FREQTRADE_ORDER_IDENTITY_CONFLICT",
-                    "existing Freqtrade trade changed frozen entry semantics",
+                    "approved Add direction differs from the existing Freqtrade trade",
                 )
-            return self.wait_for_protection(trade_id=existing.trade_id, pair=command.pair)
-        if self.find_open_trade(pair=command.pair) is not None:
+        elif trade_id is not None:
             raise DomainRejected(
-                "FREQTRADE_SCOPE_BUSY",
-                "another Freqtrade trade is already open for this pair",
+                "FREQTRADE_DISPATCH_IDENTITY_INVALID",
+                "initial entry must not bind an existing Freqtrade trade",
             )
+        if existing is not None:
+            recovered = self._find_filled_entry(
+                command,
+                trade_id=trade_id,
+                dispatch_started_at=started_at,
+            )
+            if recovered is not None:
+                return self.wait_for_protection(
+                    trade_id=recovered.trade_id,
+                    pair=command.pair,
+                )
+            if not command.position_adjustment:
+                raise DomainRejected(
+                    "FREQTRADE_SCOPE_BUSY",
+                    "another Freqtrade trade is already open for this pair",
+                )
         try:
             self._authorized_request(
                 "forceenter",
@@ -678,20 +628,30 @@ class FreqtradeWorkerClient:
         except DomainRejected as exc:
             if exc.code != "FREQTRADE_WORKER_UNAVAILABLE":
                 raise
-        return self.recover_entry(command)
+        return self.recover_entry(
+            command,
+            trade_id=trade_id,
+            dispatch_started_at=started_at,
+        )
 
-    def recover_entry(self, command: FreqtradeEntryCommand) -> FreqtradeTrade:
+    def recover_entry(
+        self,
+        command: FreqtradeEntryCommand,
+        *,
+        trade_id: str | None = None,
+        dispatch_started_at: datetime | None = None,
+    ) -> FreqtradeTrade:
         """Query a previously dispatched entry without issuing another write."""
 
+        started_at = dispatch_started_at or datetime.now(UTC)
         deadline = time.monotonic() + self.confirmation_timeout_seconds
         while time.monotonic() <= deadline:
-            found = self._find_filled_entry(pair=command.pair, enter_tag=command.enter_tag)
+            found = self._find_filled_entry(
+                command,
+                trade_id=trade_id,
+                dispatch_started_at=started_at,
+            )
             if found is not None:
-                if found.side != command.side or found.amount > command.max_quantity:
-                    raise DomainRejected(
-                        "FREQTRADE_ORDER_IDENTITY_CONFLICT",
-                        "Freqtrade filled more than the frozen maximum quantity",
-                    )
                 return self.wait_for_protection(trade_id=found.trade_id, pair=command.pair)
             time.sleep(0.25)
         raise DomainRejected(
@@ -699,51 +659,98 @@ class FreqtradeWorkerClient:
             "Freqtrade entry outcome could not be confirmed by query within the bounded timeout",
         )
 
-    def force_exit(self, trade_id: str, *, pair: str) -> FreqtradeTrade:
-        current = self.find_open_trade(pair=pair)
+    def force_exit(
+        self,
+        trade_id: str,
+        command: FreqtradeExitCommand,
+        *,
+        dispatch_started_at: datetime,
+    ) -> FreqtradeTrade:
+        current = self.find_open_trade(pair=command.pair)
         if current is None or current.trade_id != trade_id:
-            recovered = self.trade(trade_id)
-            if recovered.pair != pair:
+            return self.recover_exit(
+                trade_id,
+                command,
+                dispatch_started_at=dispatch_started_at,
+            )
+        if command.close_all:
+            if current.amount > command.max_quantity:
                 raise DomainRejected(
                     "FREQTRADE_ORDER_IDENTITY_CONFLICT",
-                    "Freqtrade trade does not match the controlled exit scope",
+                    "Freqtrade open amount exceeds the frozen full-exit boundary",
                 )
-            if not recovered.is_open:
-                return recovered
+        elif command.max_quantity >= current.amount:
             raise DomainRejected(
-                "FREQTRADE_SCOPE_AMBIGUOUS",
-                "the requested Freqtrade exit trade is not the unique open scope",
+                "FREQTRADE_ORDER_IDENTITY_CONFLICT",
+                "partial reduction must remain below the exact open Freqtrade amount",
             )
+        payload: JsonObject = {"tradeid": trade_id, "ordertype": "market"}
+        if not command.close_all:
+            payload["amount"] = float(command.max_quantity)
         try:
             self._authorized_request(
                 "forceexit",
                 method="POST",
-                payload={"tradeid": trade_id, "ordertype": "market"},
+                payload=payload,
             )
         except DomainRejected as exc:
             if exc.code != "FREQTRADE_WORKER_UNAVAILABLE":
                 raise
-        return self.recover_exit(trade_id, pair=pair)
+        return self.recover_exit(
+            trade_id,
+            command,
+            dispatch_started_at=dispatch_started_at,
+        )
 
-    def recover_exit(self, trade_id: str, *, pair: str) -> FreqtradeTrade:
+    def recover_exit(
+        self,
+        trade_id: str,
+        command: FreqtradeExitCommand,
+        *,
+        dispatch_started_at: datetime,
+    ) -> FreqtradeTrade:
         """Query a previously dispatched exit without issuing another write."""
 
         deadline = time.monotonic() + self.confirmation_timeout_seconds
         while time.monotonic() <= deadline:
-            open_trade = self.find_open_trade(pair=pair)
-            if open_trade is None:
-                recovered = self.trade(trade_id)
-                if recovered.pair != pair or recovered.is_open:
+            recovered = self.trade(trade_id)
+            if recovered.pair != command.pair:
+                raise DomainRejected(
+                    "FREQTRADE_ORDER_IDENTITY_CONFLICT",
+                    "Freqtrade exit result changed the controlled scope",
+                )
+            candidates = [
+                item
+                for item in recovered.orders
+                if item.side == ("buy" if recovered.side == "short" else "sell")
+                and not item.is_open
+                and item.status in {"closed", "filled"}
+                and item.filled > 0
+                and item.filled_at is not None
+                and item.filled_at >= dispatch_started_at
+            ]
+            if len(candidates) > 1:
+                raise DomainRejected(
+                    "FREQTRADE_EXECUTION_ORDER_AMBIGUOUS",
+                    "multiple Freqtrade exits appeared inside one durable dispatch window",
+                )
+            if candidates:
+                freqtrade_execution_order(
+                    recovered,
+                    command,
+                    dispatch_started_at=dispatch_started_at,
+                )
+                if command.close_all and recovered.is_open:
                     raise DomainRejected(
                         "FREQTRADE_ORDER_IDENTITY_CONFLICT",
-                        "Freqtrade exit result changed the controlled scope",
+                        "full Freqtrade exit left the bound trade open",
+                    )
+                if not command.close_all and not recovered.is_open:
+                    raise DomainRejected(
+                        "FREQTRADE_ORDER_IDENTITY_CONFLICT",
+                        "partial Freqtrade reduction unexpectedly closed the trade",
                     )
                 return recovered
-            if open_trade.trade_id != trade_id:
-                raise DomainRejected(
-                    "FREQTRADE_SCOPE_AMBIGUOUS",
-                    "a different Freqtrade trade appeared during exit",
-                )
             time.sleep(0.25)
         raise DomainRejected(
             "FREQTRADE_LIVE_OUTCOME_UNKNOWN",

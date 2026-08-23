@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC
+
 from trading_control_plane.api_core import (
     UUID,
     AccountEquityFactRequest,
@@ -8,20 +10,9 @@ from trading_control_plane.api_core import (
     Any,
     AutoAddRequest,
     AutomaticExitRequest,
-    BinanceTestnetActionRequest,
-    BinanceTestnetClient,
-    BinanceTestnetOrder,
-    BinanceTestnetProtectionRequest,
     CampaignTargetRequest,
-    Decimal,
-    DomainRejected,
-    ExecutionEnvironment,
-    FreqtradeEntryCommand,
-    FreqtradeExitCommand,
-    FreqtradeLiveActionRequest,
+    FreqtradeActionRequest,
     FundingFactRequest,
-    HyperliquidTestnetClient,
-    HyperliquidTestnetProtectionRequest,
     IntentKind,
     IntentReleaseRequest,
     IntentUnknownRequest,
@@ -45,9 +36,7 @@ from trading_control_plane.api_core import (
     _now,
     _perptape_runtime_status,
     _perptape_transport_status,
-    build_hyperliquid_signer,
     datetime,
-    freqtrade_pair,
     perptape_legacy_candidate_id,
     project_runtime_connections,
     render_report,
@@ -56,6 +45,15 @@ from trading_control_plane.api_core import (
     timedelta,
 )
 from trading_control_plane.api_routes.context import ApiRouteContext
+from trading_control_plane.execution_dispatch import (
+    ExecuteIntent,
+    SyncProtection,
+    sync_protection,
+    unbound_worker_status,
+)
+from trading_control_plane.execution_dispatch import (
+    execute_intent as dispatch_intent,
+)
 
 
 class _ExecutionRoutes:
@@ -71,71 +69,11 @@ class _ExecutionRoutes:
         self.require_capability = common.require_capability
         self.resolved_settings = common.settings
         self.service = common.service
-        self.rejected_testnet_order = dependencies.rejected_testnet_order
-        self.require_binance_testnet = dependencies.require_binance_testnet
-        self.resolved_binance_testnet = dependencies.binance_testnet
-        self.binance_testnet_uses_database_credentials = (
-            dependencies.binance_testnet_uses_database_credentials
-        )
-        self.unknown_testnet_protection = dependencies.unknown_testnet_protection
-        self.rejected_hyperliquid_order = dependencies.rejected_hyperliquid_order
-        self.require_hyperliquid_testnet = dependencies.require_hyperliquid_testnet
-        self.resolved_hyperliquid_testnet = dependencies.hyperliquid_testnet
-        self.hyperliquid_testnet_uses_database_credentials = (
-            dependencies.hyperliquid_testnet_uses_database_credentials
-        )
-        self.unknown_hyperliquid_protection = dependencies.unknown_hyperliquid_protection
-        self.require_binance_live = dependencies.require_binance_live
-        self.resolved_binance_live = dependencies.binance_live
-        self.require_hyperliquid_live = dependencies.require_hyperliquid_live
-        self.resolved_hyperliquid_live = dependencies.hyperliquid_live
         self.resolved_freqtrade_workers = dependencies.freqtrade_workers
-        self.resolved_hyperliquid = dependencies.hyperliquid
         self.resolved_notilt = dependencies.notilt
         self.resolved_telegram = dependencies.telegram
-        self.require_freqtrade_live_enabled = dependencies.require_freqtrade_live_enabled
-        self.require_freqtrade_live_worker = dependencies.require_freqtrade_live_worker
-
-    def _binance_testnet_client(self, actor_id: UUID, execution_scope: str) -> BinanceTestnetClient:
-        if not self.binance_testnet_uses_database_credentials:
-            return self.resolved_binance_testnet
-        binding = self.service().execution_account_binding(
-            actor_id=actor_id,
-            execution_scope=execution_scope,
-            expected_venue="BINANCE",
-        )
-        return BinanceTestnetClient(
-            base_url=self.resolved_settings.binance_testnet_base_url,
-            api_key=binding.credentials.get("api_key"),
-            api_secret=binding.credentials.get("api_secret"),
-            recv_window_ms=self.resolved_settings.binance_recv_window_ms,
-        )
-
-    def _hyperliquid_testnet_client(
-        self,
-        actor_id: UUID,
-        execution_scope: str,
-    ) -> HyperliquidTestnetClient:
-        if not self.hyperliquid_testnet_uses_database_credentials:
-            return self.resolved_hyperliquid_testnet
-        binding = self.service().execution_account_binding(
-            actor_id=actor_id,
-            execution_scope=execution_scope,
-            expected_venue="HYPERLIQUID",
-        )
-        credentials = binding.credentials
-        account_address = credentials.get("account_address")
-        signer = build_hyperliquid_signer(
-            credentials.get("api_wallet_private_key"),
-            api_wallet_address=credentials.get("api_wallet_address"),
-            active_pool=None,
-            is_mainnet=False,
-        )
-        return HyperliquidTestnetClient(
-            base_url=self.resolved_settings.hyperliquid_testnet_base_url,
-            account_address=account_address,
-            signer=signer,
-        )
+        self.require_freqtrade_enabled = dependencies.require_freqtrade_enabled
+        self.require_freqtrade_worker = dependencies.require_freqtrade_worker
 
     def register_campaign_control(self) -> None:
         @self.app.get("/api/campaigns")
@@ -447,939 +385,6 @@ class _ExecutionRoutes:
                 "owner_id": payload.owner_id,
                 "fencing_token": token,
                 "expires_at": (now + timedelta(seconds=payload.lease_seconds)).isoformat(),
-            }
-
-    def register_binance_testnet(self) -> None:
-        @self.app.post("/api/intents/{intent_id}/binance-testnet/send")
-        def send_binance_testnet_order(
-            intent_id: UUID,
-            payload: BinanceTestnetActionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_binance_testnet()
-            now = _now()
-            command = self.service().prepare_binance_testnet_send(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                now=now,
-            )
-            client = self._binance_testnet_client(identity.user_id, payload.execution_scope)
-            try:
-                result = client.ensure_order(command, now=now)
-            except DomainRejected as exc:
-                if exc.code == "BINANCE_TESTNET_REJECTED":
-                    self.service().record_binance_testnet_order(
-                        intent_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        self.rejected_testnet_order(command, now),
-                        now=now,
-                    )
-                elif exc.code != "BINANCE_TESTNET_UNAVAILABLE":
-                    self.service().record_binance_testnet_unknown(
-                        intent_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        exc.code,
-                        now=now,
-                    )
-                raise
-            fact_id = self.service().record_binance_testnet_order(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                command,
-                result,
-                now=now,
-            )
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            return {
-                "venue_order_fact_id": str(fact_id),
-                "client_order_id": command.client_order_id,
-                "environment": "TESTNET",
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/intents/{intent_id}/binance-testnet/cancel")
-        def cancel_binance_testnet_order(
-            intent_id: UUID,
-            payload: BinanceTestnetActionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_binance_testnet()
-            now = _now()
-            command = self.service().prepare_binance_testnet_cancel(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                now=now,
-            )
-            client = self._binance_testnet_client(identity.user_id, payload.execution_scope)
-            try:
-                result = client.cancel_order(command, now=now)
-            except DomainRejected as exc:
-                if exc.code != "BINANCE_TESTNET_UNAVAILABLE":
-                    self.service().record_binance_testnet_unknown(
-                        intent_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        exc.code,
-                        now=now,
-                    )
-                raise
-            if result is None:
-                self.service().record_binance_testnet_unknown(
-                    intent_id,
-                    identity.user_id,
-                    payload.execution_scope,
-                    payload.owner_id,
-                    payload.fencing_token,
-                    command,
-                    "BINANCE_TESTNET_ORDER_NOT_FOUND",
-                    now=now,
-                )
-            else:
-                self.service().record_binance_testnet_order(
-                    intent_id,
-                    identity.user_id,
-                    payload.execution_scope,
-                    payload.owner_id,
-                    payload.fencing_token,
-                    command,
-                    result,
-                    now=now,
-                )
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            return {
-                "environment": "TESTNET",
-                "confirmed": result is not None,
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/intents/{intent_id}/binance-testnet/recover")
-        def recover_binance_testnet_order(
-            intent_id: UUID,
-            payload: BinanceTestnetActionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_binance_testnet()
-            now = _now()
-            command = self.service().prepare_binance_testnet_recovery(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                now=now,
-            )
-            client = self._binance_testnet_client(identity.user_id, payload.execution_scope)
-            result = client.recover_order(command, now=now)
-            if result is not None:
-                self.service().record_binance_testnet_order(
-                    intent_id,
-                    identity.user_id,
-                    payload.execution_scope,
-                    payload.owner_id,
-                    payload.fencing_token,
-                    command,
-                    result,
-                    now=now,
-                )
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            return {
-                "environment": "TESTNET",
-                "recovered": result is not None,
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/campaigns/{campaign_id}/binance-testnet/protection")
-        def create_binance_testnet_protection(
-            campaign_id: UUID,
-            payload: BinanceTestnetProtectionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_binance_testnet()
-            now = _now()
-            command = self.service().prepare_binance_testnet_protection(
-                campaign_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                payload.trigger_price,
-                now=now,
-            )
-            client = self._binance_testnet_client(identity.user_id, payload.execution_scope)
-            try:
-                result = client.ensure_protection(command, now=now)
-            except DomainRejected as exc:
-                if exc.code != "BINANCE_TESTNET_UNAVAILABLE":
-                    self.service().record_binance_testnet_protection(
-                        campaign_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        self.unknown_testnet_protection(command, now),
-                        now=now,
-                    )
-                raise
-            protection_id = self.service().record_binance_testnet_protection(
-                campaign_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                command,
-                result,
-                now=now,
-            )
-            return {
-                "protection_id": str(protection_id),
-                "client_order_id": command.client_order_id,
-                "environment": "TESTNET",
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-    def register_hyperliquid_testnet(self) -> None:
-        @self.app.post("/api/intents/{intent_id}/hyperliquid-testnet/send")
-        def send_hyperliquid_testnet_order(
-            intent_id: UUID,
-            payload: BinanceTestnetActionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_hyperliquid_testnet()
-            now = _now()
-            command = self.service().prepare_hyperliquid_testnet_send(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                now=now,
-            )
-            client = self._hyperliquid_testnet_client(identity.user_id, payload.execution_scope)
-            try:
-                result = client.ensure_order(command, now=now)
-            except DomainRejected as exc:
-                if exc.code == "HYPERLIQUID_TESTNET_REJECTED":
-                    self.service().record_hyperliquid_testnet_order(
-                        intent_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        self.rejected_hyperliquid_order(command, now),
-                        now=now,
-                    )
-                elif exc.code not in {
-                    "HYPERLIQUID_TESTNET_UNAVAILABLE",
-                    "HYPERLIQUID_TESTNET_SIGNER_INVALID",
-                    "HYPERLIQUID_ORDER_PRECISION_INVALID",
-                }:
-                    self.service().record_hyperliquid_testnet_unknown(
-                        intent_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        exc.code,
-                        now=now,
-                    )
-                raise
-            fact_id = self.service().record_hyperliquid_testnet_order(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                command,
-                result,
-                now=now,
-            )
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            return {
-                "venue_order_fact_id": str(fact_id),
-                "client_order_id": command.client_order_id,
-                "environment": "TESTNET",
-                "domain": "CORE",
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/intents/{intent_id}/hyperliquid-testnet/cancel")
-        def cancel_hyperliquid_testnet_order(
-            intent_id: UUID,
-            payload: BinanceTestnetActionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_hyperliquid_testnet()
-            now = _now()
-            command = self.service().prepare_hyperliquid_testnet_cancel(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                now=now,
-            )
-            client = self._hyperliquid_testnet_client(identity.user_id, payload.execution_scope)
-            try:
-                result = client.cancel_order(command, now=now)
-            except DomainRejected as exc:
-                if exc.code not in {
-                    "HYPERLIQUID_TESTNET_UNAVAILABLE",
-                    "HYPERLIQUID_TESTNET_SIGNER_INVALID",
-                }:
-                    self.service().record_hyperliquid_testnet_unknown(
-                        intent_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        exc.code,
-                        now=now,
-                    )
-                raise
-            if result is None:
-                self.service().record_hyperliquid_testnet_unknown(
-                    intent_id,
-                    identity.user_id,
-                    payload.execution_scope,
-                    payload.owner_id,
-                    payload.fencing_token,
-                    command,
-                    "HYPERLIQUID_TESTNET_ORDER_NOT_FOUND",
-                    now=now,
-                )
-            else:
-                self.service().record_hyperliquid_testnet_order(
-                    intent_id,
-                    identity.user_id,
-                    payload.execution_scope,
-                    payload.owner_id,
-                    payload.fencing_token,
-                    command,
-                    result,
-                    now=now,
-                )
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            return {
-                "environment": "TESTNET",
-                "domain": "CORE",
-                "confirmed": result is not None,
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/intents/{intent_id}/hyperliquid-testnet/recover")
-        def recover_hyperliquid_testnet_order(
-            intent_id: UUID,
-            payload: BinanceTestnetActionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_hyperliquid_testnet()
-            now = _now()
-            command = self.service().prepare_hyperliquid_testnet_recovery(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                now=now,
-            )
-            client = self._hyperliquid_testnet_client(identity.user_id, payload.execution_scope)
-            result = client.recover_order(command, now=now)
-            if result is not None:
-                self.service().record_hyperliquid_testnet_order(
-                    intent_id,
-                    identity.user_id,
-                    payload.execution_scope,
-                    payload.owner_id,
-                    payload.fencing_token,
-                    command,
-                    result,
-                    now=now,
-                )
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            return {
-                "environment": "TESTNET",
-                "domain": "CORE",
-                "recovered": result is not None,
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/campaigns/{campaign_id}/hyperliquid-testnet/protection")
-        def create_hyperliquid_testnet_protection(
-            campaign_id: UUID,
-            payload: HyperliquidTestnetProtectionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_hyperliquid_testnet()
-            now = _now()
-            command = self.service().prepare_hyperliquid_testnet_protection(
-                campaign_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                payload.trigger_price,
-                payload.limit_price,
-                now=now,
-            )
-            client = self._hyperliquid_testnet_client(identity.user_id, payload.execution_scope)
-            try:
-                result = client.ensure_protection(command, now=now)
-            except DomainRejected as exc:
-                if exc.code not in {
-                    "HYPERLIQUID_TESTNET_UNAVAILABLE",
-                    "HYPERLIQUID_TESTNET_SIGNER_INVALID",
-                    "HYPERLIQUID_ORDER_PRECISION_INVALID",
-                }:
-                    self.service().record_hyperliquid_testnet_protection(
-                        campaign_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        self.unknown_hyperliquid_protection(command, now),
-                        now=now,
-                    )
-                raise
-            protection_id = self.service().record_hyperliquid_testnet_protection(
-                campaign_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                command,
-                result,
-                now=now,
-            )
-            return {
-                "protection_id": str(protection_id),
-                "client_order_id": command.client_order_id,
-                "environment": "TESTNET",
-                "domain": "CORE",
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-    def register_binance_live(self) -> None:
-        @self.app.post("/api/intents/{intent_id}/binance/live/send")
-        def send_binance_live_order(
-            intent_id: UUID,
-            payload: BinanceTestnetActionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_binance_live()
-            now = _now()
-            command = self.service().prepare_binance_live_send(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                now=now,
-            )
-            try:
-                result = self.resolved_binance_live.ensure_order(command, now=now)
-            except DomainRejected as exc:
-                if exc.code == "BINANCE_LIVE_REJECTED":
-                    self.service().record_binance_live_order(
-                        intent_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        self.rejected_testnet_order(command, now),
-                        now=now,
-                    )
-                elif exc.code == "BINANCE_LIVE_OUTCOME_UNKNOWN":
-                    self.service().record_binance_live_unknown(
-                        intent_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        exc.code,
-                        now=now,
-                    )
-                raise
-            fact_id = self.service().record_binance_live_order(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                command,
-                result,
-                now=now,
-            )
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            return {
-                "venue_order_fact_id": str(fact_id),
-                "client_order_id": command.client_order_id,
-                "environment": "LIVE",
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/intents/{intent_id}/binance/live/cancel")
-        def cancel_binance_live_order(
-            intent_id: UUID,
-            payload: BinanceTestnetActionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_binance_live()
-            now = _now()
-            command = self.service().prepare_binance_live_cancel(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                now=now,
-            )
-            try:
-                result = self.resolved_binance_live.cancel_order(command, now=now)
-            except DomainRejected as exc:
-                if exc.code == "BINANCE_LIVE_OUTCOME_UNKNOWN":
-                    self.service().record_binance_live_unknown(
-                        intent_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        exc.code,
-                        now=now,
-                    )
-                raise
-            if result is None:
-                self.service().record_binance_live_unknown(
-                    intent_id,
-                    identity.user_id,
-                    payload.execution_scope,
-                    payload.owner_id,
-                    payload.fencing_token,
-                    command,
-                    "BINANCE_LIVE_ORDER_NOT_FOUND",
-                    now=now,
-                )
-            else:
-                self.service().record_binance_live_order(
-                    intent_id,
-                    identity.user_id,
-                    payload.execution_scope,
-                    payload.owner_id,
-                    payload.fencing_token,
-                    command,
-                    result,
-                    now=now,
-                )
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            return {
-                "environment": "LIVE",
-                "confirmed": result is not None,
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/intents/{intent_id}/binance/live/recover")
-        def recover_binance_live_order(
-            intent_id: UUID,
-            payload: BinanceTestnetActionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_binance_live()
-            now = _now()
-            command = self.service().prepare_binance_live_recovery(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                now=now,
-            )
-            result = self.resolved_binance_live.recover_order(command, now=now)
-            if result is not None:
-                self.service().record_binance_live_order(
-                    intent_id,
-                    identity.user_id,
-                    payload.execution_scope,
-                    payload.owner_id,
-                    payload.fencing_token,
-                    command,
-                    result,
-                    now=now,
-                )
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            return {
-                "environment": "LIVE",
-                "recovered": result is not None,
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/campaigns/{campaign_id}/binance/live/protection")
-        def create_binance_live_protection(
-            campaign_id: UUID,
-            payload: BinanceTestnetProtectionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_binance_live()
-            now = _now()
-            command = self.service().prepare_binance_live_protection(
-                campaign_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                payload.trigger_price,
-                now=now,
-            )
-            try:
-                result = self.resolved_binance_live.ensure_protection(command, now=now)
-            except DomainRejected as exc:
-                if exc.code == "BINANCE_LIVE_OUTCOME_UNKNOWN":
-                    unknown = BinanceTestnetOrder(
-                        order_id=f"UNKNOWN:{command.client_order_id}",
-                        client_order_id=command.client_order_id,
-                        status="UNKNOWN",
-                        side=command.side,
-                        order_type="STOP_MARKET",
-                        ordered_quantity=command.quantity or Decimal(0),
-                        filled_quantity=Decimal(0),
-                        stop_price=command.trigger_price,
-                        reduce_only=True,
-                        close_position=False,
-                        observed_at=now,
-                    )
-                    self.service().record_binance_live_protection(
-                        campaign_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        unknown,
-                        now=now,
-                    )
-                raise
-            protection_id = self.service().record_binance_live_protection(
-                campaign_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                command,
-                result,
-                now=now,
-            )
-            return {
-                "protection_id": str(protection_id),
-                "client_order_id": command.client_order_id,
-                "environment": "LIVE",
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/campaigns/{campaign_id}/binance/live/protection/cancel")
-        def cancel_binance_live_protection(
-            campaign_id: UUID,
-            payload: BinanceTestnetActionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_binance_live()
-            now = _now()
-            command = self.service().prepare_live_protection_cancel(
-                campaign_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                venue="BINANCE",
-                now=now,
-            )
-            result = self.resolved_binance_live.cancel_protection(command, now=now)
-            self.service().record_live_protection_cancel(
-                campaign_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                command,
-                result,
-                venue="BINANCE",
-                now=now,
-            )
-            return {
-                "environment": "LIVE",
-                "confirmed": True,
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-    def register_hyperliquid_live(self) -> None:
-        @self.app.post("/api/intents/{intent_id}/hyperliquid/live/send")
-        def send_hyperliquid_live_order(
-            intent_id: UUID,
-            payload: BinanceTestnetActionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_hyperliquid_live()
-            now = _now()
-            command = self.service().prepare_hyperliquid_live_send(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                now=now,
-            )
-            try:
-                result = self.resolved_hyperliquid_live.ensure_order(command, now=now)
-            except DomainRejected as exc:
-                if exc.code == "HYPERLIQUID_LIVE_REJECTED":
-                    self.service().record_hyperliquid_live_order(
-                        intent_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        self.rejected_hyperliquid_order(command, now),
-                        now=now,
-                    )
-                elif exc.code == "HYPERLIQUID_LIVE_OUTCOME_UNKNOWN":
-                    self.service().record_hyperliquid_live_unknown(
-                        intent_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        exc.code,
-                        now=now,
-                    )
-                raise
-            fact_id = self.service().record_hyperliquid_live_order(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                command,
-                result,
-                now=now,
-            )
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            return {
-                "venue_order_fact_id": str(fact_id),
-                "client_order_id": command.client_order_id,
-                "environment": "LIVE",
-                "domain": "CORE",
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/intents/{intent_id}/hyperliquid/live/cancel")
-        def cancel_hyperliquid_live_order(
-            intent_id: UUID,
-            payload: BinanceTestnetActionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_hyperliquid_live()
-            now = _now()
-            command = self.service().prepare_hyperliquid_live_cancel(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                now=now,
-            )
-            try:
-                result = self.resolved_hyperliquid_live.cancel_order(command, now=now)
-            except DomainRejected as exc:
-                if exc.code == "HYPERLIQUID_LIVE_OUTCOME_UNKNOWN":
-                    self.service().record_hyperliquid_live_unknown(
-                        intent_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        exc.code,
-                        now=now,
-                    )
-                raise
-            if result is None:
-                self.service().record_hyperliquid_live_unknown(
-                    intent_id,
-                    identity.user_id,
-                    payload.execution_scope,
-                    payload.owner_id,
-                    payload.fencing_token,
-                    command,
-                    "HYPERLIQUID_LIVE_ORDER_NOT_FOUND",
-                    now=now,
-                )
-            else:
-                self.service().record_hyperliquid_live_order(
-                    intent_id,
-                    identity.user_id,
-                    payload.execution_scope,
-                    payload.owner_id,
-                    payload.fencing_token,
-                    command,
-                    result,
-                    now=now,
-                )
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            return {
-                "environment": "LIVE",
-                "domain": "CORE",
-                "confirmed": result is not None,
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/intents/{intent_id}/hyperliquid/live/recover")
-        def recover_hyperliquid_live_order(
-            intent_id: UUID,
-            payload: BinanceTestnetActionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_hyperliquid_live()
-            now = _now()
-            command = self.service().prepare_hyperliquid_live_recovery(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                now=now,
-            )
-            result = self.resolved_hyperliquid_live.recover_order(command, now=now)
-            if result is not None:
-                self.service().record_hyperliquid_live_order(
-                    intent_id,
-                    identity.user_id,
-                    payload.execution_scope,
-                    payload.owner_id,
-                    payload.fencing_token,
-                    command,
-                    result,
-                    now=now,
-                )
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            return {
-                "environment": "LIVE",
-                "domain": "CORE",
-                "recovered": result is not None,
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/campaigns/{campaign_id}/hyperliquid/live/protection")
-        def create_hyperliquid_live_protection(
-            campaign_id: UUID,
-            payload: HyperliquidTestnetProtectionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_hyperliquid_live()
-            now = _now()
-            command = self.service().prepare_hyperliquid_live_protection(
-                campaign_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                payload.trigger_price,
-                payload.limit_price,
-                now=now,
-            )
-            try:
-                result = self.resolved_hyperliquid_live.ensure_protection(command, now=now)
-            except DomainRejected as exc:
-                if exc.code == "HYPERLIQUID_LIVE_OUTCOME_UNKNOWN":
-                    self.service().record_hyperliquid_live_protection(
-                        campaign_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        self.unknown_hyperliquid_protection(command, now),
-                        now=now,
-                    )
-                raise
-            protection_id = self.service().record_hyperliquid_live_protection(
-                campaign_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                command,
-                result,
-                now=now,
-            )
-            return {
-                "protection_id": str(protection_id),
-                "client_order_id": command.client_order_id,
-                "environment": "LIVE",
-                "domain": "CORE",
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/campaigns/{campaign_id}/hyperliquid/live/protection/cancel")
-        def cancel_hyperliquid_live_protection(
-            campaign_id: UUID,
-            payload: BinanceTestnetActionRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_hyperliquid_live()
-            now = _now()
-            command = self.service().prepare_live_protection_cancel(
-                campaign_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                venue="HYPERLIQUID",
-                now=now,
-            )
-            result = self.resolved_hyperliquid_live.cancel_protection(command, now=now)
-            self.service().record_live_protection_cancel(
-                campaign_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                command,
-                result,
-                venue="HYPERLIQUID",
-                now=now,
-            )
-            return {
-                "environment": "LIVE",
-                "domain": "CORE",
-                "confirmed": True,
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
             }
 
     def register_fact_campaign(self) -> None:
@@ -1835,6 +840,7 @@ class _ExecutionRoutes:
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
             self.require_capability(identity, "system.view")
+            now = _now()
             snapshot = self.queries().runtime_snapshot(identity.user_id)
             perptape_feed = snapshot["perptape_feed"]
             database_binding_counts = snapshot.pop("runtime_binding_counts")
@@ -1851,6 +857,15 @@ class _ExecutionRoutes:
                 snapshot["source_health"],
                 database_binding_counts=database_binding_counts,
                 database_perptape_configured=database_perptape_configured,
+                now=now,
+                fact_stale_after_seconds=(
+                    self.resolved_settings.fact_adapter_stale_after_seconds
+                ),
+                perptape_stale_after_seconds=max(
+                    self.resolved_settings.runtime_sync_interval_seconds * 2
+                    + int(self.resolved_settings.perptape_timeout_seconds),
+                    self.resolved_settings.perptape_websocket_heartbeat_timeout_seconds * 2,
+                ),
             )
             perptape_configured = database_perptape_configured or bool(
                 self.resolved_settings.perptape_api_key
@@ -1858,13 +873,13 @@ class _ExecutionRoutes:
             perptape_status = _perptape_runtime_status(
                 self.resolved_settings,
                 perptape_feed,
-                now=_now(),
+                now=now,
                 configured=perptape_configured,
             )
             perptape_transport = _perptape_transport_status(
                 self.resolved_settings,
                 snapshot["source_health"],
-                now=_now(),
+                now=now,
             )
             telegram_polling = (
                 self.resolved_telegram.polling_health()
@@ -1890,34 +905,39 @@ class _ExecutionRoutes:
                     "connections": connection_states,
                     "external_boundaries": {
                         "execution": {
-                            "backend": self.resolved_settings.execution_backend,
+                            "backend": "FREQTRADE",
                             "workers_enabled": self.resolved_settings.freqtrade_workers_enabled,
                             "worker_count": sum(freqtrade_binding_counts.values()),
                             "account_binding_counts": freqtrade_binding_counts,
                             "binding_source": "DATABASE_ACCOUNT_ENVELOPE",
-                            "legacy_unbound_default_count": len(self.resolved_freqtrade_workers),
                             "venues": ["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"],
                             "direct_venue_send": False,
-                            "live_order_send": (
-                                self.resolved_settings.freqtrade_live_order_send_enabled
+                            "live_order_send": "DATABASE_GATE",
+                        },
+                        "fact_adapter": {
+                            "enabled": any(
+                                connection_states[venue]["available"]
+                                for venue in ("BINANCE", "HYPERLIQUID", "OKX", "BYBIT")
                             ),
+                            "configured": bool(database_binding_counts),
+                            "process_local_enabled": (
+                                self.resolved_settings.fact_adapter_enabled
+                            ),
+                            "database_binding_counts": database_binding_counts,
+                            "reconciliation_seconds": (
+                                self.resolved_settings.fact_adapter_reconciliation_seconds
+                            ),
+                            "transport": "CCXT_PRO_WEBSOCKET_WITH_BOUNDED_REST",
+                            "page_triggered_requests": False,
+                            "order_send_supported": False,
+                            "capital_broadcast_supported": False,
                         },
                         "runtime_sync": {
                             "enabled": self.resolved_settings.runtime_sync_enabled,
                             "interval_seconds": (
                                 self.resolved_settings.runtime_sync_interval_seconds
                             ),
-                            "binance_target_configured": bool(
-                                database_binding_counts.get("BINANCE")
-                                or self.resolved_settings.runtime_binance_account_id
-                            ),
-                            "hyperliquid_target_configured": bool(
-                                database_binding_counts.get("HYPERLIQUID")
-                                or self.resolved_settings.runtime_hyperliquid_account_id
-                            ),
-                            "database_binding_counts": database_binding_counts,
-                            "order_send_supported": False,
-                            "capital_broadcast_supported": False,
+                            "responsibilities": ["PERPTAPE", "NOTILT", "SIGNAL_HEALTH"],
                         },
                         "perptape": {
                             "configured": perptape_configured,
@@ -1929,34 +949,6 @@ class _ExecutionRoutes:
                             "last_fetched_at": perptape_feed["fetched_at"],
                             "last_generated_at": perptape_feed["generated_at"],
                             "transport": perptape_transport,
-                        },
-                        "binance_read_only": {
-                            "enabled": self.resolved_settings.binance_read_only_enabled,
-                            "configured": bool(
-                                self.resolved_settings.binance_api_key
-                                and self.resolved_settings.binance_api_secret
-                            ),
-                            "fact_environment": self.resolved_settings.binance_fact_environment,
-                        },
-                        "binance_testnet_send": {
-                            "enabled": self.resolved_settings.binance_testnet_order_send_enabled,
-                            "configured": bool(
-                                self.resolved_settings.binance_testnet_api_key
-                                and self.resolved_settings.binance_testnet_api_secret
-                            ),
-                        },
-                        "hyperliquid_read_only": {
-                            "enabled": self.resolved_settings.hyperliquid_read_only_enabled,
-                            "configured": self.resolved_hyperliquid.configured,
-                            "account_scope": self.resolved_settings.hyperliquid_account_scope,
-                            "fact_environment": self.resolved_settings.hyperliquid_fact_environment,
-                        },
-                        "hyperliquid_testnet_send": {
-                            "enabled": (
-                                self.resolved_settings.hyperliquid_testnet_order_send_enabled
-                            ),
-                            "signer_injected": self.resolved_hyperliquid_testnet.configured,
-                            "account_scope": self.resolved_settings.hyperliquid_account_scope,
                         },
                         "notilt": {
                             "mode": "OFFICIAL_SDK_UNSIGNED_HANDOFF",
@@ -1996,264 +988,187 @@ class _ExecutionRoutes:
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
             self.require_capability(identity, "system.view")
-            workers: list[dict[str, Any]] = []
-            for worker in (
-                item
-                for item in self.resolved_freqtrade_workers
-                if item.spec.exchange_account_id is None
-            ):
-                workers.append(
+            now = _now()
+            runtime_snapshot = self.queries().runtime_snapshot(identity.user_id)
+            live_gate = runtime_snapshot["capability_gates"].get(
+                "LIVE_ORDER_SEND",
+                {"status": "UNKNOWN", "updated_at": None},
+            )
+            registry = self.queries().exchange_accounts(identity.user_id)
+            account_bindings = []
+            heartbeat_current: list[bool] = []
+            for item in registry["data"]:
+                if not item["execution_worker"]["supported"]:
+                    continue
+                process_health = self.queries().runtime_source_health(
+                    identity.user_id,
+                    "EXECUTION_WORKER",
+                    account_id=item["account_id"],
+                    venue=item["venue"],
+                )
+                worker_health = self.queries().runtime_source_health(
+                    identity.user_id,
+                    "FREQTRADE_WORKER",
+                    account_id=item["account_id"],
+                    venue=item["venue"],
+                )
+                checked_at = (
+                    None if process_health is None else process_health.get("checked_at")
+                )
+                try:
+                    checked = (
+                        None
+                        if checked_at is None
+                        else datetime.fromisoformat(str(checked_at)).astimezone(UTC)
+                    )
+                except ValueError:
+                    checked = None
+                current = bool(
+                    process_health is not None
+                    and process_health.get("status") == "SUCCESS"
+                    and checked is not None
+                    and now - checked
+                    <= timedelta(
+                        seconds=max(
+                            90,
+                            self.resolved_settings.runtime_sync_interval_seconds * 3,
+                        )
+                    )
+                )
+                if item["execution_worker"]["configured"]:
+                    heartbeat_current.append(current)
+                account_bindings.append(
                     {
-                        "name": worker.spec.name,
-                        "venue": worker.spec.venue,
-                        "backend": "FREQTRADE",
-                        "status": (
-                            "DISABLED"
-                            if not self.resolved_settings.freqtrade_workers_enabled
-                            else "UNBOUND"
-                        ),
-                        "reason_code": (
-                            "FREQTRADE_WORKERS_DISABLED"
-                            if not self.resolved_settings.freqtrade_workers_enabled
-                            else "ACCOUNT_BINDING_REQUIRED"
-                        ),
-                        "scope_status": "UNBOUND_LEGACY_DEFAULT",
-                        "hip3_dexes": list(worker.spec.hip3_dexes),
-                        "order_send": False,
+                        "exchange_account_id": item["exchange_account_id"],
+                        "team_id": item["team_id"],
+                        "account_id": item["account_id"],
+                        "venue": item["venue"],
+                        "runtime_health": {
+                            "status": (
+                                "HEALTHY"
+                                if worker_health is not None
+                                and worker_health.get("status") == "SUCCESS"
+                                and current
+                                else "DEGRADED"
+                            ),
+                            "checked_at": (
+                                None
+                                if worker_health is None
+                                else worker_health.get("checked_at")
+                            ),
+                            "error_code": (
+                                None
+                                if worker_health is None
+                                else worker_health.get("error_code")
+                            ),
+                        },
+                        **item["execution_worker"],
                     }
                 )
-            registry = self.queries().exchange_accounts(identity.user_id)
-            account_bindings = [
-                {
-                    "exchange_account_id": item["exchange_account_id"],
-                    "team_id": item["team_id"],
-                    "account_id": item["account_id"],
-                    "venue": item["venue"],
-                    **item["execution_worker"],
-                }
-                for item in registry["data"]
-                if item["execution_worker"]["supported"]
-            ]
+            process_status = (
+                "HEALTHY"
+                if heartbeat_current and all(heartbeat_current)
+                else "DEGRADED"
+                if heartbeat_current
+                else "UNKNOWN"
+            )
+            workers = unbound_worker_status(
+                self.resolved_freqtrade_workers,
+                workers_enabled=process_status == "HEALTHY",
+            )
             return {
-                "backend": self.resolved_settings.execution_backend,
-                "workers_enabled": self.resolved_settings.freqtrade_workers_enabled,
+                "backend": "FREQTRADE",
+                "workers_enabled": process_status == "HEALTHY",
+                "execution_worker": {
+                    "status": process_status,
+                    "configured_binding_count": len(heartbeat_current),
+                    "healthy_binding_count": sum(heartbeat_current),
+                },
                 "direct_venue_send": False,
-                "live_order_send": self.resolved_settings.freqtrade_live_order_send_enabled,
+                "live_order_send": live_gate["status"],
+                "live_order_send_updated_at": live_gate.get("updated_at"),
+                "gate_source": "DATABASE",
                 "workers": workers,
                 "account_bindings": account_bindings,
-                "as_of": _now().isoformat(),
+                "as_of": now.isoformat(),
             }
 
     def register_freqtrade(self) -> None:
-        @self.app.post("/api/intents/{intent_id}/freqtrade/live/send")
-        def send_freqtrade_live_order(
+        @self.app.post("/api/intents/{intent_id}/execute")
+        def execute_intent(
             intent_id: UUID,
-            payload: FreqtradeLiveActionRequest,
+            payload: FreqtradeActionRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
-            parts = payload.execution_scope.split(":")
-            if len(parts) != 3 or parts[0] != ExecutionEnvironment.LIVE.value:
-                raise DomainRejected(
-                    "FREQTRADE_LIVE_SCOPE_REQUIRED",
-                    "Freqtrade LIVE sender requires an explicit LIVE scope",
-                )
-            self.require_freqtrade_live_enabled()
-            now = _now()
-            execution_service = self.service()
-            binding = execution_service.freqtrade_live_worker_binding(
-                actor_id=identity.user_id,
-                execution_scope=payload.execution_scope,
-                owner_id=payload.owner_id,
-                fencing_token=payload.fencing_token,
-                now=now,
-            )
-            worker = self.require_freqtrade_live_worker(binding)
-            command = execution_service.prepare_freqtrade_live_order(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                hip3_dexes=binding.hip3_dexes,
-                leverage=self.resolved_settings.freqtrade_live_leverage,
-                now=now,
-            )
-            worker.probe(expected_mode="LIVE", required_pair=command.pair)
-            execution_service.validate_freqtrade_worker_binding(binding)
-            external_trade_id = None
-            if isinstance(command, FreqtradeExitCommand):
-                external_trade_id = execution_service.freqtrade_dispatch_external_id(
-                    intent_id,
+            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
+            result = dispatch_intent(
+                ExecuteIntent(
+                    intent_id=intent_id,
+                    campaign_id=campaign_id,
                     actor_id=identity.user_id,
                     execution_scope=payload.execution_scope,
-                )
-                if external_trade_id is None:
-                    current = worker.find_open_trade(pair=command.pair)
-                    if current is None:
-                        raise DomainRejected(
-                            "FREQTRADE_POSITION_NOT_FOUND",
-                            "Freqtrade has no unique open trade for the controlled exit",
-                        )
-                    if current.amount > command.max_quantity:
-                        raise DomainRejected(
-                            "FREQTRADE_ORDER_IDENTITY_CONFLICT",
-                            "Freqtrade open amount exceeds the frozen exit boundary",
-                        )
-                    external_trade_id = current.trade_id
-            dispatch = execution_service.start_freqtrade_live_dispatch(
-                intent_id,
-                actor_id=identity.user_id,
-                execution_scope=payload.execution_scope,
-                owner_id=payload.owner_id,
-                fencing_token=payload.fencing_token,
-                binding=binding,
-                command=command,
-                external_trade_id=external_trade_id,
-                idempotency_key=payload.idempotency_key,
-                now=_now(),
+                    owner_id=payload.owner_id,
+                    fencing_token=payload.fencing_token,
+                    idempotency_key=payload.idempotency_key,
+                ),
+                service=self.service(),
+                worker_resolver=self.require_freqtrade_worker,
+                require_enabled=self.require_freqtrade_enabled,
+                clock=_now,
             )
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            if dispatch.mode == "COMPLETED":
-                detail = self.queries().campaign_detail(identity.user_id, campaign_id)
-                completed_intent = next(
-                    (item for item in detail["intents"] if item["intent_id"] == str(intent_id)),
-                    None,
-                )
-                completed_order = (
-                    None if completed_intent is None else completed_intent.get("order")
-                )
-                completed_protection = detail.get("protection")
+            detail = self.queries().campaign_detail(identity.user_id, campaign_id)
+            if result.venue_order_fact_id is None:
                 return {
-                    "venue_order_fact_id": (
-                        None if completed_order is None else completed_order["venue_order_fact_id"]
-                    ),
-                    "protection_id": (
-                        None
-                        if completed_protection is None
-                        else completed_protection["protection_id"]
-                    ),
                     "backend": "FREQTRADE",
-                    "environment": "LIVE",
-                    "worker": worker.spec.name,
-                    "trade_id": dispatch.external_trade_id,
-                    "pair": command.pair,
-                    "is_open": isinstance(command, FreqtradeEntryCommand),
+                    "environment": result.environment,
+                    "worker": result.worker_name,
+                    "trade_id": result.trade_id,
                     "replayed": True,
                     "detail": detail,
                 }
-            try:
-                execution_service.validate_freqtrade_worker_binding(binding)
-                if isinstance(command, FreqtradeEntryCommand):
-                    trade = (
-                        worker.force_enter(command)
-                        if dispatch.mode == "SEND"
-                        else worker.recover_entry(command)
-                    )
-                else:
-                    assert isinstance(command, FreqtradeExitCommand)
-                    assert dispatch.external_trade_id is not None
-                    trade = (
-                        worker.force_exit(dispatch.external_trade_id, pair=command.pair)
-                        if dispatch.mode == "SEND"
-                        else worker.recover_exit(dispatch.external_trade_id, pair=command.pair)
-                    )
-            except DomainRejected as exc:
-                if exc.code in {
-                    "FREQTRADE_LIVE_OUTCOME_UNKNOWN",
-                    "FREQTRADE_PROTECTION_UNCONFIRMED",
-                }:
-                    execution_service.record_freqtrade_live_unknown(
-                        intent_id,
-                        identity.user_id,
-                        payload.execution_scope,
-                        payload.owner_id,
-                        payload.fencing_token,
-                        command,
-                        exc.code,
-                        now=_now(),
-                    )
-                raise
-            fact_id = execution_service.record_freqtrade_live_order(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                command,
-                trade,
-                now=_now(),
-            )
-            protection_id = None
-            if isinstance(command, FreqtradeEntryCommand):
-                protection_id = execution_service.record_freqtrade_live_protection(
-                    campaign_id,
-                    identity.user_id,
-                    payload.execution_scope,
-                    payload.owner_id,
-                    payload.fencing_token,
-                    trade,
-                    now=_now(),
-                )
+            assert result.pair is not None and result.is_open is not None
             return {
-                "venue_order_fact_id": str(fact_id),
-                "protection_id": None if protection_id is None else str(protection_id),
+                "venue_order_fact_id": str(result.venue_order_fact_id),
+                "protection_id": (
+                    None if result.protection_id is None else str(result.protection_id)
+                ),
                 "backend": "FREQTRADE",
-                "environment": "LIVE",
-                "worker": worker.spec.name,
-                "trade_id": trade.trade_id,
-                "pair": trade.pair,
-                "is_open": trade.is_open,
-                "replayed": dispatch.mode != "SEND",
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
+                "environment": result.environment,
+                "worker": result.worker_name,
+                "trade_id": result.trade_id,
+                "pair": result.pair,
+                "is_open": result.is_open,
+                "replayed": result.replayed,
+                "detail": detail,
             }
 
-        @self.app.post("/api/campaigns/{campaign_id}/freqtrade/live/protection")
-        def sync_freqtrade_live_protection(
+        @self.app.post("/api/campaigns/{campaign_id}/freqtrade/protection")
+        def sync_freqtrade_protection(
             campaign_id: UUID,
-            payload: BinanceTestnetActionRequest,
+            payload: FreqtradeActionRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
             detail = self.queries().campaign_detail(identity.user_id, campaign_id)
-            venue = str(detail["venue"])
-            self.require_freqtrade_live_enabled()
-            execution_service = self.service()
-            binding = execution_service.freqtrade_live_worker_binding(
-                actor_id=identity.user_id,
-                execution_scope=payload.execution_scope,
-                owner_id=payload.owner_id,
-                fencing_token=payload.fencing_token,
-                now=_now(),
-                campaign_id=campaign_id,
-            )
-            worker = self.require_freqtrade_live_worker(binding)
-            pair = freqtrade_pair(
-                venue,
-                str(detail["instrument"]["symbol"]),
-                hip3_dexes=binding.hip3_dexes,
-            )
-            worker.probe(expected_mode="LIVE", required_pair=pair)
-            execution_service.validate_freqtrade_worker_binding(binding)
-            trade = worker.find_open_trade(pair=pair)
-            if trade is None:
-                raise DomainRejected(
-                    "FREQTRADE_POSITION_NOT_FOUND",
-                    "Freqtrade has no unique open trade to verify protection",
-                )
-            protection_id = execution_service.record_freqtrade_live_protection(
-                campaign_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                trade,
-                now=_now(),
+            result = sync_protection(
+                SyncProtection(
+                    campaign_id=campaign_id,
+                    actor_id=identity.user_id,
+                    execution_scope=payload.execution_scope,
+                    owner_id=payload.owner_id,
+                    fencing_token=payload.fencing_token,
+                    symbol=str(detail["instrument"]["symbol"]),
+                ),
+                service=self.service(),
+                worker_resolver=self.require_freqtrade_worker,
+                require_enabled=self.require_freqtrade_enabled,
+                clock=_now,
             )
             return {
-                "protection_id": str(protection_id),
+                "protection_id": str(result.protection_id),
                 "backend": "FREQTRADE",
-                "environment": "LIVE",
-                "worker": worker.spec.name,
-                "trade_id": trade.trade_id,
+                "environment": result.environment,
+                "worker": result.worker_name,
+                "trade_id": result.trade_id,
                 "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
             }
 
@@ -2264,10 +1179,6 @@ def register_execution_routes(context: ApiRouteContext) -> None:
     routes = _ExecutionRoutes(context)
     routes.register_campaign_control()
     routes.register_intent()
-    routes.register_binance_testnet()
-    routes.register_hyperliquid_testnet()
-    routes.register_binance_live()
-    routes.register_hyperliquid_live()
     routes.register_fact_campaign()
     routes.register_runtime()
     routes.register_freqtrade()

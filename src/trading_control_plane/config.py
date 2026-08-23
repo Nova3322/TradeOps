@@ -12,7 +12,6 @@ from typing import Literal
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from trading_control_plane.freqtrade import parse_hip3_dexes, validate_worker_url
 from trading_control_plane.perptape import (
     validate_perptape_http_url,
     validate_perptape_websocket_url,
@@ -101,55 +100,41 @@ class Settings(BaseSettings):
     runtime_sync_enabled: bool = False
     runtime_sync_interval_seconds: int = Field(default=60, ge=30, le=3_600)
     runtime_sync_service_username: str = "runtime-sync"
+    fact_adapter_enabled: bool = False
+    fact_adapter_host: str = "127.0.0.1"
+    fact_adapter_port: int = Field(default=8010, ge=1, le=65_535)
+    fact_adapter_bearer_token: str | None = Field(default=None, min_length=32, repr=False)
+    fact_adapter_binding_refresh_seconds: int = Field(default=60, ge=30, le=3_600)
+    fact_adapter_stale_after_seconds: int = Field(default=360, ge=15, le=900)
+    fact_adapter_reconciliation_seconds: int = Field(default=300, ge=30, le=3_600)
+    fact_adapter_fallback_seconds: int = Field(default=60, ge=30, le=900)
     notification_worker_enabled: bool = False
     notification_worker_interval_seconds: int = Field(default=15, ge=5, le=300)
     notification_worker_batch_size: int = Field(default=50, ge=1, le=200)
     notification_email_smtp_allowed_hosts: str = ""
-    runtime_binance_account_id: str | None = None
     runtime_binance_symbol: str = "BTCUSDT"
-    runtime_hyperliquid_account_id: str | None = None
     runtime_hyperliquid_symbol: str = "BTC"
-    execution_backend: Literal["FREQTRADE", "DIRECT_LEGACY"] = "FREQTRADE"
+    runtime_okx_symbol: str = "BTC-USDT-SWAP"
+    runtime_bybit_symbol: str = "BTCUSDT"
     freqtrade_workers_enabled: bool = False
-    freqtrade_binance_worker_url: str = "http://127.0.0.1:8081"
-    freqtrade_hyperliquid_worker_url: str = "http://127.0.0.1:8082"
-    freqtrade_api_username: str | None = None
-    freqtrade_api_password: str | None = Field(default=None, repr=False)
     freqtrade_timeout_seconds: float = Field(default=5, ge=1, le=15)
     freqtrade_confirmation_timeout_seconds: float = Field(default=90, ge=10, le=120)
-    freqtrade_hyperliquid_hip3_dexes: str = "xyz"
-    freqtrade_live_order_send_enabled: bool = False
-    freqtrade_live_leverage: Decimal = Field(default=Decimal(1), ge=1, le=20)
-    binance_read_only_enabled: bool = False
-    binance_fact_environment: Literal["TESTNET", "LIVE"] = "LIVE"
-    binance_futures_base_url: str = "https://fapi.binance.com"
-    binance_account_mode: Literal["STANDARD", "PORTFOLIO_MARGIN"] = "PORTFOLIO_MARGIN"
-    binance_api_key: str | None = Field(default=None, repr=False)
-    binance_api_secret: str | None = Field(default=None, repr=False)
+    execution_worker_enabled: bool = False
+    execution_worker_interval_seconds: int = Field(default=5, ge=1, le=60)
+    execution_worker_batch_size: int = Field(default=20, ge=1, le=200)
+    capital_continuation_worker_enabled: bool = False
+    capital_continuation_worker_scan_seconds: int = Field(default=30, ge=5, le=60)
+    capital_continuation_worker_batch_size: int = Field(default=20, ge=1, le=100)
     binance_recv_window_ms: int = Field(default=10_000, ge=1_000, le=60_000)
     binance_capital_base_url: str = "https://api.binance.com"
     binance_capital_api_key: str | None = Field(default=None, repr=False)
     binance_capital_api_secret: str | None = Field(default=None, repr=False)
+    binance_capital_account_id: str | None = None
     binance_capital_timeout_seconds: float = Field(default=8, ge=1, le=15)
     binance_capital_withdraw_enabled: bool = False
-    binance_live_order_send_enabled: bool = False
-    binance_live_base_url: str = "https://papi.binance.com"
-    binance_testnet_order_send_enabled: bool = False
-    binance_testnet_base_url: str = "https://testnet.binancefuture.com"
-    binance_testnet_api_key: str | None = Field(default=None, repr=False)
-    binance_testnet_api_secret: str | None = Field(default=None, repr=False)
-    hyperliquid_read_only_enabled: bool = False
-    hyperliquid_fact_environment: Literal["TESTNET", "LIVE"] = "LIVE"
     hyperliquid_base_url: str = "https://api.hyperliquid.xyz"
     hyperliquid_account_address: str | None = None
     hyperliquid_api_wallet_address: str | None = None
-    hyperliquid_api_wallet_private_key: str | None = Field(default=None, repr=False)
-    hyperliquid_core_dex: Literal[""] = ""
-    hyperliquid_live_order_send_enabled: bool = False
-    hyperliquid_live_base_url: str = "https://api.hyperliquid.xyz"
-    hyperliquid_testnet_order_send_enabled: bool = False
-    hyperliquid_testnet_base_url: str = "https://api.hyperliquid-testnet.xyz"
-    hyperliquid_testnet_api_wallet_private_key: str | None = Field(default=None, repr=False)
     hyperliquid_subaccount_address: str | None = None
     notilt_enabled: bool = False
     notilt_agent_address: str | None = None
@@ -189,10 +174,6 @@ class Settings(BaseSettings):
     @property
     def hyperliquid_account_scope(self) -> Literal["MAIN_ACCOUNT", "SUBACCOUNT"]:
         return "SUBACCOUNT" if self.hyperliquid_subaccount_address else "MAIN_ACCOUNT"
-
-    @property
-    def hyperliquid_hip3_dexes(self) -> tuple[str, ...]:
-        return parse_hip3_dexes(self.freqtrade_hyperliquid_hip3_dexes)
 
     @property
     def notification_email_smtp_allowlist(self) -> tuple[str, ...]:
@@ -248,17 +229,6 @@ class Settings(BaseSettings):
     def require_official_perptape_websocket_url(cls, value: str) -> str:
         return validate_perptape_websocket_url(value)
 
-    @field_validator("freqtrade_binance_worker_url", "freqtrade_hyperliquid_worker_url")
-    @classmethod
-    def require_safe_freqtrade_worker_url(cls, value: str) -> str:
-        return validate_worker_url(value)
-
-    @field_validator("freqtrade_hyperliquid_hip3_dexes")
-    @classmethod
-    def require_valid_hip3_dexes(cls, value: str) -> str:
-        parse_hip3_dexes(value)
-        return value
-
     @field_validator("notification_email_smtp_allowed_hosts")
     @classmethod
     def require_valid_notification_smtp_allowlist(cls, value: str) -> str:
@@ -303,79 +273,30 @@ class Settings(BaseSettings):
             and self.session_signing_secret == DEFAULT_SESSION_SECRET
         ):
             raise ValueError("production requires an explicit session signing secret")
-        if self.binance_read_only_enabled and bool(self.binance_api_key) != bool(
-            self.binance_api_secret
-        ):
-            raise ValueError("Binance read-only key and secret must be configured together")
         if bool(self.binance_capital_api_key) != bool(self.binance_capital_api_secret):
             raise ValueError("Binance capital key and secret must be configured together")
-        if self.binance_capital_withdraw_enabled and not (
-            self.binance_capital_api_key and self.binance_capital_api_secret
-        ):
-            raise ValueError("enabled Binance capital withdrawal requires dedicated credentials")
-        direct_send_enabled = any(
-            (
-                self.binance_live_order_send_enabled,
-                self.binance_testnet_order_send_enabled,
-                self.hyperliquid_live_order_send_enabled,
-                self.hyperliquid_testnet_order_send_enabled,
-            )
-        )
-        if direct_send_enabled and self.execution_backend != "DIRECT_LEGACY":
+        if bool(self.binance_capital_api_key) != bool(self.binance_capital_account_id):
             raise ValueError(
-                "direct venue sending is retired; enabled order sending requires "
-                "DIRECT_LEGACY only for isolated compatibility tests"
+                "Binance capital credentials require an exact dedicated capital account ID"
             )
-        if bool(self.freqtrade_api_username) != bool(self.freqtrade_api_password):
-            raise ValueError("Freqtrade worker username and password must be configured together")
-        if self.freqtrade_live_order_send_enabled and (
-            self.execution_backend != "FREQTRADE"
-            or not self.freqtrade_workers_enabled
+        if self.fact_adapter_enabled and (
+            not self.runtime_sync_enabled
             or not self.credential_encryption_key
+            or not self.fact_adapter_bearer_token
         ):
             raise ValueError(
-                "Freqtrade LIVE send requires the FREQTRADE backend, enabled workers and "
-                "database credential encryption for account-bound workers"
+                "enabled fact adapter requires runtime sync, credential encryption and "
+                "an internal bearer token"
             )
-        if (
-            self.runtime_sync_enabled
-            and self.binance_read_only_enabled
-            and not self.runtime_binance_account_id
-        ):
-            raise ValueError("runtime Binance sync requires an internal account ID")
-        if bool(self.binance_testnet_api_key) != bool(self.binance_testnet_api_secret):
-            raise ValueError("Binance testnet key and secret must be configured together")
-        if self.binance_testnet_order_send_enabled and not (
-            self.binance_testnet_api_key and self.binance_testnet_api_secret
-        ):
-            raise ValueError("enabled Binance testnet send requires explicit testnet credentials")
-        if self.binance_live_order_send_enabled and not (
-            self.binance_api_key and self.binance_api_secret
-        ):
-            raise ValueError("enabled Binance LIVE send requires explicit LIVE credentials")
+        if self.freqtrade_workers_enabled and not self.credential_encryption_key:
+            raise ValueError(
+                "enabled Freqtrade workers require database credential encryption for "
+                "account-bound worker credentials"
+            )
+        if self.execution_worker_enabled and not self.freqtrade_workers_enabled:
+            raise ValueError("automatic execution requires enabled Freqtrade workers")
         if self.hyperliquid_subaccount_address and not self.hyperliquid_account_address:
             raise ValueError("Hyperliquid subaccount requires the main account address")
-        if (
-            self.runtime_sync_enabled
-            and self.hyperliquid_read_only_enabled
-            and not self.runtime_hyperliquid_account_id
-        ):
-            raise ValueError("runtime Hyperliquid sync requires an internal account ID")
-        if self.hyperliquid_live_order_send_enabled and not (
-            (self.hyperliquid_account_address or self.hyperliquid_api_wallet_address)
-            and self.hyperliquid_api_wallet_private_key
-        ):
-            raise ValueError(
-                "enabled Hyperliquid LIVE send requires an account or API wallet address "
-                "and the API wallet private key"
-            )
-        if self.hyperliquid_testnet_order_send_enabled and not (
-            self.hyperliquid_account_address and self.hyperliquid_testnet_api_wallet_private_key
-        ):
-            raise ValueError(
-                "enabled Hyperliquid testnet send requires the main account address "
-                "and testnet API wallet private key"
-            )
         if self.notilt_enabled and not self.notilt_agent_address:
             raise ValueError("enabled NoTilt requires the public whitelist agent address")
         if self.notilt_vaults and not self.notilt_agent_address:
@@ -403,6 +324,10 @@ class Settings(BaseSettings):
             raise ValueError("automatic Perptape proposals require an internal account ID")
         if self.notification_worker_enabled and not self.credential_encryption_key:
             raise ValueError("enabled notification worker requires the credential encryption key")
+        if self.capital_continuation_worker_enabled and not self.credential_encryption_key:
+            raise ValueError(
+                "enabled capital continuation worker requires the credential encryption key"
+            )
         if (
             self.perptape_websocket_reconnect_initial_seconds
             > self.perptape_websocket_reconnect_max_seconds

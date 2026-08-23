@@ -305,14 +305,27 @@ def test_results_audit_and_runtime_api_do_not_mix_environments_or_expose_secrets
                 "last_error_code": None,
                 "consecutive_failures": 0,
             }
-            assert (
-                payload["external_boundaries"]["hyperliquid_read_only"]["account_scope"]
-                == "MAIN_ACCOUNT"
-            )
-            assert (
-                payload["external_boundaries"]["hyperliquid_testnet_send"]["account_scope"]
-                == "MAIN_ACCOUNT"
-            )
+            assert payload["external_boundaries"]["fact_adapter"] == {
+                "enabled": False,
+                "configured": False,
+                "process_local_enabled": False,
+                "database_binding_counts": {},
+                "reconciliation_seconds": 300,
+                "transport": "CCXT_PRO_WEBSOCKET_WITH_BOUNDED_REST",
+                "page_triggered_requests": False,
+                "order_send_supported": False,
+                "capital_broadcast_supported": False,
+            }
+            assert payload["external_boundaries"]["execution"] == {
+                "backend": "FREQTRADE",
+                "workers_enabled": False,
+                "worker_count": 0,
+                "account_binding_counts": {},
+                "binding_source": "DATABASE_ACCOUNT_ENVELOPE",
+                "venues": ["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"],
+                "direct_venue_send": False,
+                "live_order_send": "DATABASE_GATE",
+            }
             serialized = runtime.text.lower()
             assert "api_secret" not in serialized
             assert "private_key" not in serialized

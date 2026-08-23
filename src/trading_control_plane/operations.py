@@ -11,14 +11,7 @@ from sqlalchemy import text
 from trading_control_plane.config import DEFAULT_SESSION_SECRET, Settings, get_settings
 from trading_control_plane.database import REQUIRED_SCHEMA_REVISION, Database
 
-DANGEROUS_TRANSPORT_SWITCHES = (
-    "binance_live_order_send_enabled",
-    "binance_testnet_order_send_enabled",
-    "hyperliquid_live_order_send_enabled",
-    "hyperliquid_testnet_order_send_enabled",
-    "freqtrade_live_order_send_enabled",
-    "binance_capital_withdraw_enabled",
-)
+DANGEROUS_TRANSPORT_SWITCHES = ("binance_capital_withdraw_enabled",)
 
 
 def _deployment_state(*, enabled: bool, configured: bool) -> str:
@@ -39,30 +32,13 @@ def connection_capability_matrix(
     than inferred from deployment environment variables.
     """
 
-    binance_read_configured = bool(
-        settings.binance_api_key
-        and settings.binance_api_secret
-        and settings.runtime_binance_account_id
-    )
-    hyperliquid_read_configured = bool(
-        settings.hyperliquid_effective_account_address and settings.runtime_hyperliquid_account_id
-    )
-    legacy_freqtrade_configured = bool(
-        settings.freqtrade_workers_enabled
-        and settings.freqtrade_api_username
-        and settings.freqtrade_api_password
-    )
     binding_counts = database_binding_counts or {}
     worker_binding_counts = freqtrade_binding_counts or {}
+    supported_venues = ("BINANCE", "HYPERLIQUID", "OKX", "BYBIT")
+    fact_configured = any(int(binding_counts.get(venue, 0)) > 0 for venue in supported_venues)
     freqtrade_configured = any(
-        int(worker_binding_counts.get(venue, 0)) > 0
-        for venue in ("BINANCE", "HYPERLIQUID", "OKX", "BYBIT")
+        int(worker_binding_counts.get(venue, 0)) > 0 for venue in supported_venues
     )
-    legacy_freqtrade_state = "configured" if legacy_freqtrade_configured else "absent"
-    database_binance = int(binding_counts.get("BINANCE", 0)) > 0
-    database_hyperliquid = int(binding_counts.get("HYPERLIQUID", 0)) > 0
-    database_okx = int(binding_counts.get("OKX", 0)) > 0
-    database_bybit = int(binding_counts.get("BYBIT", 0)) > 0
     return [
         {
             "capability": "TEAM_SIGNAL_SOURCE",
@@ -81,88 +57,33 @@ def connection_capability_matrix(
             "boundary": "one-time verification never enables continuous sync or trading",
         },
         {
-            "capability": "BINANCE_CONTINUOUS_FACTS",
-            "providers": ["BINANCE"],
+            "capability": "CCXT_PRO_CONTINUOUS_FACTS",
+            "providers": list(supported_venues),
             "implementation": "IMPLEMENTED_TEAM_ACCOUNT_BOUND",
             "deployment_state": _deployment_state(
-                enabled=(
-                    settings.runtime_sync_enabled
-                    if database_binance
-                    else settings.runtime_sync_enabled and settings.binance_read_only_enabled
-                ),
-                configured=database_binance or binance_read_configured,
+                enabled=settings.fact_adapter_enabled and settings.runtime_sync_enabled,
+                configured=fact_configured,
             ),
             "external_side_effect": "READ_ONLY",
-            "boundary": "database binding is explicit, versioned and read-only",
-        },
-        {
-            "capability": "HYPERLIQUID_CONTINUOUS_FACTS",
-            "providers": ["HYPERLIQUID"],
-            "implementation": "IMPLEMENTED_TEAM_ACCOUNT_BOUND",
-            "deployment_state": _deployment_state(
-                enabled=(
-                    settings.runtime_sync_enabled
-                    if database_hyperliquid
-                    else settings.runtime_sync_enabled and settings.hyperliquid_read_only_enabled
-                ),
-                configured=database_hyperliquid or hyperliquid_read_configured,
+            "boundary": (
+                "one shared CCXT Pro adapter; exact workspace/team/account/venue/environment/"
+                "account-mode bindings; unsupported exposures fail closed"
             ),
-            "external_side_effect": "READ_ONLY",
-            "boundary": "database binding strips signing material and is read-only",
-        },
-        {
-            "capability": "OKX_CONTINUOUS_FACTS",
-            "providers": ["OKX"],
-            "implementation": "IMPLEMENTED_TEAM_ACCOUNT_BOUND",
-            "deployment_state": _deployment_state(
-                enabled=settings.runtime_sync_enabled and database_okx,
-                configured=database_okx,
-            ),
-            "external_side_effect": "READ_ONLY",
-            "boundary": "USDT linear SWAP facts only; unsupported exposure fails closed",
-        },
-        {
-            "capability": "BYBIT_CONTINUOUS_FACTS",
-            "providers": ["BYBIT"],
-            "implementation": "IMPLEMENTED_TEAM_ACCOUNT_BOUND",
-            "deployment_state": _deployment_state(
-                enabled=settings.runtime_sync_enabled and database_bybit,
-                configured=database_bybit,
-            ),
-            "external_side_effect": "READ_ONLY",
-            "boundary": "Unified USDT linear facts only; unsupported exposure fails closed",
         },
         {
             "capability": "FREQTRADE_EXECUTION",
             "providers": ["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"],
-            "implementation": "IMPLEMENTED_TEAM_ACCOUNT_BOUND_UNCERTIFIED",
+            "implementation": "IMPLEMENTED_TEAM_ACCOUNT_BOUND",
             "deployment_state": _deployment_state(
-                enabled=settings.freqtrade_live_order_send_enabled,
+                enabled=settings.freqtrade_workers_enabled,
                 configured=freqtrade_configured,
             ),
             "external_side_effect": "ORDER_SEND",
             "boundary": (
                 "requires exact-account ELIGIBLE status, verified encrypted credentials, "
                 "continuous read-only binding, a verified LIVE worker for the same Team/Account/"
-                "Venue, process switch, database gate, sender lease, authorization and fresh risk; "
-                f"legacy venue defaults are {legacy_freqtrade_state} "
-                "but never eligible for LIVE routing"
-            ),
-        },
-        {
-            "capability": "OKX_BYBIT_EXECUTION",
-            "providers": ["OKX", "BYBIT"],
-            "implementation": "IMPLEMENTED_VIA_FREQTRADE_EXECUTION_UNCERTIFIED",
-            "deployment_state": _deployment_state(
-                enabled=settings.freqtrade_live_order_send_enabled,
-                configured=any(
-                    int(worker_binding_counts.get(venue, 0)) > 0 for venue in ("OKX", "BYBIT")
-                ),
-            ),
-            "external_side_effect": "ORDER_SEND",
-            "boundary": (
-                "compatibility projection only; execution reuses the same exact-account "
-                "Freqtrade path and never creates a second venue OMS"
+                "Venue, database LIVE gate, sender lease, authorization and fresh risk; TESTNET "
+                "is routed only to an exact DRY_RUN worker"
             ),
         },
         {

@@ -32,6 +32,7 @@ class NotificationWorker:
         self.dispatcher = NotificationDispatcher(
             database,
             credential_encryption_key=settings.credential_encryption_key,
+            public_base_url=settings.public_base_url,
             sender=StdlibNotificationSender(
                 email_smtp_allowed_hosts=settings.notification_email_smtp_allowlist,
             ),

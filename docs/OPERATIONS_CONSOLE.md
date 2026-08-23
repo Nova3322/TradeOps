@@ -18,11 +18,11 @@ It is not an account, proposal, authorization, order, position, or capital-fact
 environment. The retired SHADOW simulator is not available as a mode, hidden
 route, API fallback, or virtual-balance source.
 
-**Mode Settings** is the only page that changes the Team mode. Administrators
-with `team.manage` receive target readiness, execution-readiness advisories, and
-the final confirmation control. Production confirmation requires the exact
-phrase shown by the page. The request also carries `expected_version` and an
-idempotency key, and the result is audited.
+The header **Current mode** control is the only control that changes the Team
+mode. Administrators with `team.manage` receive target readiness,
+execution-readiness advisories, and the final confirmation control. Production
+confirmation uses the exact phrase shown by the UI. The request also carries
+`expected_version` and an idempotency key, and the result is audited.
 
 A successful switch does not enable live order send, automatic position adds,
 capital transfer, signing, or broadcast. Unexecuted authorizations and order
@@ -73,6 +73,22 @@ Signal freshness or market-data readiness is not proposal eligibility. Proposal
 creation revalidates exact instrument, Team mode, account scope, policy, and
 current facts on the server.
 
+## Review Queue and Trade History
+
+- **Review Queue** is sorted by proposal creation time descending so the newest
+  record appears first. It filters by environment, instrument, direction, risk,
+  and source or status.
+- **Trade History** is the user-facing name of the existing `/campaigns`
+  destination. It retains authorization, risk reservation, orders, fills,
+  protection, reconciliation, and final outcomes for active and closed trades;
+  filters cover instrument/account, direction, Venue, and status.
+- Both lists default to 50 records per page and allow 100. No page-size option
+  above 100 is exposed.
+- Once the independent-review threshold is met, the system automatically runs
+  current-fact risk checks, issues short-lived authorization, reserves risk, and
+  calls the exact-account Freqtrade worker within lease, fencing, and idempotency
+  boundaries. Timeout or ambiguity is query-only and never resubmits the order.
+
 ## Capital Center and Performance Reports
 
 The Capital Center owns production treasury configuration and direct-capital
@@ -107,11 +123,14 @@ Performance Reports owns account-equity history and charts:
   audit rules.
 - **Notification Center** owns Telegram, Slack, Lark, and email routes. Route
   credentials are encrypted and redacted; source/account pages do not duplicate
-  notification-account configuration. Notification delivery has no trading,
-  capital, signing, or broadcast interface.
+  notification-account configuration. Recent deliveries filter by event/scope,
+  channel, status, and environment and paginate at 50 records by default or 100
+  maximum. Notification delivery has no trading, capital, signing, or broadcast
+  interface.
 - The desktop navigation can collapse to the left and mobile navigation uses a
-  modal drawer. The header mode badge is read-only and visually joined to the
-  theme control; actual switching remains in Mode Settings.
+  modal drawer. The header **Current mode** control is visually joined to the
+  theme control; server permission, readiness, version, idempotency, and audit
+  checks remain authoritative.
 
 The console supports Chinese and English, light and dark themes, keyboard focus,
 responsive layouts, and reduced-motion behavior. UI visibility never replaces

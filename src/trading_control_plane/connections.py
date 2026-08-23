@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timedelta
 from typing import Any
 
 from trading_control_plane.config import Settings
@@ -54,18 +55,43 @@ def _failure_category(error_code: str | None) -> tuple[str, str, str]:
 def _latest_health(
     source_health: Mapping[str, Mapping[str, Any]],
     source: str,
+    *,
+    prefer_scoped: bool = False,
 ) -> Mapping[str, Any] | None:
     direct = source_health.get(source)
-    if direct is not None:
+    if direct is not None and not prefer_scoped:
         return direct
     matches = [value for key, value in source_health.items() if key.startswith(f"{source}:")]
     if not matches:
-        return None
+        return direct
     if any(item.get("status") == "FAILED" for item in matches):
         return next(item for item in matches if item.get("status") == "FAILED")
     if all(item.get("status") == "SUCCESS" for item in matches):
         return max(matches, key=lambda item: str(item.get("checked_at") or ""))
     return max(matches, key=lambda item: str(item.get("checked_at") or ""))
+
+
+def _fresh_exchange_health(
+    health: Mapping[str, Any] | None,
+    *,
+    now: datetime | None,
+    stale_after_seconds: int | None,
+    stale_error_code: str = "FACT_ADAPTER_STALE",
+) -> Mapping[str, Any] | None:
+    if health is None or now is None or stale_after_seconds is None:
+        return health
+    raw_checked_at = health.get("checked_at")
+    try:
+        checked_at = (
+            raw_checked_at
+            if isinstance(raw_checked_at, datetime)
+            else datetime.fromisoformat(str(raw_checked_at))
+        )
+    except (TypeError, ValueError):
+        return {**health, "status": "FAILED", "error_code": stale_error_code}
+    if checked_at.utcoffset() is None or now - checked_at > timedelta(seconds=stale_after_seconds):
+        return {**health, "status": "FAILED", "error_code": stale_error_code}
+    return health
 
 
 def _projection(
@@ -149,86 +175,44 @@ def project_runtime_connections(
     *,
     database_binding_counts: Mapping[str, int] | None = None,
     database_perptape_configured: bool = False,
+    now: datetime | None = None,
+    fact_stale_after_seconds: int | None = None,
+    perptape_stale_after_seconds: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     binding_counts = database_binding_counts or {}
-    database_binance = int(binding_counts.get("BINANCE", 0)) > 0
-    database_hyperliquid = int(binding_counts.get("HYPERLIQUID", 0)) > 0
-    database_okx = int(binding_counts.get("OKX", 0)) > 0
-    database_bybit = int(binding_counts.get("BYBIT", 0)) > 0
-    binance_credentials = (
-        "COMPLETE"
-        if database_binance or (settings.binance_api_key and settings.binance_api_secret)
-        else "PARTIAL"
-        if settings.binance_api_key or settings.binance_api_secret
-        else "MISSING"
-    )
-    hyperliquid_identity = (
-        "COMPLETE"
-        if database_hyperliquid
-        or settings.hyperliquid_account_address
-        or settings.hyperliquid_api_wallet_address
-        else "MISSING"
-    )
     notilt_identity = "COMPLETE" if settings.notilt_agent_address else "MISSING"
     perptape_credentials = (
         "COMPLETE" if database_perptape_configured or settings.perptape_api_key else "MISSING"
     )
+    exchange_connections = {
+        venue: _projection(
+            enabled=int(binding_counts.get(venue, 0)) > 0,
+            credential_state=("COMPLETE" if int(binding_counts.get(venue, 0)) > 0 else "MISSING"),
+            config_complete=int(binding_counts.get(venue, 0)) > 0,
+            health=_fresh_exchange_health(
+                _latest_health(source_health, venue, prefer_scoped=True),
+                now=now,
+                stale_after_seconds=fact_stale_after_seconds,
+            ),
+            owner_role="系统管理员",
+            write_process_enabled=(
+                settings.freqtrade_workers_enabled and int(binding_counts.get(venue, 0)) > 0
+            ),
+        )
+        for venue in ("BINANCE", "HYPERLIQUID", "OKX", "BYBIT")
+    }
     return {
-        "BINANCE": _projection(
-            enabled=(
-                settings.runtime_sync_enabled
-                if database_binance
-                else settings.binance_read_only_enabled
-            ),
-            credential_state=binance_credentials,
-            config_complete=database_binance or bool(settings.runtime_binance_account_id),
-            health=_latest_health(source_health, "BINANCE"),
-            owner_role="系统管理员",
-            write_process_enabled=(
-                settings.binance_live_order_send_enabled
-                or settings.binance_testnet_order_send_enabled
-            ),
-        ),
-        "HYPERLIQUID": _projection(
-            enabled=(
-                settings.runtime_sync_enabled
-                if database_hyperliquid
-                else settings.hyperliquid_read_only_enabled
-            ),
-            credential_state=hyperliquid_identity,
-            config_complete=database_hyperliquid or bool(settings.runtime_hyperliquid_account_id),
-            health=_latest_health(source_health, "HYPERLIQUID"),
-            owner_role="系统管理员",
-            write_process_enabled=(
-                settings.hyperliquid_live_order_send_enabled
-                or settings.hyperliquid_testnet_order_send_enabled
-            ),
-        ),
-        "OKX": _projection(
-            enabled=settings.runtime_sync_enabled and database_okx,
-            credential_state="COMPLETE" if database_okx else "MISSING",
-            config_complete=database_okx,
-            health=_latest_health(source_health, "OKX"),
-            owner_role="系统管理员",
-            write_process_enabled=False,
-        ),
-        "BYBIT": _projection(
-            enabled=settings.runtime_sync_enabled and database_bybit,
-            credential_state="COMPLETE" if database_bybit else "MISSING",
-            config_complete=database_bybit,
-            health=_latest_health(source_health, "BYBIT"),
-            owner_role="系统管理员",
-            write_process_enabled=False,
-        ),
+        **exchange_connections,
         "PERPTAPE": _projection(
-            enabled=(
-                settings.runtime_sync_enabled
-                if database_perptape_configured
-                else bool(settings.perptape_api_key)
-            ),
+            enabled=database_perptape_configured or bool(settings.perptape_api_key),
             credential_state=perptape_credentials,
             config_complete=True,
-            health=_latest_health(source_health, "PERPTAPE"),
+            health=_fresh_exchange_health(
+                _latest_health(source_health, "PERPTAPE"),
+                now=now,
+                stale_after_seconds=perptape_stale_after_seconds,
+                stale_error_code="PERPTAPE_HEALTH_STALE",
+            ),
             owner_role="系统管理员",
             write_process_enabled=False,
         ),

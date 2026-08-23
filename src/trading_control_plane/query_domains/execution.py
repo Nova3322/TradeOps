@@ -1,10 +1,207 @@
 from __future__ import annotations
 
-from trading_control_plane.query_component import QueryComponent
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
+from uuid import UUID
 
-# ruff: noqa: F403, F405
-from trading_control_plane.query_core import *
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
+
+from trading_control_plane import domain, models
+from trading_control_plane.query_component import QueryComponent, iso_datetime
 from trading_control_plane.repositories.execution import find_position_for_scope
+
+PERPTAPE_STRATEGIES = frozenset({"perptape", "perptape-resonance"})
+
+
+def proposal_report_attribution(session: Session, proposal: models.Proposal) -> dict[str, Any]:
+    """Project immutable proposal/signal facts without mutable source configuration."""
+
+    signal = (
+        None
+        if proposal.signal_event_id is None
+        else session.scalar(
+            select(models.SignalEvent).where(
+                models.SignalEvent.signal_event_id == proposal.signal_event_id,
+                models.SignalEvent.team_id == proposal.team_id,
+            )
+        )
+    )
+    if signal is not None:
+        return {
+            "source_type": "MANUAL",
+            "strategy_id": signal.strategy_id,
+            "strategy_version": signal.strategy_version,
+            "signal_source_mode": "WEBHOOK",
+            "signal_source_id": str(signal.signal_source_id),
+            "signal_provider": signal.provider,
+            "signal_external_id": signal.external_id,
+            "attribution": "FROZEN_SIGNAL_EVENT",
+        }
+    if proposal.source == "SYSTEM":
+        perptape = proposal.strategy_id in PERPTAPE_STRATEGIES
+        return {
+            "source_type": proposal.strategy_id,
+            "strategy_id": proposal.strategy_id,
+            "strategy_version": proposal.strategy_version,
+            "signal_source_mode": "PERPTAPE" if perptape else "SYSTEM",
+            "signal_source_id": None,
+            "signal_provider": "PERPTAPE" if perptape else None,
+            "signal_external_id": proposal.source_candidate_id,
+            "attribution": "FROZEN_PROPOSAL",
+        }
+    return {
+        "source_type": "MANUAL",
+        "strategy_id": None,
+        "strategy_version": None,
+        "signal_source_mode": "MANUAL",
+        "signal_source_id": None,
+        "signal_provider": None,
+        "signal_external_id": None,
+        "attribution": "FROZEN_PROPOSAL",
+    }
+
+
+def performance_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    closed = [item for item in rows if item["status"] == "CLOSED"]
+    open_rows = [item for item in rows if item["status"] != "CLOSED"]
+    wins = [
+        Decimal(str(item["final_pnl"])) for item in closed if Decimal(str(item["final_pnl"])) > 0
+    ]
+    losses = [
+        Decimal(str(item["final_pnl"])) for item in closed if Decimal(str(item["final_pnl"])) < 0
+    ]
+    gross_profit = sum(wins, Decimal(0))
+    gross_loss_abs = abs(sum(losses, Decimal(0)))
+    average_win = None if not wins else gross_profit / len(wins)
+    average_loss_abs = None if not losses else gross_loss_abs / len(losses)
+    win_rate = None if not closed else Decimal(len(wins)) / Decimal(len(closed))
+    profit_loss_ratio = None
+    if average_win is not None and average_loss_abs not in {None, Decimal(0)}:
+        assert average_loss_abs is not None
+        profit_loss_ratio = average_win / average_loss_abs
+    profit_factor = None if gross_loss_abs == 0 else gross_profit / gross_loss_abs
+    cumulative = Decimal(0)
+    peak = Decimal(0)
+    maximum_drawdown = Decimal(0)
+    points: list[dict[str, str | None]] = []
+    for item in closed:
+        cumulative += Decimal(str(item["final_pnl"]))
+        peak = max(peak, cumulative)
+        drawdown = peak - cumulative
+        maximum_drawdown = max(maximum_drawdown, drawdown)
+        points.append(
+            {
+                "campaign_id": str(item["campaign_id"]),
+                "at": None if item["updated_at"] is None else str(item["updated_at"]),
+                "cumulative_pnl": str(cumulative),
+                "running_peak": str(peak),
+                "drawdown": str(drawdown),
+            }
+        )
+    return {
+        "campaign_count": len(rows),
+        "closed_count": len(closed),
+        "open_count": len(rows) - len(closed),
+        "win_count": len(wins),
+        "loss_count": len(losses),
+        "breakeven_count": len(closed) - len(wins) - len(losses),
+        "net_pnl": str(sum((Decimal(str(item["final_pnl"])) for item in rows), Decimal(0))),
+        "closed_net_pnl": str(
+            sum((Decimal(str(item["final_pnl"])) for item in closed), Decimal(0))
+        ),
+        "open_current_pnl": str(
+            sum((Decimal(str(item["final_pnl"])) for item in open_rows), Decimal(0))
+        ),
+        "gross_profit": str(gross_profit),
+        "gross_loss_abs": str(gross_loss_abs),
+        "average_win": None if average_win is None else str(average_win),
+        "average_loss_abs": None if average_loss_abs is None else str(average_loss_abs),
+        "win_rate": None if win_rate is None else str(win_rate),
+        "profit_loss_ratio": None if profit_loss_ratio is None else str(profit_loss_ratio),
+        "profit_factor": None if profit_factor is None else str(profit_factor),
+        "maximum_drawdown": str(maximum_drawdown),
+        "percentage_return": None,
+        "percentage_drawdown": None,
+        "availability": {
+            "win_rate": "AVAILABLE" if closed else "NO_CLOSED_CAMPAIGNS",
+            "profit_loss_ratio": (
+                "AVAILABLE" if profit_loss_ratio is not None else "REQUIRES_WIN_AND_LOSS"
+            ),
+            "percentage_metrics": "OPENING_CAPITAL_UNAVAILABLE",
+        },
+        "curve": points,
+    }
+
+
+def uuid_or_none(value: str) -> UUID | None:
+    try:
+        return UUID(value)
+    except ValueError:
+        return None
+
+
+def proposal_summary(
+    proposal: models.Proposal, instrument: models.Instrument | None = None
+) -> dict[str, Any]:
+    details = proposal.frozen_payload.get("details", {})
+    candidate = details.get("candidate", {}) if isinstance(details, dict) else {}
+    reference_price = (
+        details.get("trigger_price")
+        or candidate.get("reference_price")
+        or candidate.get("threshold_price")
+        if isinstance(details, dict) and isinstance(candidate, dict)
+        else None
+    )
+    resolved_notional = details.get("resolved_notional") if isinstance(details, dict) else None
+    try:
+        estimated_notional = (
+            Decimal(str(resolved_notional))
+            if resolved_notional is not None
+            else None
+            if reference_price is None
+            else (
+                proposal.quantity
+                * Decimal(str(reference_price))
+                * (Decimal(1) if instrument is None else instrument.contract_multiplier)
+            ).quantize(Decimal("0.000000000000000001"))
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        estimated_notional = None
+    return {
+        "proposal_id": str(proposal.proposal_id),
+        "team_id": str(proposal.team_id),
+        "source": proposal.source,
+        "environment": proposal.environment,
+        "proposer_id": str(proposal.proposer_id),
+        "strategy_id": proposal.strategy_id,
+        "strategy_version": proposal.strategy_version,
+        "source_candidate_id": proposal.source_candidate_id,
+        "source_link": proposal.source_link,
+        "source_observed_at": iso_datetime(proposal.source_observed_at),
+        "source_readiness": proposal.source_readiness,
+        "signal_event_id": (
+            None if proposal.signal_event_id is None else str(proposal.signal_event_id)
+        ),
+        "status": proposal.status,
+        "version": proposal.version,
+        "risk_tier": proposal.risk_tier,
+        "account_id": proposal.account_id,
+        "venue": proposal.venue,
+        "instrument_id": str(proposal.instrument_id),
+        "symbol": None if instrument is None else instrument.symbol,
+        "quote_currency": None if instrument is None else instrument.quote_currency,
+        "collateral_currency": (None if instrument is None else instrument.collateral_currency),
+        "direction": proposal.direction,
+        "quantity": str(proposal.quantity),
+        "leverage": None if proposal.leverage is None else str(proposal.leverage),
+        "estimated_notional": (None if estimated_notional is None else str(estimated_notional)),
+        "max_risk": str(proposal.max_risk),
+        "expires_at": iso_datetime(proposal.expires_at),
+        "created_at": iso_datetime(proposal.created_at),
+        "updated_at": iso_datetime(proposal.updated_at),
+    }
 
 
 class ExecutionQueries(QueryComponent):
@@ -31,58 +228,62 @@ class ExecutionQueries(QueryComponent):
         to_time: datetime | None = None,
     ) -> dict[str, Any]:
         if environment not in {"TESTNET", "LIVE"}:
-            raise DomainRejected("ENVIRONMENT_INVALID", "results require an exact environment")
+            raise domain.DomainRejected(
+                "ENVIRONMENT_INVALID", "results require an exact environment"
+            )
         if signal_source_mode not in {None, "PERPTAPE", "WEBHOOK", "MANUAL", "SYSTEM"}:
-            raise DomainRejected(
+            raise domain.DomainRejected(
                 "SIGNAL_SOURCE_MODE_INVALID",
                 "results require an exact supported signal source mode",
             )
         if signal_provider not in {None, "TRADINGVIEW", "MODEL", "PERPTAPE"}:
-            raise DomainRejected(
+            raise domain.DomainRejected(
                 "SIGNAL_PROVIDER_INVALID",
                 "results require an exact supported signal provider",
             )
         if from_time is not None and to_time is not None and from_time > to_time:
-            raise DomainRejected("TIME_RANGE_INVALID", "results from_time must not exceed to_time")
-        workspace_id, team_id = self._active_scope_ids(user_id)
+            raise domain.DomainRejected(
+                "TIME_RANGE_INVALID", "results from_time must not exceed to_time"
+            )
+        workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
-            campaign_query = select(Campaign).where(
-                Campaign.environment == environment,
-                Campaign.team_id == team_id,
+            campaign_query = select(models.Campaign).where(
+                models.Campaign.environment == environment,
+                models.Campaign.team_id == team_id,
             )
             for field, value in (
-                (Campaign.venue, venue),
-                (Campaign.account_id, account_id),
-                (Campaign.instrument_id, instrument_id),
-                (Campaign.direction, direction),
-                (Campaign.campaign_id, campaign_id),
+                (models.Campaign.venue, venue),
+                (models.Campaign.account_id, account_id),
+                (models.Campaign.instrument_id, instrument_id),
+                (models.Campaign.direction, direction),
+                (models.Campaign.campaign_id, campaign_id),
             ):
                 if value is not None:
                     campaign_query = campaign_query.where(field == value)
             if from_time is not None:
-                campaign_query = campaign_query.where(Campaign.updated_at >= from_time)
+                campaign_query = campaign_query.where(models.Campaign.updated_at >= from_time)
             if to_time is not None:
-                campaign_query = campaign_query.where(Campaign.updated_at <= to_time)
+                campaign_query = campaign_query.where(models.Campaign.updated_at <= to_time)
             campaigns = [
                 item
                 for item in session.scalars(
-                    campaign_query.order_by(Campaign.updated_at, Campaign.campaign_id)
+                    campaign_query.order_by(models.Campaign.updated_at, models.Campaign.campaign_id)
                 ).all()
-                if self.service.can_user(user_id, "view", item.account_id, item.venue)
+                if self.can_user(user_id, "view", item.account_id, item.venue)
             ]
             attribution_cache: dict[UUID, dict[str, Any]] = {}
 
-            def report_attribution(proposal: Proposal) -> dict[str, Any]:
+            def report_attribution(proposal: models.Proposal) -> dict[str, Any]:
                 attribution = attribution_cache.get(proposal.proposal_id)
                 if attribution is None:
-                    attribution = _report_attribution(session, proposal)
+                    attribution = proposal_report_attribution(session, proposal)
                     attribution_cache[proposal.proposal_id] = attribution
                 return attribution
 
             rows: list[dict[str, Any]] = []
             totals: dict[str, dict[str, Decimal]] = {}
             for campaign in campaigns:
-                proposal = session.get(Proposal, campaign.proposal_id)
+                proposal = session.get(models.Proposal, campaign.proposal_id)
                 attribution = None if proposal is None else report_attribution(proposal)
                 if source is not None and (proposal is None or proposal.source != source):
                     continue
@@ -116,22 +317,26 @@ class ExecutionQueries(QueryComponent):
                     continue
                 if risk_tier is not None and (proposal is None or proposal.risk_tier != risk_tier):
                     continue
-                instrument = session.get(Instrument, campaign.instrument_id)
+                instrument = session.get(models.Instrument, campaign.instrument_id)
                 intents = session.scalars(
-                    select(OrderIntent).where(OrderIntent.campaign_id == campaign.campaign_id)
+                    select(models.OrderIntent).where(
+                        models.OrderIntent.campaign_id == campaign.campaign_id
+                    )
                 ).all()
                 intent_ids = [item.intent_id for item in intents]
                 fills = (
                     session.scalars(
-                        select(VenueFill)
-                        .where(VenueFill.order_intent_id.in_(intent_ids))
-                        .order_by(VenueFill.executed_at, VenueFill.venue_fill_id)
+                        select(models.VenueFill)
+                        .where(models.VenueFill.order_intent_id.in_(intent_ids))
+                        .order_by(models.VenueFill.executed_at, models.VenueFill.venue_fill_id)
                     ).all()
                     if intent_ids
                     else []
                 )
                 funding = session.scalars(
-                    select(FundingPayment).where(FundingPayment.campaign_id == campaign.campaign_id)
+                    select(models.FundingPayment).where(
+                        models.FundingPayment.campaign_id == campaign.campaign_id
+                    )
                 ).all()
                 currency = "UNKNOWN" if instrument is None else instrument.collateral_currency
                 fees = sum((item.fee for item in fills), Decimal(0))
@@ -203,6 +408,11 @@ class ExecutionQueries(QueryComponent):
                             None if attribution is None else attribution["strategy_version"]
                         ),
                         "risk_tier": None if proposal is None else proposal.risk_tier,
+                        "leverage": (
+                            None
+                            if proposal is None or proposal.leverage is None
+                            else str(proposal.leverage)
+                        ),
                         "fill_count": len(fills),
                         "filled_quantity": str(sum((item.quantity for item in fills), Decimal(0))),
                         "realized_pnl": str(campaign.realized_pnl),
@@ -211,29 +421,29 @@ class ExecutionQueries(QueryComponent):
                         "fees": str(fees),
                         "funding": str(funding_total),
                         "slippage": str(slippage),
-                        "created_at": _iso(campaign.created_at),
-                        "updated_at": _iso(campaign.updated_at),
+                        "created_at": iso_datetime(campaign.created_at),
+                        "updated_at": iso_datetime(campaign.updated_at),
                     }
                 )
 
-            risk_proposal_query = select(Proposal).where(
-                Proposal.environment == environment,
-                Proposal.team_id == team_id,
+            risk_proposal_query = select(models.Proposal).where(
+                models.Proposal.environment == environment,
+                models.Proposal.team_id == team_id,
             )
             for field, value in (
-                (Proposal.venue, venue),
-                (Proposal.account_id, account_id),
-                (Proposal.instrument_id, instrument_id),
-                (Proposal.direction, direction),
+                (models.Proposal.venue, venue),
+                (models.Proposal.account_id, account_id),
+                (models.Proposal.instrument_id, instrument_id),
+                (models.Proposal.direction, direction),
             ):
                 if value is not None:
                     risk_proposal_query = risk_proposal_query.where(field == value)
             campaign_proposal_ids = {
                 item.proposal_id for item in campaigns if campaign_id in {None, item.campaign_id}
             }
-            risk_proposals: dict[UUID, tuple[Proposal, dict[str, Any]]] = {}
+            risk_proposals: dict[UUID, tuple[models.Proposal, dict[str, Any]]] = {}
             for proposal in session.scalars(risk_proposal_query).all():
-                if not self.service.can_user(user_id, "view", proposal.account_id, proposal.venue):
+                if not self.can_user(user_id, "view", proposal.account_id, proposal.venue):
                     continue
                 if campaign_id is not None and proposal.proposal_id not in campaign_proposal_ids:
                     continue
@@ -270,19 +480,23 @@ class ExecutionQueries(QueryComponent):
 
             risk_events: list[dict[str, Any]] = []
             if risk_proposals:
-                decision_query = select(RiskDecision).where(
-                    RiskDecision.team_id == team_id,
-                    RiskDecision.proposal_id.in_(risk_proposals),
+                decision_query = select(models.RiskDecision).where(
+                    models.RiskDecision.team_id == team_id,
+                    models.RiskDecision.proposal_id.in_(risk_proposals),
                 )
                 if from_time is not None:
-                    decision_query = decision_query.where(RiskDecision.created_at >= from_time)
+                    decision_query = decision_query.where(
+                        models.RiskDecision.created_at >= from_time
+                    )
                 if to_time is not None:
-                    decision_query = decision_query.where(RiskDecision.created_at <= to_time)
+                    decision_query = decision_query.where(models.RiskDecision.created_at <= to_time)
                 for decision in session.scalars(
-                    decision_query.order_by(RiskDecision.created_at, RiskDecision.decision_id)
+                    decision_query.order_by(
+                        models.RiskDecision.created_at, models.RiskDecision.decision_id
+                    )
                 ).all():
                     proposal, attribution = risk_proposals[decision.proposal_id]
-                    policy = session.get(RiskPolicy, decision.policy_id)
+                    policy = session.get(models.RiskPolicy, decision.policy_id)
                     risk_events.append(
                         {
                             "decision_id": str(decision.decision_id),
@@ -295,6 +509,9 @@ class ExecutionQueries(QueryComponent):
                             "instrument_id": str(proposal.instrument_id),
                             "direction": proposal.direction,
                             "risk_tier": proposal.risk_tier,
+                            "leverage": (
+                                None if decision.leverage is None else str(decision.leverage)
+                            ),
                             "source": proposal.source,
                             **attribution,
                             "result": decision.result,
@@ -304,14 +521,14 @@ class ExecutionQueries(QueryComponent):
                             "policy_id": str(decision.policy_id),
                             "policy_version": None if policy is None else policy.version,
                             "policy_revision": None if policy is None else policy.revision,
-                            "data_as_of": _iso(decision.data_as_of),
-                            "created_at": _iso(decision.created_at),
+                            "data_as_of": iso_datetime(decision.data_as_of),
+                            "created_at": iso_datetime(decision.created_at),
                         }
                     )
 
             curves: dict[str, dict[str, Any]] = {}
             for currency in totals:
-                metrics = _performance_metrics(
+                metrics = performance_metrics(
                     [item for item in rows if item["currency"] == currency]
                 )
                 curves[currency] = {
@@ -321,7 +538,7 @@ class ExecutionQueries(QueryComponent):
                     "percentage_available": False,
                 }
 
-            team = session.get(Team, team_id)
+            team = session.get(models.Team, team_id)
             team_name = "Unknown Team" if team is None else team.name
             dimension_buckets: dict[str, dict[str, dict[str, Any]]] = {
                 "team": {
@@ -440,7 +657,7 @@ class ExecutionQueries(QueryComponent):
                             "risk_events_by_result": result_counts,
                             "risk_events_by_reason": reason_counts,
                             "metrics_by_currency": {
-                                currency: _performance_metrics(currency_campaigns)
+                                currency: performance_metrics(currency_campaigns)
                                 for currency, currency_campaigns in currency_rows.items()
                             },
                         }
@@ -471,8 +688,8 @@ class ExecutionQueries(QueryComponent):
                     "direction": direction,
                     "risk_tier": risk_tier,
                     "campaign_id": None if campaign_id is None else str(campaign_id),
-                    "from": _iso(from_time),
-                    "to": _iso(to_time),
+                    "from": iso_datetime(from_time),
+                    "to": iso_datetime(to_time),
                 },
                 "environment_notice": {
                     "TESTNET": "Recorded exchange test-environment facts; not live profit",
@@ -503,31 +720,33 @@ class ExecutionQueries(QueryComponent):
         self, user_id: UUID, environment: str, *, limit: int = 200
     ) -> list[dict[str, Any]]:
         if environment not in {"TESTNET", "LIVE"}:
-            raise DomainRejected("ENVIRONMENT_INVALID", "audit requires an exact environment")
-        workspace_id, team_id = self._active_scope_ids(user_id)
+            raise domain.DomainRejected(
+                "ENVIRONMENT_INVALID", "audit requires an exact environment"
+            )
+        workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
             object_ids: set[str] = set()
             proposals = [
                 item
                 for item in session.scalars(
-                    select(Proposal).where(
-                        Proposal.environment == environment,
-                        Proposal.team_id == team_id,
+                    select(models.Proposal).where(
+                        models.Proposal.environment == environment,
+                        models.Proposal.team_id == team_id,
                     )
                 ).all()
-                if self.service.can_user(user_id, "view", item.account_id, item.venue)
+                if self.can_user(user_id, "view", item.account_id, item.venue)
             ]
             proposal_ids = [item.proposal_id for item in proposals]
             object_ids.update(str(item.proposal_id) for item in proposals)
             campaigns = [
                 item
                 for item in session.scalars(
-                    select(Campaign).where(
-                        Campaign.environment == environment,
-                        Campaign.team_id == team_id,
+                    select(models.Campaign).where(
+                        models.Campaign.environment == environment,
+                        models.Campaign.team_id == team_id,
                     )
                 ).all()
-                if self.service.can_user(user_id, "view", item.account_id, item.venue)
+                if self.can_user(user_id, "view", item.account_id, item.venue)
             ]
             campaign_ids = [item.campaign_id for item in campaigns]
             object_ids.update(str(item.campaign_id) for item in campaigns)
@@ -535,40 +754,48 @@ class ExecutionQueries(QueryComponent):
                 object_ids.update(
                     str(item.decision_id)
                     for item in session.scalars(
-                        select(RiskDecision).where(RiskDecision.proposal_id.in_(proposal_ids))
+                        select(models.RiskDecision).where(
+                            models.RiskDecision.proposal_id.in_(proposal_ids)
+                        )
                     ).all()
                 )
                 object_ids.update(
                     str(item.authorization_id)
                     for item in session.scalars(
-                        select(TradingAuthorization).where(
-                            TradingAuthorization.proposal_id.in_(proposal_ids)
+                        select(models.TradingAuthorization).where(
+                            models.TradingAuthorization.proposal_id.in_(proposal_ids)
                         )
                     ).all()
                 )
             if campaign_ids:
                 intents = session.scalars(
-                    select(OrderIntent).where(OrderIntent.campaign_id.in_(campaign_ids))
+                    select(models.OrderIntent).where(
+                        models.OrderIntent.campaign_id.in_(campaign_ids)
+                    )
                 ).all()
                 intent_ids = [item.intent_id for item in intents]
                 object_ids.update(str(item.intent_id) for item in intents)
                 object_ids.update(
                     str(item.reservation_id)
                     for item in session.scalars(
-                        select(RiskReservation).where(RiskReservation.campaign_id.in_(campaign_ids))
+                        select(models.RiskReservation).where(
+                            models.RiskReservation.campaign_id.in_(campaign_ids)
+                        )
                     ).all()
                 )
                 object_ids.update(
                     str(item.funding_payment_id)
                     for item in session.scalars(
-                        select(FundingPayment).where(FundingPayment.campaign_id.in_(campaign_ids))
+                        select(models.FundingPayment).where(
+                            models.FundingPayment.campaign_id.in_(campaign_ids)
+                        )
                     ).all()
                 )
                 object_ids.update(
                     str(item.reconciliation_id)
                     for item in session.scalars(
-                        select(ReconciliationRun).where(
-                            ReconciliationRun.campaign_id.in_(campaign_ids)
+                        select(models.ReconciliationRun).where(
+                            models.ReconciliationRun.campaign_id.in_(campaign_ids)
                         )
                     ).all()
                 )
@@ -576,32 +803,38 @@ class ExecutionQueries(QueryComponent):
                     object_ids.update(
                         str(item.venue_order_fact_id)
                         for item in session.scalars(
-                            select(VenueOrder).where(VenueOrder.order_intent_id.in_(intent_ids))
+                            select(models.VenueOrder).where(
+                                models.VenueOrder.order_intent_id.in_(intent_ids)
+                            )
                         ).all()
                     )
                     object_ids.update(
                         str(item.venue_fill_fact_id)
                         for item in session.scalars(
-                            select(VenueFill).where(VenueFill.order_intent_id.in_(intent_ids))
+                            select(models.VenueFill).where(
+                                models.VenueFill.order_intent_id.in_(intent_ids)
+                            )
                         ).all()
                     )
             transfer_proposals = [
                 item
                 for item in session.scalars(
-                    select(TransferProposal).where(
-                        TransferProposal.team_id == team_id,
-                        TransferProposal.environment == environment,
+                    select(models.TransferProposal).where(
+                        models.TransferProposal.team_id == team_id,
+                        models.TransferProposal.environment == environment,
                     )
                 ).all()
-                if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+                if self.can_user(user_id, "capital.view", item.account_id, item.venue)
             ]
             transfer_proposal_ids = [item.transfer_proposal_id for item in transfer_proposals]
             object_ids.update(str(item) for item in transfer_proposal_ids)
             if transfer_proposal_ids:
                 transfer_authorizations = session.scalars(
-                    select(TransferAuthorization).where(
-                        TransferAuthorization.team_id == team_id,
-                        TransferAuthorization.transfer_proposal_id.in_(transfer_proposal_ids),
+                    select(models.TransferAuthorization).where(
+                        models.TransferAuthorization.team_id == team_id,
+                        models.TransferAuthorization.transfer_proposal_id.in_(
+                            transfer_proposal_ids
+                        ),
                     )
                 ).all()
                 authorization_ids = [
@@ -612,44 +845,46 @@ class ExecutionQueries(QueryComponent):
                     object_ids.update(
                         str(item.capital_transfer_id)
                         for item in session.scalars(
-                            select(CapitalTransfer).where(
-                                CapitalTransfer.team_id == team_id,
-                                CapitalTransfer.transfer_authorization_id.in_(authorization_ids),
+                            select(models.CapitalTransfer).where(
+                                models.CapitalTransfer.team_id == team_id,
+                                models.CapitalTransfer.transfer_authorization_id.in_(
+                                    authorization_ids
+                                ),
                             )
                         ).all()
                     )
             policies = [
                 item
                 for item in session.scalars(
-                    select(CapitalAutomationPolicy).where(
-                        CapitalAutomationPolicy.team_id == team_id,
-                        CapitalAutomationPolicy.environment == environment,
+                    select(models.CapitalAutomationPolicy).where(
+                        models.CapitalAutomationPolicy.team_id == team_id,
+                        models.CapitalAutomationPolicy.environment == environment,
                     )
                 ).all()
-                if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+                if self.can_user(user_id, "capital.view", item.account_id, item.venue)
             ]
             object_ids.update(str(item.policy_id) for item in policies)
             if not object_ids:
                 return []
             events = session.scalars(
-                select(AuditEvent)
+                select(models.AuditEvent)
                 .where(
-                    AuditEvent.object_id.in_(object_ids),
-                    AuditEvent.workspace_id == workspace_id,
-                    AuditEvent.team_id == team_id,
+                    models.AuditEvent.object_id.in_(object_ids),
+                    models.AuditEvent.workspace_id == workspace_id,
+                    models.AuditEvent.team_id == team_id,
                 )
-                .order_by(AuditEvent.created_at.desc(), AuditEvent.audit_event_id)
+                .order_by(models.AuditEvent.created_at.desc(), models.AuditEvent.audit_event_id)
                 .limit(limit)
             ).all()
             parsed_actor_ids = {
                 item.actor_id: parsed
                 for item in events
-                if (parsed := _uuid_or_none(item.actor_id)) is not None
+                if (parsed := uuid_or_none(item.actor_id)) is not None
             }
             actors = {
                 item.user_id: item.username
                 for item in session.scalars(
-                    select(User).where(User.user_id.in_(parsed_actor_ids.values()))
+                    select(models.User).where(models.User.user_id.in_(parsed_actor_ids.values()))
                 ).all()
             }
             return [
@@ -672,16 +907,16 @@ class ExecutionQueries(QueryComponent):
                     "correlation_id": str(item.correlation_id),
                     "idempotency_key": item.idempotency_key,
                     "object_version": item.object_version,
-                    "created_at": _iso(item.created_at),
+                    "created_at": iso_datetime(item.created_at),
                 }
                 for item in events
             ]
 
     def runtime_snapshot(self, user_id: UUID) -> dict[str, Any]:
-        _workspace_id, team_id = self._active_scope_ids(user_id)
+        _workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
             gates = session.scalars(
-                select(CapabilityGate).order_by(CapabilityGate.capability_key)
+                select(models.CapabilityGate).order_by(models.CapabilityGate.capability_key)
             ).all()
             revision = session.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
             table_count = session.execute(
@@ -690,35 +925,35 @@ class ExecutionQueries(QueryComponent):
                     "WHERE table_schema = 'public' AND table_name <> 'alembic_version'"
                 )
             ).scalar_one()
-            perptape_feed = session.get(PerptapeFeed, (team_id, "BREAKOUTS"))
+            perptape_feed = session.get(models.PerptapeFeed, (team_id, "BREAKOUTS"))
             source_health = session.scalars(
-                select(RuntimeSourceHealth)
-                .where(RuntimeSourceHealth.team_id == team_id)
+                select(models.RuntimeSourceHealth)
+                .where(models.RuntimeSourceHealth.team_id == team_id)
                 .order_by(
-                    RuntimeSourceHealth.source_name,
-                    RuntimeSourceHealth.account_id,
+                    models.RuntimeSourceHealth.source_name,
+                    models.RuntimeSourceHealth.account_id,
                 )
             ).all()
             runtime_binding_counts = {
                 venue: int(count)
                 for venue, count in session.execute(
-                    select(ExchangeAccount.venue, func.count())
+                    select(models.ExchangeAccount.venue, func.count())
                     .where(
-                        ExchangeAccount.team_id == team_id,
-                        ExchangeAccount.runtime_sync_enabled.is_(True),
+                        models.ExchangeAccount.team_id == team_id,
+                        models.ExchangeAccount.runtime_sync_enabled.is_(True),
                     )
-                    .group_by(ExchangeAccount.venue)
+                    .group_by(models.ExchangeAccount.venue)
                 ).all()
             }
             freqtrade_binding_counts = {
                 venue: int(count)
                 for venue, count in session.execute(
-                    select(ExchangeAccount.venue, func.count())
+                    select(models.ExchangeAccount.venue, func.count())
                     .where(
-                        ExchangeAccount.team_id == team_id,
-                        ExchangeAccount.freqtrade_worker_mode != "UNCONFIGURED",
+                        models.ExchangeAccount.team_id == team_id,
+                        models.ExchangeAccount.freqtrade_worker_mode != "UNCONFIGURED",
                     )
-                    .group_by(ExchangeAccount.venue)
+                    .group_by(models.ExchangeAccount.venue)
                 ).all()
             }
             return {
@@ -729,7 +964,7 @@ class ExecutionQueries(QueryComponent):
                     item.capability_key: {
                         "status": item.status,
                         "reason": item.reason,
-                        "updated_at": _iso(item.updated_at),
+                        "updated_at": iso_datetime(item.updated_at),
                     }
                     for item in gates
                 },
@@ -738,9 +973,9 @@ class ExecutionQueries(QueryComponent):
                         "available": True,
                         "contract_version": perptape_feed.contract_version,
                         "candidate_count": len(perptape_feed.candidates),
-                        "generated_at": _iso(perptape_feed.generated_at),
-                        "fetched_at": _iso(perptape_feed.fetched_at),
-                        "updated_at": _iso(perptape_feed.updated_at),
+                        "generated_at": iso_datetime(perptape_feed.generated_at),
+                        "fetched_at": iso_datetime(perptape_feed.fetched_at),
+                        "updated_at": iso_datetime(perptape_feed.updated_at),
                     }
                     if perptape_feed is not None
                     else {
@@ -763,9 +998,9 @@ class ExecutionQueries(QueryComponent):
                         "venue": item.venue,
                         "items_observed": item.items_observed,
                         "error_code": item.error_code,
-                        "checked_at": _iso(item.checked_at),
-                        "last_success_at": _iso(item.last_success_at),
-                        "retry_at": _iso(item.retry_at),
+                        "checked_at": iso_datetime(item.checked_at),
+                        "last_success_at": iso_datetime(item.last_success_at),
+                        "retry_at": iso_datetime(item.retry_at),
                         "consecutive_failures": item.consecutive_failures,
                     }
                     for item in source_health
@@ -782,14 +1017,14 @@ class ExecutionQueries(QueryComponent):
         account_id: str | None = None,
         venue: str | None = None,
     ) -> dict[str, Any] | None:
-        _workspace_id, team_id = self._active_scope_ids(user_id)
+        _workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
             item = session.scalar(
-                select(RuntimeSourceHealth).where(
-                    RuntimeSourceHealth.team_id == team_id,
-                    RuntimeSourceHealth.source_name == source_name,
-                    RuntimeSourceHealth.account_id == account_id,
-                    RuntimeSourceHealth.venue == venue,
+                select(models.RuntimeSourceHealth).where(
+                    models.RuntimeSourceHealth.team_id == team_id,
+                    models.RuntimeSourceHealth.source_name == source_name,
+                    models.RuntimeSourceHealth.account_id == account_id,
+                    models.RuntimeSourceHealth.venue == venue,
                 )
             )
             if item is None:
@@ -800,24 +1035,27 @@ class ExecutionQueries(QueryComponent):
                 "venue": item.venue,
                 "items_observed": item.items_observed,
                 "error_code": item.error_code,
-                "checked_at": _iso(item.checked_at),
-                "last_success_at": _iso(item.last_success_at),
-                "retry_at": _iso(item.retry_at),
+                "checked_at": iso_datetime(item.checked_at),
+                "last_success_at": iso_datetime(item.last_success_at),
+                "retry_at": iso_datetime(item.retry_at),
                 "consecutive_failures": item.consecutive_failures,
             }
 
     def list_campaigns(self, user_id: UUID) -> list[dict[str, Any]]:
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
             values = session.execute(
-                select(Campaign, Instrument)
-                .outerjoin(Instrument, Instrument.instrument_id == Campaign.instrument_id)
-                .where(Campaign.team_id == team_id)
-                .order_by(Campaign.updated_at.desc(), Campaign.campaign_id)
+                select(models.Campaign, models.Instrument)
+                .outerjoin(
+                    models.Instrument,
+                    models.Instrument.instrument_id == models.Campaign.instrument_id,
+                )
+                .where(models.Campaign.team_id == team_id)
+                .order_by(models.Campaign.updated_at.desc(), models.Campaign.campaign_id)
             ).all()
             result: list[dict[str, Any]] = []
             for campaign, instrument in values:
-                if not self.service.can_user(user_id, "view", campaign.account_id, campaign.venue):
+                if not self.can_user(user_id, "view", campaign.account_id, campaign.venue):
                     continue
                 summary = self._campaign_summary(campaign, instrument)
                 summary["workspace_id"] = str(workspace_id)
@@ -825,68 +1063,70 @@ class ExecutionQueries(QueryComponent):
             return result
 
     def campaign_detail(self, user_id: UUID, campaign_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
-            campaign = session.get(Campaign, campaign_id)
+            campaign = session.get(models.Campaign, campaign_id)
             if campaign is None:
-                raise DomainRejected("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+                raise domain.DomainRejected("CAMPAIGN_NOT_FOUND", "campaign does not exist")
             if campaign.team_id != team_id:
-                raise DomainRejected("TEAM_SCOPE_DENIED", "campaign is outside active team")
-            if not self.service.can_user(user_id, "view", campaign.account_id, campaign.venue):
-                raise DomainRejected("RBAC_DENIED", "campaign is outside the current scope")
-            instrument = session.get(Instrument, campaign.instrument_id)
-            proposal = session.get(Proposal, campaign.proposal_id)
-            authorization = session.get(TradingAuthorization, campaign.authorization_id)
-            auto_add_gate = session.get(CapabilityGate, "AUTO_ADD")
+                raise domain.DomainRejected("TEAM_SCOPE_DENIED", "campaign is outside active team")
+            if not self.can_user(user_id, "view", campaign.account_id, campaign.venue):
+                raise domain.DomainRejected("RBAC_DENIED", "campaign is outside the current scope")
+            instrument = session.get(models.Instrument, campaign.instrument_id)
+            proposal = session.get(models.Proposal, campaign.proposal_id)
+            authorization = session.get(models.TradingAuthorization, campaign.authorization_id)
+            auto_add_gate = session.get(models.CapabilityGate, "AUTO_ADD")
             reservations = session.scalars(
-                select(RiskReservation)
-                .where(RiskReservation.campaign_id == campaign_id)
-                .order_by(RiskReservation.created_at)
+                select(models.RiskReservation)
+                .where(models.RiskReservation.campaign_id == campaign_id)
+                .order_by(models.RiskReservation.created_at)
             ).all()
             intents = session.scalars(
-                select(OrderIntent)
-                .where(OrderIntent.campaign_id == campaign_id)
-                .order_by(OrderIntent.created_at, OrderIntent.intent_id)
+                select(models.OrderIntent)
+                .where(models.OrderIntent.campaign_id == campaign_id)
+                .order_by(models.OrderIntent.created_at, models.OrderIntent.intent_id)
             ).all()
             intent_ids = [item.intent_id for item in intents]
             orders = (
                 session.scalars(
-                    select(VenueOrder).where(VenueOrder.order_intent_id.in_(intent_ids))
+                    select(models.VenueOrder).where(
+                        models.VenueOrder.order_intent_id.in_(intent_ids)
+                    )
                 ).all()
                 if intent_ids
                 else []
             )
             fills = session.scalars(
-                select(VenueFill)
-                .where(VenueFill.campaign_id == campaign_id)
-                .order_by(VenueFill.executed_at, VenueFill.venue_fill_fact_id)
+                select(models.VenueFill)
+                .where(models.VenueFill.campaign_id == campaign_id)
+                .order_by(models.VenueFill.executed_at, models.VenueFill.venue_fill_fact_id)
             ).all()
             position = find_position_for_scope(session, campaign)
             protection = (
                 session.scalar(
-                    select(ProtectionOrder).where(
-                        ProtectionOrder.position_id == position.position_id
+                    select(models.ProtectionOrder).where(
+                        models.ProtectionOrder.position_id == position.position_id
                     )
                 )
                 if position is not None
                 else None
             )
             funding = session.scalars(
-                select(FundingPayment)
-                .where(FundingPayment.campaign_id == campaign_id)
-                .order_by(FundingPayment.paid_at)
+                select(models.FundingPayment)
+                .where(models.FundingPayment.campaign_id == campaign_id)
+                .order_by(models.FundingPayment.paid_at)
             ).all()
             scope = f"{campaign.environment}:{campaign.account_id}:{campaign.venue}"
             reconciliation = session.scalar(
-                select(ReconciliationRun)
+                select(models.ReconciliationRun)
                 .where(
-                    ReconciliationRun.team_id == campaign.team_id,
-                    ReconciliationRun.execution_scope == scope,
+                    models.ReconciliationRun.team_id == campaign.team_id,
+                    models.ReconciliationRun.execution_scope == scope,
                 )
-                .order_by(ReconciliationRun.completed_at.desc())
+                .order_by(models.ReconciliationRun.completed_at.desc())
                 .limit(1)
             )
-            lease = session.get(SenderLease, (campaign.team_id, scope))
+            lease = session.get(models.SenderLease, (campaign.team_id, scope))
             orders_by_intent = {item.order_intent_id: item for item in orders}
             result = self._campaign_summary(campaign, instrument)
             result["workspace_id"] = str(workspace_id)
@@ -905,11 +1145,14 @@ class ExecutionQueries(QueryComponent):
                         "environment": authorization.environment,
                         "active": authorization.active,
                         "quantity_limit": str(authorization.quantity_limit),
+                        "leverage": (
+                            None if authorization.leverage is None else str(authorization.leverage)
+                        ),
                         "used_quantity": str(authorization.used_quantity),
                         "allowed_adds": authorization.allowed_adds,
                         "used_adds": authorization.used_adds,
-                        "add_revoked_at": _iso(authorization.add_revoked_at),
-                        "expires_at": _iso(authorization.expires_at),
+                        "add_revoked_at": iso_datetime(authorization.add_revoked_at),
+                        "expires_at": iso_datetime(authorization.expires_at),
                     },
                     "reservations": [
                         {
@@ -920,8 +1163,8 @@ class ExecutionQueries(QueryComponent):
                             "status": item.status,
                             "amount": str(item.amount),
                             "version": item.version,
-                            "created_at": _iso(item.created_at),
-                            "updated_at": _iso(item.updated_at),
+                            "created_at": iso_datetime(item.created_at),
+                            "updated_at": iso_datetime(item.updated_at),
                         }
                         for item in reservations
                     ],
@@ -934,14 +1177,30 @@ class ExecutionQueries(QueryComponent):
                             "kind": item.kind,
                             "side": item.side,
                             "quantity": str(item.quantity),
+                            "leverage": None if item.leverage is None else str(item.leverage),
                             "limit_price": (
                                 None if item.limit_price is None else str(item.limit_price)
                             ),
                             "reduce_only": item.reduce_only,
                             "trigger_source": item.trigger_source,
-                            "trigger_observed_at": _iso(item.trigger_observed_at),
+                            "trigger_observed_at": iso_datetime(item.trigger_observed_at),
                             "add_unit_consumed": item.add_unit_consumed,
                             "status": item.status,
+                            "execution_blocker": (
+                                None
+                                if item.execution_blocker_code is None
+                                else {
+                                    "code": item.execution_blocker_code,
+                                    "reason": item.execution_blocker_reason,
+                                    "component": item.execution_blocker_component,
+                                    "next_action": item.execution_blocker_next_action,
+                                    "occurred_at": iso_datetime(item.execution_blocked_at),
+                                    "last_checked_at": iso_datetime(
+                                        item.execution_last_checked_at
+                                    ),
+                                    "retry_at": iso_datetime(item.execution_retry_at),
+                                }
+                            ),
                             "dispatch": (
                                 None
                                 if item.dispatch_backend is None
@@ -949,12 +1208,12 @@ class ExecutionQueries(QueryComponent):
                                     "backend": item.dispatch_backend,
                                     "account_version": item.dispatch_account_version,
                                     "auth_version": item.dispatch_auth_version,
-                                    "started_at": _iso(item.dispatch_started_at),
+                                    "started_at": iso_datetime(item.dispatch_started_at),
                                 }
                             ),
                             "version": item.version,
-                            "created_at": _iso(item.created_at),
-                            "updated_at": _iso(item.updated_at),
+                            "created_at": iso_datetime(item.created_at),
+                            "updated_at": iso_datetime(item.updated_at),
                             "order": self._order_summary(
                                 orders_by_intent.get(item.intent_id),
                                 workspace_id=workspace_id,
@@ -978,7 +1237,7 @@ class ExecutionQueries(QueryComponent):
                             "fee": str(item.fee),
                             "fee_currency": item.fee_currency,
                             "slippage_cost": str(item.slippage_cost),
-                            "executed_at": _iso(item.executed_at),
+                            "executed_at": iso_datetime(item.executed_at),
                         }
                         for item in fills
                     ],
@@ -993,7 +1252,7 @@ class ExecutionQueries(QueryComponent):
                         "average_entry_price": str(position.average_entry_price),
                         "mark_price": str(position.mark_price),
                         "fact_status": position.fact_status,
-                        "observed_at": _iso(position.observed_at),
+                        "observed_at": iso_datetime(position.observed_at),
                     },
                     "protection": None
                     if protection is None
@@ -1004,7 +1263,7 @@ class ExecutionQueries(QueryComponent):
                         "trigger_price": str(protection.trigger_price),
                         "status": protection.status,
                         "fully_covered": protection.fully_covered,
-                        "observed_at": _iso(protection.observed_at),
+                        "observed_at": iso_datetime(protection.observed_at),
                     },
                     "funding": [
                         {
@@ -1014,7 +1273,7 @@ class ExecutionQueries(QueryComponent):
                             "account_id": campaign.account_id,
                             "amount": str(item.amount),
                             "currency": item.currency,
-                            "paid_at": _iso(item.paid_at),
+                            "paid_at": iso_datetime(item.paid_at),
                         }
                         for item in funding
                     ],
@@ -1029,7 +1288,7 @@ class ExecutionQueries(QueryComponent):
                         "is_computed": reconciliation.is_computed,
                         "differences": reconciliation.differences,
                         "resolution_reason": reconciliation.resolution_reason,
-                        "completed_at": _iso(reconciliation.completed_at),
+                        "completed_at": iso_datetime(reconciliation.completed_at),
                     },
                     "sender_lease": None
                     if lease is None
@@ -1037,7 +1296,7 @@ class ExecutionQueries(QueryComponent):
                         "execution_scope": lease.execution_scope,
                         "owner_id": lease.owner_id,
                         "fencing_token": lease.fencing_token,
-                        "expires_at": _iso(lease.expires_at),
+                        "expires_at": iso_datetime(lease.expires_at),
                     },
                     "management": {
                         "auto_add_gate": (
@@ -1084,24 +1343,24 @@ class ExecutionQueries(QueryComponent):
             return result
 
     def campaign_id_for_intent(self, user_id: UUID, intent_id: UUID) -> UUID:
-        _workspace_id, team_id = self._active_scope_ids(user_id)
+        _workspace_id, team_id = self.active_scope_ids(user_id)
         with self.database.session_factory() as session:
-            intent = session.get(OrderIntent, intent_id)
+            intent = session.get(models.OrderIntent, intent_id)
             if intent is None:
-                raise DomainRejected("ORDER_INTENT_NOT_FOUND", "intent does not exist")
-            campaign = session.get(Campaign, intent.campaign_id)
+                raise domain.DomainRejected("ORDER_INTENT_NOT_FOUND", "intent does not exist")
+            campaign = session.get(models.Campaign, intent.campaign_id)
             if campaign is None:
-                raise DomainRejected("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
+                raise domain.DomainRejected("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
             if campaign.team_id != team_id:
-                raise DomainRejected("TEAM_SCOPE_DENIED", "intent is outside active team")
-            if not self.service.can_user(user_id, "view", campaign.account_id, campaign.venue):
-                raise DomainRejected("RBAC_DENIED", "intent is outside the current scope")
+                raise domain.DomainRejected("TEAM_SCOPE_DENIED", "intent is outside active team")
+            if not self.can_user(user_id, "view", campaign.account_id, campaign.venue):
+                raise domain.DomainRejected("RBAC_DENIED", "intent is outside the current scope")
             return campaign.campaign_id
 
     @staticmethod
     @staticmethod
     def _order_summary(
-        order: VenueOrder | None,
+        order: models.VenueOrder | None,
         *,
         workspace_id: UUID | None = None,
         team_id: UUID | None = None,
@@ -1122,12 +1381,12 @@ class ExecutionQueries(QueryComponent):
             "reduce_only": order.reduce_only,
             "ordered_quantity": str(order.ordered_quantity),
             "filled_quantity": str(order.filled_quantity),
-            "observed_at": _iso(order.observed_at),
+            "observed_at": iso_datetime(order.observed_at),
         }
 
     @staticmethod
     def _campaign_summary(
-        campaign: Campaign, instrument: Instrument | None = None
+        campaign: models.Campaign, instrument: models.Instrument | None = None
     ) -> dict[str, Any]:
         return {
             "campaign_id": str(campaign.campaign_id),
@@ -1146,68 +1405,10 @@ class ExecutionQueries(QueryComponent):
             "target_version": campaign.target_version,
             "target_reason": campaign.target_reason,
             "target_urgency": campaign.target_urgency,
-            "target_calculated_at": _iso(campaign.target_calculated_at),
+            "target_calculated_at": iso_datetime(campaign.target_calculated_at),
             "realized_pnl": str(campaign.realized_pnl),
             "unrealized_pnl": str(campaign.unrealized_pnl),
             "final_pnl": str(campaign.final_pnl),
-            "created_at": _iso(campaign.created_at),
-            "updated_at": _iso(campaign.updated_at),
-        }
-
-    @staticmethod
-    def _proposal_summary(
-        proposal: Proposal, instrument: Instrument | None = None
-    ) -> dict[str, Any]:
-        details = proposal.frozen_payload.get("details", {})
-        candidate = details.get("candidate", {}) if isinstance(details, dict) else {}
-        reference_price = (
-            details.get("trigger_price")
-            or candidate.get("reference_price")
-            or candidate.get("threshold_price")
-            if isinstance(details, dict) and isinstance(candidate, dict)
-            else None
-        )
-        try:
-            estimated_notional = (
-                None
-                if reference_price is None
-                else (
-                    proposal.quantity
-                    * Decimal(str(reference_price))
-                    * (Decimal(1) if instrument is None else instrument.contract_multiplier)
-                ).quantize(Decimal("0.000000000000000001"))
-            )
-        except (ArithmeticError, TypeError, ValueError):
-            estimated_notional = None
-        return {
-            "proposal_id": str(proposal.proposal_id),
-            "team_id": str(proposal.team_id),
-            "source": proposal.source,
-            "environment": proposal.environment,
-            "proposer_id": str(proposal.proposer_id),
-            "strategy_id": proposal.strategy_id,
-            "strategy_version": proposal.strategy_version,
-            "source_candidate_id": proposal.source_candidate_id,
-            "source_link": proposal.source_link,
-            "source_observed_at": _iso(proposal.source_observed_at),
-            "source_readiness": proposal.source_readiness,
-            "signal_event_id": (
-                None if proposal.signal_event_id is None else str(proposal.signal_event_id)
-            ),
-            "status": proposal.status,
-            "version": proposal.version,
-            "risk_tier": proposal.risk_tier,
-            "account_id": proposal.account_id,
-            "venue": proposal.venue,
-            "instrument_id": str(proposal.instrument_id),
-            "symbol": None if instrument is None else instrument.symbol,
-            "quote_currency": None if instrument is None else instrument.quote_currency,
-            "collateral_currency": (None if instrument is None else instrument.collateral_currency),
-            "direction": proposal.direction,
-            "quantity": str(proposal.quantity),
-            "estimated_notional": (None if estimated_notional is None else str(estimated_notional)),
-            "max_risk": str(proposal.max_risk),
-            "expires_at": _iso(proposal.expires_at),
-            "created_at": _iso(proposal.created_at),
-            "updated_at": _iso(proposal.updated_at),
+            "created_at": iso_datetime(campaign.created_at),
+            "updated_at": iso_datetime(campaign.updated_at),
         }

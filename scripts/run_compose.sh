@@ -4,6 +4,7 @@ set -euo pipefail
 profiles=(--profile console)
 notification_delivery=false
 runtime_sync=false
+automatic_execution=false
 for option in "$@"; do
   case "$option" in
     --runtime)
@@ -22,8 +23,16 @@ for option in "$@"; do
       profiles+=(--profile notifications)
       notification_delivery=true
       ;;
+    --execution)
+      if [[ $automatic_execution == true ]]; then
+        echo "duplicate option: --execution" >&2
+        exit 2
+      fi
+      profiles+=(--profile execution)
+      automatic_execution=true
+      ;;
     *)
-      echo "usage: $0 [--runtime] [--notifications]" >&2
+      echo "usage: $0 [--runtime] [--notifications] [--execution]" >&2
       exit 2
       ;;
   esac
@@ -64,6 +73,7 @@ values = {
     ),
     "TRADING_SESSION_SIGNING_SECRET": secrets.token_urlsafe(48),
     "TRADING_CREDENTIAL_ENCRYPTION_KEY": credential_key,
+    "TRADING_FACT_ADAPTER_BEARER_TOKEN": secrets.token_urlsafe(48),
     "TRADING_LOCAL_ADMIN_PASSWORD": admin_password,
     "TRADING_LOCAL_ADMIN_USERNAME": os.environ.get(
         "TRADING_LOCAL_ADMIN_USERNAME", "trading-admin"
@@ -79,10 +89,39 @@ password_path.chmod(0o600)
 PY
 fi
 
+if ! grep -q '^TRADING_FACT_ADAPTER_BEARER_TOKEN=.' "$env_file"; then
+  umask 077
+  printf 'TRADING_FACT_ADAPTER_BEARER_TOKEN=%s\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')" >>"$env_file"
+  chmod 600 "$env_file"
+fi
+
+persist_runtime_default() {
+  local key="$1"
+  local value="$2"
+  if ! grep -q "^${key}=" "$env_file"; then
+    printf '%s=%s\n' "$key" "$value" >>"$env_file"
+  fi
+}
+
+public_port="${TRADING_PUBLIC_PORT:-8000}"
+if [[ ! "$public_port" =~ ^[0-9]+$ ]] || (( public_port < 1 || public_port > 65535 )); then
+  echo "TRADING_PUBLIC_PORT must be an integer between 1 and 65535" >&2
+  exit 2
+fi
+perptape_websocket_enabled="${TRADING_PERPTAPE_WEBSOCKET_ENABLED:-false}"
+if [[ "$perptape_websocket_enabled" != "true" && "$perptape_websocket_enabled" != "false" ]]; then
+  echo "TRADING_PERPTAPE_WEBSOCKET_ENABLED must be true or false" >&2
+  exit 2
+fi
+persist_runtime_default TRADING_PUBLIC_PORT "$public_port"
+persist_runtime_default TRADING_PERPTAPE_WEBSOCKET_ENABLED "$perptape_websocket_enabled"
+chmod 600 "$env_file"
+
 required_variables=(
   TRADING_DATABASE_URL
   TRADING_SESSION_SIGNING_SECRET
   TRADING_CREDENTIAL_ENCRYPTION_KEY
+  TRADING_FACT_ADAPTER_BEARER_TOKEN
   TRADING_LOCAL_ADMIN_PASSWORD
   TRADING_LOCAL_ADMIN_USERNAME
 )
@@ -104,5 +143,10 @@ if [[ $runtime_sync == true ]]; then
   echo "Read-only runtime synchronization: enabled by explicit --runtime profile"
 else
   echo "Read-only runtime synchronization: disabled (add --runtime to enable the worker)"
+fi
+if [[ $automatic_execution == true ]]; then
+  echo "Approved-trade execution: enabled; database Gates and exact account bindings remain authoritative"
+else
+  echo "Approved-trade execution: disabled (add --execution to enable the worker)"
 fi
 exec docker compose --env-file "$env_file" "${profiles[@]}" up --build

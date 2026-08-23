@@ -75,6 +75,7 @@ def build_direct_capital_plan(
     amount: Decimal,
     settings: Settings,
     capital_transfer_gate: str | None,
+    binance_capital_credentials_configured: bool | None = None,
     now: datetime,
 ) -> DirectCapitalPlan:
     """Build a fully explicit, non-broadcasting capital path plan."""
@@ -131,9 +132,12 @@ def build_direct_capital_plan(
             and withdrawal_address.lower() != vault_address.lower()
         ):
             blockers.append("CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_SCOPE_MISMATCH")
-    if venue == "BINANCE" and not (
-        settings.binance_capital_api_key and settings.binance_capital_api_secret
-    ):
+    binance_credentials_ready = (
+        bool(settings.binance_capital_api_key and settings.binance_capital_api_secret)
+        if binance_capital_credentials_configured is None
+        else binance_capital_credentials_configured
+    )
+    if venue == "BINANCE" and not binance_credentials_ready:
         blockers.append("BINANCE_CAPITAL_CREDENTIALS_MISSING")
     for code, value in required.items():
         if not value:
@@ -148,8 +152,36 @@ def build_direct_capital_plan(
         blockers.append("CAPITAL_TRANSFER_GATE_DISABLED")
 
     max_fee = settings.capital_direct_max_fee
-    min_received = None if max_fee is None or amount <= max_fee else amount - max_fee
-    if max_fee is not None and amount <= max_fee:
+    fee_is_deducted_from_usdc = path in {
+        DirectCapitalPath.BINANCE_TO_VAULT,
+        DirectCapitalPath.HYPERLIQUID_TO_VAULT,
+    }
+    # Binance and Hyperliquid expose the exact active route fee during their
+    # frozen preflight. The shared configuration value is only an upper safety
+    # bound, so it must not invalidate a withdrawal before that live fee is read.
+    fee_is_known_at_plan_time = False
+    invalid_min_received = (
+        fee_is_deducted_from_usdc
+        and fee_is_known_at_plan_time
+        and max_fee is not None
+        and amount <= max_fee
+    )
+    min_received = (
+        None
+        if (
+            max_fee is None
+            or invalid_min_received
+            or path
+            in {
+                DirectCapitalPath.BINANCE_TO_VAULT,
+                DirectCapitalPath.HYPERLIQUID_TO_VAULT,
+            }
+        )
+        else amount - max_fee
+        if fee_is_deducted_from_usdc
+        else amount
+    )
+    if invalid_min_received:
         blockers.append("CAPITAL_MIN_RECEIVED_INVALID")
 
     execute_after: datetime | None = None
@@ -161,8 +193,14 @@ def build_direct_capital_plan(
             {"code": "BUILD_SAFE_ALLOWANCE_SIGNATURE_REQUEST", "status": "BLOCKED"},
             {"code": "HUMAN_DELEGATE_SIGNATURE_AND_SUBMISSION", "status": "BLOCKED"},
             {"code": "VERIFY_SAFE_TRANSFER_RECEIPT", "status": "BLOCKED"},
+            {"code": "TRANSFER_BINANCE_SPOT_TO_USDM", "status": "BLOCKED"},
         )
-        blockers.append("SAFE_ALLOWANCE_PREFLIGHT_REQUIRED")
+        blockers.extend(
+            (
+                "SAFE_ALLOWANCE_PREFLIGHT_REQUIRED",
+                "BINANCE_DEPOSIT_PREFLIGHT_REQUIRED",
+            )
+        )
     elif is_safe and path is DirectCapitalPath.VAULT_TO_HYPERLIQUID:
         stages = (
             {"code": "READ_SAFE_SPENDING_LIMIT", "status": "BLOCKED"},
@@ -180,8 +218,7 @@ def build_direct_capital_plan(
     elif is_safe and path is DirectCapitalPath.HYPERLIQUID_TO_VAULT:
         stages = (
             {"code": "WITHDRAW_FROM_HYPERLIQUID_CONTRACT", "status": "BLOCKED"},
-            {"code": "RECEIVE_AT_AUTHORIZED_OWNED_ADDRESS", "status": "BLOCKED"},
-            {"code": "BUILD_EXACT_USDC_TRANSFER_TO_SAFE", "status": "BLOCKED"},
+            {"code": "WITHDRAW_DIRECTLY_TO_SAFE", "status": "BLOCKED"},
             {"code": "HUMAN_WALLET_CONFIRMATION", "status": "BLOCKED"},
             {"code": "VERIFY_SAFE_BALANCE_RECEIPT", "status": "BLOCKED"},
         )
@@ -192,6 +229,7 @@ def build_direct_capital_plan(
                 "code": "RESTRICTED_BINANCE_WITHDRAWAL_TO_SELECTED_TREASURY",
                 "status": "BLOCKED",
             },
+            {"code": "TRANSFER_BINANCE_USDM_TO_SPOT", "status": "BLOCKED"},
             {"code": "VERIFY_BINANCE_WITHDRAWAL_RECEIPT", "status": "BLOCKED"},
             {"code": "VERIFY_SELECTED_TREASURY_CREDIT", "status": "BLOCKED"},
         )
@@ -207,6 +245,7 @@ def build_direct_capital_plan(
             },
             {"code": "REVALIDATE_RELEASE", "status": "BLOCKED"},
             {"code": "TRANSFER_TO_AUTHORIZED_BINANCE_ADDRESS", "status": "BLOCKED"},
+            {"code": "TRANSFER_BINANCE_SPOT_TO_USDM", "status": "BLOCKED"},
         )
         blockers.append("BINANCE_DEPOSIT_PREFLIGHT_REQUIRED")
     elif path is DirectCapitalPath.VAULT_TO_HYPERLIQUID:
@@ -237,6 +276,7 @@ def build_direct_capital_plan(
                 "code": "RESTRICTED_BINANCE_WITHDRAWAL_TO_SELECTED_TREASURY",
                 "status": "BLOCKED",
             },
+            {"code": "TRANSFER_BINANCE_USDM_TO_SPOT", "status": "BLOCKED"},
             {"code": "VERIFY_BINANCE_WITHDRAWAL_RECEIPT", "status": "BLOCKED"},
             {"code": "VERIFY_SELECTED_TREASURY_CREDIT", "status": "BLOCKED"},
         )

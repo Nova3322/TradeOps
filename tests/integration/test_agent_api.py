@@ -327,7 +327,7 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
             "direction": "LONG",
             "risk_tier": "LOW",
             "quantity": "0.01",
-            "max_risk": "25",
+            "max_risk": "50",
             "expires_in_minutes": 480,
             "trigger_price": "100000",
             "invalidation_price": "95000",

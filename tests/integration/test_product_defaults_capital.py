@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -11,8 +12,16 @@ from conftest import add_exchange_account_fixture
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
+from trading_control_plane.adapters.binance_capital import BinanceCapitalGateway
+from trading_control_plane.adapters.capital import ProductionCapitalAdapterFactory
+from trading_control_plane.adapters.hyperliquid_capital import (
+    ARBITRUM_NATIVE_USDC_ADDRESS,
+    CCTP_DESTINATION_SENTINEL,
+    ERC20_TRANSFER_TOPIC,
+    HYPERLIQUID_BRIDGE2_ADDRESS,
+    HyperliquidCapitalGateway,
+)
 from trading_control_plane.api import create_app
-from trading_control_plane.binance_capital import BinanceCapitalGateway
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
@@ -21,30 +30,50 @@ from trading_control_plane.domain import (
     ExecutionEnvironment,
     Role,
 )
-from trading_control_plane.hyperliquid_capital import (
-    ARBITRUM_NATIVE_USDC_ADDRESS,
-    ERC20_TRANSFER_TOPIC,
-    HYPERLIQUID_BRIDGE2_ADDRESS,
-    HyperliquidCapitalGateway,
-)
 from trading_control_plane.models import (
+    AccountEquity,
     AccountEquityObservation,
     Approval,
     AuditEvent,
     DirectCapitalOperation,
+    ExchangeAccount,
     OrderIntent,
     TradingAuthorization,
 )
 from trading_control_plane.notilt import NoTiltGateway
 from trading_control_plane.perptape import PerptapeClient, PerptapeFeedSnapshot
+from trading_control_plane.query_domains.capital import direct_capital_operation_summary
 from trading_control_plane.safe_spending import SafeSpendingGateway
 from trading_control_plane.service import TradingService
+
+TEST_CREDENTIAL_KEY = (
+    base64.urlsafe_b64encode(b"capital-hyperliquid-test-key-000").decode().rstrip("=")
+)
 
 
 def _add_live_accounts(database: Database, admin: UUID) -> None:
     add_exchange_account_fixture(database, admin, "binance-main", "BINANCE")
-    add_exchange_account_fixture(database, admin, "hyperliquid-main", "HYPERLIQUID")
     add_exchange_account_fixture(database, admin, "acct-live", "BINANCE")
+    service = TradingService(database, credential_encryption_key=TEST_CREDENTIAL_KEY)
+    account_pk = service.create_exchange_account(
+        actor_id=admin,
+        account_id="hyperliquid-main",
+        venue="HYPERLIQUID",
+        label="Hyperliquid LIVE integration account",
+        credentials={
+            "account_address": "0x2222222222222222222222222222222222222222",
+            "api_wallet_address": "0x6666666666666666666666666666666666666666",
+            "api_wallet_private_key": "0x" + "11" * 32,
+        },
+        idempotency_key="hyperliquid-live-integration-account",
+        now=datetime.now(UTC),
+    )
+    with database.session_factory.begin() as session:
+        account = session.get(ExchangeAccount, account_pk)
+        assert account is not None
+        account.connection_status = "VERIFIED"
+        account.last_connection_check_at = datetime.now(UTC)
+        account.last_verified_at = datetime.now(UTC)
 
 
 async def _login(client: AsyncClient, username: str) -> None:
@@ -89,12 +118,20 @@ def _app(
     hyperliquid_capital_gateway: HyperliquidCapitalGateway | None = None,
     binance_capital_gateway: BinanceCapitalGateway | None = None,
     binance_capital_withdraw_enabled: bool = False,
+    binance_capital_environment_credentials: bool | None = None,
+    credential_encryption_key: str | None = None,
 ):
+    environment_capital_credentials = (
+        binance_capital_withdraw_enabled or binance_capital_gateway is not None
+        if binance_capital_environment_credentials is None
+        else binance_capital_environment_credentials
+    )
     settings = Settings(
         environment="test",
         database_url=str(database.engine.url),
         allow_mock_identity=True,
         session_signing_secret="product-flows-test-signing-secret",  # noqa: S106
+        credential_encryption_key=credential_encryption_key or TEST_CREDENTIAL_KEY,
         runtime_sync_enabled=True,
         capital_direct_vault_id="vault-1",
         capital_direct_vault_address="0x1111111111111111111111111111111111111111",
@@ -103,11 +140,12 @@ def _app(
         capital_direct_binance_deposit_address=("0x3333333333333333333333333333333333333333"),
         capital_direct_binance_withdrawal_address=("0x1111111111111111111111111111111111111111"),
         binance_capital_api_key=(
-            "test-binance-capital-key" if binance_capital_withdraw_enabled else None
+            "test-binance-capital-key" if environment_capital_credentials else None
         ),
         binance_capital_api_secret=(
-            "test-binance-capital-secret" if binance_capital_withdraw_enabled else None
+            "test-binance-capital-secret" if environment_capital_credentials else None
         ),
+        binance_capital_account_id=("binance-main" if environment_capital_credentials else None),
         binance_capital_withdraw_enabled=binance_capital_withdraw_enabled,
         capital_direct_hyperliquid_account_id="hyperliquid-main",
         capital_direct_hyperliquid_bridge_address=HYPERLIQUID_BRIDGE2_ADDRESS,
@@ -131,15 +169,178 @@ def _app(
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
     )
+    binance_gateway = binance_capital_gateway or BinanceCapitalGateway(
+        api_key=settings.binance_capital_api_key,
+        api_secret=settings.binance_capital_api_secret,
+    )
+    hyperliquid_gateway = hyperliquid_capital_gateway or HyperliquidCapitalGateway()
+
+    def credential_resolver(scope):
+        binding = TradingService(
+            database,
+            credential_encryption_key=settings.credential_encryption_key,
+        ).verified_capital_account_binding(
+            workspace_id=UUID(scope.workspace_id),
+            team_id=UUID(scope.team_id),
+            account_id=scope.account_id,
+            venue=scope.venue,
+            environment=scope.environment,
+        )
+        return binding.credentials
+
     return create_app(
         settings,
         database,
         perptape,
         notilt_gateway=notilt_gateway,
         safe_spending_gateway=safe_spending_gateway,
-        hyperliquid_capital_gateway=hyperliquid_capital_gateway,
-        binance_capital_gateway=binance_capital_gateway,
+        capital_adapter_factory=ProductionCapitalAdapterFactory(
+            binance_account_id=settings.binance_capital_account_id,
+            binance_api_key=settings.binance_capital_api_key,
+            binance_api_secret=settings.binance_capital_api_secret,
+            binance_gateway=binance_gateway,
+            hyperliquid_gateway=hyperliquid_gateway,
+            credential_resolver=credential_resolver,
+        ),
     )
+
+
+def test_direct_hyperliquid_uses_verified_database_main_address_over_environment(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=TEST_CREDENTIAL_KEY)
+    admin = service.bootstrap_admin("database-hyperliquid-address-admin", now=now)
+    _add_live_accounts(database, admin)
+    with database.session_factory() as session:
+        account = session.scalar(
+            select(ExchangeAccount).where(
+                ExchangeAccount.account_id == "hyperliquid-main",
+                ExchangeAccount.venue == "HYPERLIQUID",
+            )
+        )
+        assert account is not None
+        exchange_account_id = account.exchange_account_id
+        account_version = account.version
+    database_main = "0x9999999999999999999999999999999999999999"
+    service.rotate_exchange_account_credentials(
+        exchange_account_id,
+        actor_id=admin,
+        credentials={
+            "account_address": database_main,
+            "api_wallet_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "api_wallet_private_key": "0x" + "22" * 32,
+        },
+        expected_version=account_version,
+        idempotency_key="rotate-database-hyperliquid-address",
+        now=now + timedelta(seconds=1),
+    )
+    with database.session_factory.begin() as session:
+        account = session.get(ExchangeAccount, exchange_account_id)
+        assert account is not None
+        account.connection_status = "VERIFIED"
+        account.last_connection_check_at = now + timedelta(seconds=2)
+        account.last_verified_at = now + timedelta(seconds=2)
+
+    operation_ids: list[UUID] = []
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=_app(database)),
+            base_url="http://test",
+        ) as client:
+            await _login(client, "database-hyperliquid-address-admin")
+            for index, path in enumerate(
+                ("VAULT_TO_HYPERLIQUID", "HYPERLIQUID_TO_VAULT")
+            ):
+                created = await client.post(
+                    "/api/capital/direct-operations",
+                    json={
+                        "path": path,
+                        "amount": "5",
+                        "final_confirmed": True,
+                        "idempotency_key": f"database-hyperliquid-address-{index}",
+                    },
+                )
+                assert created.status_code == 200, created.text
+                operation_ids.append(UUID(created.json()["operation_id"]))
+
+    asyncio.run(scenario())
+    with database.session_factory() as session:
+        outbound = session.get(DirectCapitalOperation, operation_ids[0])
+        inbound = session.get(DirectCapitalOperation, operation_ids[1])
+        assert outbound is not None and inbound is not None
+        assert outbound.destination_reference == database_main
+        assert inbound.source_reference == database_main
+        assert "0x2222222222222222222222222222222222222222" not in {
+            outbound.destination_reference,
+            inbound.source_reference,
+        }
+        assert (
+            direct_capital_operation_summary(
+                outbound,
+                now,
+                active_owned_arbitrum_address=database_main,
+            )["active_configuration_match"]
+            is True
+        )
+        assert (
+            direct_capital_operation_summary(
+                outbound,
+                now,
+                active_owned_arbitrum_address="0x2222222222222222222222222222222222222222",
+            )["active_configuration_match"]
+            is False
+        )
+
+
+def test_capital_configuration_requires_canonical_runtime_account_ids_not_display_names(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    now = datetime.now(UTC)
+    admin = service.bootstrap_admin("capital-account-selector-admin", now=now)
+    _add_live_accounts(database, admin)
+    with database.session_factory.begin() as session:
+        binance = session.scalar(
+            select(ExchangeAccount).where(
+                ExchangeAccount.account_id == "binance-main",
+                ExchangeAccount.venue == "BINANCE",
+            )
+        )
+        assert binance is not None
+        binance.label = "acct-1-xpd"
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=_app(database)),
+            base_url="http://test",
+        ) as client:
+            await _login(client, "capital-account-selector-admin")
+            display_name = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "binance_account_id": "acct-1-xpd",
+                    "idempotency_key": "reject-display-name-as-account-id",
+                },
+            )
+            assert display_name.status_code == 404, display_name.text
+            assert display_name.json()["error"]["code"] == "EXCHANGE_ACCOUNT_NOT_FOUND"
+
+            canonical_id = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "binance_account_id": "binance-main",
+                    "idempotency_key": "accept-canonical-runtime-account-id",
+                },
+            )
+            assert canonical_id.status_code == 200, canonical_id.text
+            assert (
+                canonical_id.json()["data"]["direct_configuration"]["binance_account_configured"]
+                is True
+            )
+
+    asyncio.run(scenario())
 
 
 def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after_receipts(
@@ -152,14 +353,29 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
     state: dict[str, object] = {}
     withdrawal_hash = "0x" + "ab" * 32
     withdrawal_arbitrum_hash = "0x" + "cd" * 32
-    treasury_hash = "0x" + "ef" * 32
     main = "0x2222222222222222222222222222222222222222"
     agent = "0x6666666666666666666666666666666666666666"
     safe = "0x7777777777777777777777777777777777777777"
 
     def info_fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
+        if payload["type"] == "usdcRouting":
+            return {"depositRoute": "cctp", "withdrawalRoute": "cctp"}
+        if payload["type"] == "userAbstraction":
+            return "default"
         if payload["type"] == "clearinghouseState":
             return {"withdrawable": "1000"}
+        if payload["type"] == "preTransferCheck":
+            return {"isSanctioned": False, "userExists": True, "fee": "0"}
+        if payload["type"] == "spotMeta":
+            return {
+                "tokens": [
+                    {
+                        "name": "USDC",
+                        "tokenId": "0x6d1e7cde53ba9467b783cb7c530ce054",
+                        "isCanonical": True,
+                    }
+                ]
+            }
         if payload["type"] == "userRole":
             assert payload["user"] == agent
             return {"role": "agent", "data": {"user": main}}
@@ -169,39 +385,51 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 "time": int(now.timestamp() * 1000),
                 "hash": withdrawal_hash,
                 "delta": {
-                    "type": "withdraw",
-                    "usdc": "100.000000000000000000",
-                    "nonce": state["nonce"],
-                    "fee": "1",
+                    "type": "send",
+                    "token": "USDC",
+                    "destination": CCTP_DESTINATION_SENTINEL,
+                    "amount": "100",
+                    "nonce": int(state["nonce"]),
+                    "fee": "0",
                 },
             }
         ]
 
-    bridge_topic = f"0x{HYPERLIQUID_BRIDGE2_ADDRESS[2:].rjust(64, '0')}"
-    main_topic = f"0x{main[2:].rjust(64, '0')}"
-    safe_transfer_data = "0xa9059cbb" + safe[2:].rjust(64, "0") + hex(99_000_000)[2:].rjust(64, "0")
+    cctp_sender = "0x9999999999999999999999999999999999999999"
+    cctp_sender_topic = f"0x{cctp_sender[2:].rjust(64, '0')}"
+    safe_topic = f"0x{safe[2:].rjust(64, '0')}"
 
     def rpc_fetcher(_url: str, method: str, params: list[object], _timeout: float) -> object:
         tx_hash = str(params[0]) if params else ""
+        if method == "eth_call":
+            return hex(5_100_000)
         if method == "eth_blockNumber":
             return "0x78"
         if method == "eth_getTransactionReceipt":
-            if tx_hash == withdrawal_arbitrum_hash:
-                return {
-                    "status": "0x1",
-                    "blockNumber": "0x64",
-                    "logs": [
-                        {
-                            "address": ARBITRUM_NATIVE_USDC_ADDRESS,
-                            "topics": [ERC20_TRANSFER_TOPIC, bridge_topic, main_topic],
-                            "data": hex(100_000_000),
-                        }
-                    ],
-                }
-            assert tx_hash == treasury_hash
-            return {"status": "0x1", "blockNumber": "0x64", "logs": []}
-        assert method == "eth_getTransactionByHash" and tx_hash == treasury_hash
-        return {"from": main, "to": ARBITRUM_NATIVE_USDC_ADDRESS, "input": safe_transfer_data}
+            assert tx_hash == withdrawal_arbitrum_hash
+            return {
+                "status": "0x1",
+                "blockNumber": "0x64",
+                "logs": [
+                    {
+                        "address": ARBITRUM_NATIVE_USDC_ADDRESS,
+                        "topics": [ERC20_TRANSFER_TOPIC, cctp_sender_topic, safe_topic],
+                        "data": hex(99_800_000),
+                    }
+                ],
+            }
+        raise AssertionError(method)
+
+    def cctp_fetcher(_url: str, params: dict[str, str], _timeout: float) -> object:
+        assert params == {"direction": "out", "user": main}
+        return [
+            {
+                "originChainId": 999,
+                "destinationChainId": 42161,
+                "nonce": str(state["nonce"]),
+                "fillTxnRef": withdrawal_arbitrum_hash,
+            }
+        ]
 
     def safe_executor(payload: dict[str, object]) -> dict[str, object]:
         if payload["operation"] == "read-limit":
@@ -210,22 +438,11 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 "moduleEnabled": True,
                 "balance": "90000000",
                 "available": "80000000",
+                "resetTimeMinutes": "1440",
+                "nonce": "7",
                 "blockTimestamp": str(int(now.timestamp())),
             }
-        assert payload["operation"] == "prepare-deposit"
-        return {
-            "kind": "SAFE_ERC20_DEPOSIT_UNSIGNED_TRANSACTION",
-            "chainId": 42161,
-            "safe": safe,
-            "sender": main,
-            "token": ARBITRUM_NATIVE_USDC_ADDRESS,
-            "amount": "99000000",
-            "to": ARBITRUM_NATIVE_USDC_ADDRESS,
-            "value": "0",
-            "data": safe_transfer_data,
-            "signing": False,
-            "broadcast": False,
-        }
+        raise AssertionError(payload["operation"])
 
     async def scenario() -> None:
         app = _app(
@@ -234,6 +451,7 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
             hyperliquid_capital_gateway=HyperliquidCapitalGateway(
                 info_fetcher=info_fetcher,
                 rpc_fetcher=rpc_fetcher,
+                cctp_fetcher=cctp_fetcher,
             ),
         )
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -274,6 +492,10 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
             state["nonce"] = artifact["nonce"]
             assert preview.json()["automatic_fallback"] is True
             assert preview.json()["agent_wallet"]["authorized"] is True
+            assert artifact["destination"] == safe
+            assert artifact["kind"] == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
+            assert artifact["expectedFee"] == "0.2"
+            assert artifact["minReceived"] == "99.8"
             assert artifact["signing"] is False and artifact["broadcast"] is False
             assert preview.json()["data"]["real_transfer_gate"] == "DISABLED"
 
@@ -290,6 +512,15 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 },
             )
             assert submitted.status_code == 200, submitted.text
+            submitted_operation = next(
+                item
+                for item in submitted.json()["data"]["direct_operations"]
+                if item["operation_id"] == operation_id
+            )
+            assert (
+                "HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED"
+                not in (submitted_operation["blockers"])
+            )
             ledger = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/hyperliquid-receipt",
                 json={
@@ -301,6 +532,8 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 },
             )
             assert ledger.status_code == 200, ledger.text
+            assert ledger.json()["receipt"]["amount"] == "100"
+            assert ledger.json()["receipt"]["nonce"] == artifact["nonce"]
             arbitrum = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/hyperliquid-receipt",
                 json={
@@ -311,46 +544,16 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 },
             )
             assert arbitrum.status_code == 200, arbitrum.text
-            assert arbitrum.json()["settlement"].endswith("TREASURY_RECEIPT_STILL_REQUIRED")
-
-            safe_preview = await client.post(
-                f"/api/capital/direct-operations/{operation_id}/safe-spending-preview",
-                json={
-                    "expected_version": 5,
-                    "final_confirmed": True,
-                    "idempotency_key": "hl-capital-safe-preview",
-                },
-            )
-            assert safe_preview.status_code == 200, safe_preview.text
-            treasury_submitted = await client.post(
-                f"/api/capital/direct-operations/{operation_id}/wallet-submission",
-                json={
-                    "expected_version": 6,
-                    "stage": "TREASURY_DEPOSIT",
-                    "outcome": "SUBMITTED",
-                    "transaction_hash": treasury_hash,
-                    "final_confirmed": True,
-                    "idempotency_key": "hl-capital-treasury-submitted",
-                },
-            )
-            assert treasury_submitted.status_code == 200, treasury_submitted.text
-            treasury = await client.post(
-                f"/api/capital/direct-operations/{operation_id}/treasury-receipt",
-                json={
-                    "expected_version": 7,
-                    "transaction_hash": treasury_hash,
-                    "idempotency_key": "hl-capital-treasury-receipt",
-                },
-            )
-            assert treasury.status_code == 200, treasury.text
+            assert arbitrum.json()["receipt"]["amount"] == "99.8"
+            assert arbitrum.json()["settlement"] == "CONFIRMED"
             operation = next(
                 item
-                for item in treasury.json()["data"]["direct_operations"]
+                for item in arbitrum.json()["data"]["direct_operations"]
                 if item["operation_id"] == operation_id
             )
             assert operation["status"] == "SETTLED"
             assert operation["receipt_status"] == "CONFIRMED"
-            assert treasury.json()["data"]["real_transfer_gate"] == "DISABLED"
+            assert arbitrum.json()["data"]["real_transfer_gate"] == "DISABLED"
 
     asyncio.run(scenario())
     with database.session_factory() as session:
@@ -358,7 +561,252 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
     assert "CAPITAL_HYPERLIQUID_WALLET_REQUEST_PREPARED" in events
     assert "CAPITAL_HUMAN_WALLET_SUBMISSION_RECORDED" in events
     assert "CAPITAL_HYPERLIQUID_RECEIPT_VERIFIED" in events
-    assert "CAPITAL_TREASURY_DESTINATION_RECEIPT_VERIFIED" in events
+    assert "CAPITAL_TREASURY_DESTINATION_RECEIPT_VERIFIED" not in events
+
+
+def test_safe_to_hyperliquid_requires_source_receipt_then_settles_both_legs(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    now = datetime.now(UTC)
+    admin = service.bootstrap_admin("safe-hyperliquid-deposit-admin", now=now)
+    _add_live_accounts(database, admin)
+    safe = "0x7777777777777777777777777777777777777777"
+    delegate = "0x8888888888888888888888888888888888888888"
+    main = "0x2222222222222222222222222222222222222222"
+    module = "0x9999999999999999999999999999999999999999"
+    source_hash = "0x" + "11" * 32
+    deposit_hash = "0x" + "22" * 32
+    safe_topic = f"0x{safe[2:].rjust(64, '0')}"
+    main_topic = f"0x{main[2:].rjust(64, '0')}"
+    bridge_topic = f"0x{HYPERLIQUID_BRIDGE2_ADDRESS[2:].rjust(64, '0')}"
+    deposit_data = (
+        "0xa9059cbb"
+        + HYPERLIQUID_BRIDGE2_ADDRESS[2:].rjust(64, "0")
+        + hex(5_100_000)[2:].rjust(64, "0")
+    )
+
+    def safe_executor(payload: dict[str, object]) -> dict[str, object]:
+        if payload["operation"] == "read-limit":
+            return {
+                "chainId": 42161,
+                "moduleEnabled": True,
+                "balance": "100000000",
+                "available": "100000000",
+                "resetTimeMinutes": "1440",
+                "nonce": "9",
+                "blockTimestamp": str(int(now.timestamp())),
+            }
+        assert payload["operation"] == "prepare-spend"
+        assert payload["recipient"] == main
+        return {
+            "kind": "SAFE_ALLOWANCE_SIGNATURE_REQUEST",
+            "chainId": 42161,
+            "module": module,
+            "safe": safe,
+            "delegate": delegate,
+            "recipient": main,
+            "token": ARBITRUM_NATIVE_USDC_ADDRESS,
+            "amount": "5100000",
+            "nonce": "9",
+            "transferHash": "0x" + "33" * 32,
+            "from": delegate,
+            "to": module,
+            "value": "0",
+            "data": "0x4515641a" + "00" * 64,
+            "calldataReady": True,
+            "signing": False,
+            "broadcast": False,
+        }
+
+    def info_fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
+        if payload["type"] == "userRole":
+            return {"role": "agent", "data": {"user": main}}
+        assert payload["type"] == "userNonFundingLedgerUpdates"
+        return [
+            {
+                "time": int(now.timestamp() * 1000),
+                "hash": deposit_hash,
+                "delta": {"type": "deposit", "usdc": "5.1"},
+            }
+        ]
+
+    wallet_state = {"usdc_raw": 0}
+
+    def rpc_fetcher(_url: str, method: str, params: list[object], _timeout: float) -> object:
+        tx_hash = str(params[0]) if params else ""
+        if method == "eth_call":
+            return hex(wallet_state["usdc_raw"])
+        if method == "eth_blockNumber":
+            return "0x78"
+        if method == "eth_getTransactionByHash":
+            assert tx_hash == deposit_hash
+            return {
+                "from": main,
+                "to": ARBITRUM_NATIVE_USDC_ADDRESS,
+                "input": deposit_data,
+            }
+        assert method == "eth_getTransactionReceipt"
+        if tx_hash == source_hash:
+            topics = [ERC20_TRANSFER_TOPIC, safe_topic, main_topic]
+        else:
+            assert tx_hash == deposit_hash
+            topics = [ERC20_TRANSFER_TOPIC, main_topic, bridge_topic]
+        return {
+            "status": "0x1",
+            "blockNumber": "0x64",
+            "logs": [
+                {
+                    "address": ARBITRUM_NATIVE_USDC_ADDRESS,
+                    "topics": topics,
+                    "data": hex(5_100_000),
+                }
+            ],
+        }
+
+    async def scenario() -> None:
+        app = _app(
+            database,
+            safe_spending_gateway=SafeSpendingGateway(executor=safe_executor),
+            hyperliquid_capital_gateway=HyperliquidCapitalGateway(
+                info_fetcher=info_fetcher,
+                rpc_fetcher=rpc_fetcher,
+            ),
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            await _login(client, "safe-hyperliquid-deposit-admin")
+            configured = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "treasury_provider": "SAFE_SPENDING_LIMIT",
+                    "safe_address": safe,
+                    "safe_delegate_address": delegate,
+                    "binance_withdrawal_address": safe,
+                    "idempotency_key": "safe-hyperliquid-config",
+                },
+            )
+            assert configured.status_code == 200, configured.text
+            created = await client.post(
+                "/api/capital/direct-operations",
+                json={
+                    "path": "VAULT_TO_HYPERLIQUID",
+                    "amount": "5.1",
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-hyperliquid-create",
+                },
+            )
+            operation_id = created.json()["operation_id"]
+            safe_preview = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/safe-spending-preview",
+                json={
+                    "expected_version": 1,
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-hyperliquid-source-preview",
+                },
+            )
+            assert safe_preview.status_code == 200, safe_preview.text
+            submitted = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/wallet-submission",
+                json={
+                    "expected_version": 2,
+                    "stage": "TREASURY_WITHDRAWAL",
+                    "outcome": "SUBMITTED",
+                    "transaction_hash": source_hash,
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-hyperliquid-source-submission",
+                },
+            )
+            assert submitted.status_code == 200, submitted.text
+            premature = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/hyperliquid-preview",
+                json={
+                    "expected_version": 3,
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-hyperliquid-premature-deposit",
+                },
+            )
+            assert premature.status_code == 422, premature.text
+            assert premature.json()["error"]["code"] == "TREASURY_SOURCE_RECEIPT_REQUIRED"
+            source_receipt = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/treasury-withdrawal-receipt",
+                json={
+                    "expected_version": 3,
+                    "transaction_hash": source_hash,
+                    "idempotency_key": "safe-hyperliquid-source-receipt",
+                },
+            )
+            assert source_receipt.status_code == 200, source_receipt.text
+            source_operation = next(
+                item
+                for item in source_receipt.json()["data"]["direct_operations"]
+                if item["operation_id"] == operation_id
+            )
+            assert source_operation["active_configuration_match"] is True
+            empty_wallet = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/hyperliquid-preview",
+                json={
+                    "expected_version": 4,
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-hyperliquid-empty-wallet",
+                },
+            )
+            assert empty_wallet.status_code == 422, empty_wallet.text
+            assert (
+                empty_wallet.json()["error"]["code"] == "HYPERLIQUID_DEPOSIT_BALANCE_INSUFFICIENT"
+            )
+            wallet_state["usdc_raw"] = 5_100_000
+            deposit_preview = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/hyperliquid-preview",
+                json={
+                    "expected_version": 4,
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-hyperliquid-deposit-preview",
+                },
+            )
+            assert deposit_preview.status_code == 200, deposit_preview.text
+            assert deposit_preview.json()["artifact"]["from"] == main
+            deposit_submission = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/wallet-submission",
+                json={
+                    "expected_version": 5,
+                    "stage": "HYPERLIQUID_DEPOSIT",
+                    "outcome": "SUBMITTED",
+                    "transaction_hash": deposit_hash,
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-hyperliquid-deposit-submission",
+                },
+            )
+            assert deposit_submission.status_code == 200, deposit_submission.text
+            chain_receipt = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/hyperliquid-receipt",
+                json={
+                    "expected_version": 6,
+                    "stage": "HYPERLIQUID_DEPOSIT_ARBITRUM",
+                    "transaction_hash": deposit_hash,
+                    "idempotency_key": "safe-hyperliquid-chain-receipt",
+                },
+            )
+            assert chain_receipt.status_code == 200, chain_receipt.text
+            ledger_receipt = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/hyperliquid-receipt",
+                json={
+                    "expected_version": 7,
+                    "stage": "HYPERLIQUID_DEPOSIT_LEDGER",
+                    "action_hash": deposit_hash,
+                    "idempotency_key": "safe-hyperliquid-ledger-receipt",
+                },
+            )
+            assert ledger_receipt.status_code == 200, ledger_receipt.text
+            assert ledger_receipt.json()["settlement"] == "CONFIRMED"
+            operation = next(
+                item
+                for item in ledger_receipt.json()["data"]["direct_operations"]
+                if item["operation_id"] == operation_id
+            )
+            assert operation["status"] == "SETTLED"
+            assert operation["receipt_status"] == "CONFIRMED"
+
+    asyncio.run(scenario())
 
 
 def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
@@ -370,6 +818,11 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
     _add_live_accounts(database, admin)
     treasury = service.create_user("safe-provider-treasury", admin, now=now)
     service.assign_role(treasury, Role.TREASURY_ADMIN, admin, now=now)
+    transaction_hash = "0x" + "cd" * 32
+    safe = "0x7777777777777777777777777777777777777777"
+    destination = "0x3333333333333333333333333333333333333333"
+    safe_topic = f"0x{safe[2:].rjust(64, '0')}"
+    destination_topic = f"0x{destination[2:].rjust(64, '0')}"
 
     def executor(payload: dict[str, object]) -> dict[str, object]:
         assert payload["asset"] == "USDC"
@@ -379,6 +832,8 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
                 "moduleEnabled": True,
                 "balance": "90000000",
                 "available": "80000000",
+                "resetTimeMinutes": "1440",
+                "nonce": "7",
                 "blockTimestamp": str(int(now.timestamp())),
             }
         if payload["operation"] == "prepare-deposit":
@@ -404,18 +859,80 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
             "delegate": payload["delegate"],
             "token": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
             "recipient": payload["recipient"],
-            "amount": "99000000",
+            "amount": "100000000",
             "nonce": "7",
             "transferHash": "0x" + "ab" * 32,
+            "from": payload["delegate"],
+            "to": "0x9999999999999999999999999999999999999999",
+            "value": "0",
+            "data": "0x" + "12" * 68,
             "signing": False,
             "broadcast": False,
-            "calldataReady": False,
+            "calldataReady": True,
+        }
+
+    binance_responses: dict[str, object] = {
+        "/sapi/v1/account/apiRestrictions": {
+            "ipRestrict": True,
+            "enableReading": True,
+            "enableWithdrawals": True,
+            "enableInternalTransfer": True,
+        },
+        "/sapi/v1/capital/config/getall": [
+            {
+                "coin": "USDC",
+                "free": "1000",
+                "networkList": [
+                    {
+                        "network": "ARBITRUM",
+                        "depositEnable": True,
+                        "withdrawEnable": True,
+                        "busy": False,
+                        "withdrawFee": "0.1",
+                        "withdrawMin": "0.1",
+                        "withdrawMax": "1000",
+                    }
+                ],
+            }
+        ],
+        "/sapi/v1/capital/deposit/address": {"address": destination, "tag": ""},
+        "/sapi/v1/asset/transfer": {"rows": []},
+    }
+
+    def binance_transport(
+        _method: str, path: str, _params: dict[str, str], _timeout: float
+    ) -> object:
+        return binance_responses[path]
+
+    def rpc_fetcher(_url: str, method: str, _params: list[object], _timeout: float) -> object:
+        if method == "eth_blockNumber":
+            return "0x78"
+        assert method == "eth_getTransactionReceipt"
+        return {
+            "status": "0x1",
+            "blockNumber": "0x64",
+            "logs": [
+                {
+                    "address": ARBITRUM_NATIVE_USDC_ADDRESS,
+                    "topics": [ERC20_TRANSFER_TOPIC, safe_topic, destination_topic],
+                    "data": hex(100_000_000),
+                }
+            ],
         }
 
     async def scenario() -> None:
         async with AsyncClient(
             transport=ASGITransport(
-                app=_app(database, safe_spending_gateway=SafeSpendingGateway(executor=executor))
+                app=_app(
+                    database,
+                    safe_spending_gateway=SafeSpendingGateway(executor=executor),
+                    binance_capital_gateway=BinanceCapitalGateway(
+                        api_key="safe-binance-key",
+                        api_secret="safe-binance-secret",  # noqa: S106
+                        transport=binance_transport,
+                    ),
+                    hyperliquid_capital_gateway=HyperliquidCapitalGateway(rpc_fetcher=rpc_fetcher),
+                )
             ),
             base_url="http://test",
         ) as client:
@@ -439,6 +956,12 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
                 "provider": "SAFE_SPENDING_LIMIT",
                 "status": "SUCCESS",
                 "error_code": None,
+                "module_enabled": True,
+                "available_limit": "80",
+                "balance": "90",
+                "reset_time_minutes": 1440,
+                "nonce": "7",
+                "observed_at": now.replace(microsecond=0).isoformat(),
             }
             assert net_worth["vault"] == "90.000000000000000000"
             assert {
@@ -446,7 +969,24 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
                 for item in configured.json()["data"]["balances"]
                 if item["location_type"] == "VAULT"
             } == {"selected-onchain-treasury"}
-            assert "0x7777777777777777777777777777777777777777" not in configured.text
+            assert direct_config["safe_address"] == ("0x7777777777777777777777777777777777777777")
+            assert direct_config["safe_delegate_address"] == (
+                "0x8888888888888888888888888888888888888888"
+            )
+            refreshed = await client.get("/api/capital")
+            assert refreshed.status_code == 200, refreshed.text
+            assert refreshed.json()["data"]["net_worth"]["onchain_probe"]["status"] == ("SUCCESS")
+            with database.session_factory() as session:
+                safe_equity = session.scalar(
+                    select(AccountEquity).where(
+                        AccountEquity.location_type == "VAULT",
+                        AccountEquity.account_id
+                        == "0x7777777777777777777777777777777777777777",
+                        AccountEquity.currency == "USDC",
+                    )
+                )
+                assert safe_equity is not None
+                assert safe_equity.control_status == "CONTROLLED"
 
             await _login(client, "safe-provider-treasury")
             created = await client.post(
@@ -461,10 +1001,19 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
             assert created.status_code == 200, created.text
             assert created.json()["treasury_provider"] == "SAFE_SPENDING_LIMIT"
             operation_id = created.json()["operation_id"]
+            binance_preview = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/binance-preview",
+                json={
+                    "expected_version": 1,
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-provider-binance-preview",
+                },
+            )
+            assert binance_preview.status_code == 200, binance_preview.text
             preview = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/safe-spending-preview",
                 json={
-                    "expected_version": 1,
+                    "expected_version": 2,
                     "final_confirmed": True,
                     "idempotency_key": "safe-provider-preview",
                 },
@@ -472,8 +1021,50 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
             assert preview.status_code == 200, preview.text
             body = preview.json()
             assert body["signing"] is False and body["broadcast"] is False
-            assert body["signature_request"]["calldataReady"] is False
+            assert body["signature_request"]["calldataReady"] is True
+            assert "SAFE_ALLOWANCE_PREFLIGHT_REQUIRED" not in body["blockers"]
+            assert "BINANCE_DEPOSIT_PREFLIGHT_REQUIRED" not in body["blockers"]
             assert body["data"]["real_transfer_gate"] == "DISABLED"
+            wallet_submission = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/wallet-submission",
+                json={
+                    "expected_version": body["version"],
+                    "stage": "TREASURY_WITHDRAWAL",
+                    "outcome": "SUBMITTED",
+                    "transaction_hash": transaction_hash,
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-provider-wallet-submit",
+                },
+            )
+            assert wallet_submission.status_code == 200, wallet_submission.text
+            submitted_operation = next(
+                item
+                for item in wallet_submission.json()["data"]["direct_operations"]
+                if item["operation_id"] == operation_id
+            )
+            assert submitted_operation["stages"][-1]["code"] == (
+                "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
+            )
+            assert submitted_operation["stages"][-1]["transaction_hash"] == (transaction_hash)
+            assert submitted_operation["receipt_next_due_at"] is not None
+            assert submitted_operation["receipt_attempt_count"] == 0
+            receipt = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/treasury-withdrawal-receipt",
+                json={
+                    "expected_version": wallet_submission.json()["version"],
+                    "transaction_hash": transaction_hash,
+                    "idempotency_key": "safe-provider-chain-receipt",
+                },
+            )
+            assert receipt.status_code == 200, receipt.text
+            pending_operation = next(
+                item
+                for item in receipt.json()["data"]["direct_operations"]
+                if item["operation_id"] == operation_id
+            )
+            assert pending_operation["status"] == "AWAITING_RECEIPT"
+            assert pending_operation["receipt_status"] == "PENDING"
+            assert pending_operation["receipt_next_due_at"] is not None
 
             inbound = await client.post(
                 "/api/capital/direct-operations",
@@ -508,10 +1099,60 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
         )
         assert operation is not None
         assert operation.treasury_provider == "SAFE_SPENDING_LIMIT"
-        assert operation.version == 2
+        assert operation.version == 5
+        assert operation.status == "AWAITING_RECEIPT"
+        assert operation.receipt_status == "PENDING"
+        assert operation.receipt_next_due_at is not None
         assert session.query(OrderIntent).count() == 0
         events = set(session.scalars(select(AuditEvent.event_type)).all())
     assert "CAPITAL_SAFE_SPENDING_PREVIEW_PREPARED" in events
+    assert "CAPITAL_HUMAN_WALLET_SUBMISSION_RECORDED" in events
+
+
+def test_safe_snapshot_is_controlled_only_while_allowance_module_is_enabled(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    now = datetime.now(UTC).replace(microsecond=0)
+    admin = service.bootstrap_admin("safe-control-admin", now=now)
+    safe_address = "0x7777777777777777777777777777777777777777"
+
+    service.record_safe_spending_snapshot(
+        actor_id=admin,
+        safe_address=safe_address,
+        asset="USDC",
+        balance=Decimal("90"),
+        available_limit=Decimal("80"),
+        module_enabled=True,
+        observed_at=now,
+        now=now,
+    )
+    with database.session_factory() as session:
+        fact = session.scalar(
+            select(AccountEquity).where(AccountEquity.account_id == safe_address)
+        )
+        assert fact is not None
+        assert fact.control_status == "CONTROLLED"
+        assert fact.withdrawable_balance == Decimal("80")
+
+    later = now + timedelta(seconds=1)
+    service.record_safe_spending_snapshot(
+        actor_id=admin,
+        safe_address=safe_address,
+        asset="USDC",
+        balance=Decimal("90"),
+        available_limit=Decimal("80"),
+        module_enabled=False,
+        observed_at=later,
+        now=later,
+    )
+    with database.session_factory() as session:
+        fact = session.scalar(
+            select(AccountEquity).where(AccountEquity.account_id == safe_address)
+        )
+        assert fact is not None
+        assert fact.control_status == "READ_ONLY"
+        assert fact.withdrawable_balance == 0
 
 
 def test_vault_and_safe_configurations_persist_while_current_provider_switches(
@@ -536,9 +1177,7 @@ def test_vault_and_safe_configurations_persist_while_current_provider_switches(
                     "vault_address": "0x1111111111111111111111111111111111111111",
                     "safe_address": "0x7777777777777777777777777777777777777777",
                     "safe_delegate_address": "0x8888888888888888888888888888888888888888",
-                    "binance_withdrawal_address": (
-                        "0x7777777777777777777777777777777777777777"
-                    ),
+                    "binance_withdrawal_address": ("0x7777777777777777777777777777777777777777"),
                     "idempotency_key": "dual-treasury-safe-selected",
                 },
             )
@@ -553,14 +1192,15 @@ def test_vault_and_safe_configurations_persist_while_current_provider_switches(
             assert direct["vault_address_configured"] is True
             assert direct["safe_address_configured"] is True
             assert direct["safe_delegate_configured"] is True
+            assert direct["vault_id"] == "vault-1"
+            assert direct["vault_address"] == ("0x1111111111111111111111111111111111111111")
+            assert direct["safe_address"] == ("0x7777777777777777777777777777777777777777")
 
             vault_selected = await client.put(
                 "/api/capital/direct-configuration",
                 json={
                     "treasury_provider": "NOTILT_VAULT",
-                    "binance_withdrawal_address": (
-                        "0x1111111111111111111111111111111111111111"
-                    ),
+                    "binance_withdrawal_address": ("0x1111111111111111111111111111111111111111"),
                     "idempotency_key": "dual-treasury-vault-selected",
                 },
             )
@@ -574,8 +1214,8 @@ def test_vault_and_safe_configurations_persist_while_current_provider_switches(
             assert direct["vault_address_configured"] is True
             assert direct["safe_address_configured"] is True
             assert direct["safe_delegate_configured"] is True
-            assert "0x1111111111111111111111111111111111111111" not in vault_selected.text
-            assert "0x7777777777777777777777777777777777777777" not in vault_selected.text
+            assert direct["vault_address"] == ("0x1111111111111111111111111111111111111111")
+            assert direct["safe_address"] == ("0x7777777777777777777777777777777777777777")
 
             vault_operation = await client.post(
                 "/api/capital/direct-operations",
@@ -593,9 +1233,7 @@ def test_vault_and_safe_configurations_persist_while_current_provider_switches(
                 "/api/capital/direct-configuration",
                 json={
                     "treasury_provider": "SAFE_SPENDING_LIMIT",
-                    "binance_withdrawal_address": (
-                        "0x7777777777777777777777777777777777777777"
-                    ),
+                    "binance_withdrawal_address": ("0x7777777777777777777777777777777777777777"),
                     "idempotency_key": "dual-treasury-safe-reselected",
                 },
             )
@@ -618,10 +1256,75 @@ def test_vault_and_safe_configurations_persist_while_current_provider_switches(
             assert safe_operation.status_code == 200, safe_operation.text
             assert safe_operation.json()["treasury_provider"] == "SAFE_SPENDING_LIMIT"
 
+            cleared = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "treasury_provider": "SAFE_SPENDING_LIMIT",
+                    "clear_notilt_configuration": True,
+                    "idempotency_key": "dual-treasury-clear-unused-notilt",
+                },
+            )
+            assert cleared.status_code == 200, cleared.text
+            direct = cleared.json()["data"]["direct_configuration"]
+            assert direct["configured_providers"] == ["SAFE_SPENDING_LIMIT"]
+            assert direct["notilt_provider_configured"] is False
+            assert direct["vault_id"] is None
+            assert direct["vault_address"] is None
+
     asyncio.run(scenario())
 
 
-def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual_receipt(
+def test_safe_configuration_validation_returns_actionable_error_codes(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    now = datetime.now(UTC)
+    admin = service.bootstrap_admin("safe-validation-admin", now=now)
+    _add_live_accounts(database, admin)
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=_app(database)),
+            base_url="http://test",
+        ) as client:
+            await _login(client, "safe-validation-admin")
+            invalid_fee = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "treasury_provider": "SAFE_SPENDING_LIMIT",
+                    "safe_address": "0x7777777777777777777777777777777777777777",
+                    "safe_delegate_address": "0x8888888888888888888888888888888888888888",
+                    "binance_withdrawal_address": ("0x7777777777777777777777777777777777777777"),
+                    "max_amount": "1",
+                    "max_fee": "1",
+                    "idempotency_key": "safe-invalid-fee",
+                },
+            )
+            assert invalid_fee.status_code == 422, invalid_fee.text
+            assert invalid_fee.json()["error"]["code"] == "CAPITAL_CONFIGURATION_FEE_LIMIT_INVALID"
+
+            mismatched_withdrawal = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "treasury_provider": "SAFE_SPENDING_LIMIT",
+                    "safe_address": "0x7777777777777777777777777777777777777777",
+                    "safe_delegate_address": "0x8888888888888888888888888888888888888888",
+                    "binance_withdrawal_address": ("0x9999999999999999999999999999999999999999"),
+                    "max_amount": "10",
+                    "max_fee": "1",
+                    "idempotency_key": "safe-mismatched-withdrawal",
+                },
+            )
+            assert mismatched_withdrawal.status_code == 422, mismatched_withdrawal.text
+            assert (
+                mismatched_withdrawal.json()["error"]["code"]
+                == "CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_SCOPE_MISMATCH"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_binance_restricted_withdrawal_reconciles_after_frozen_plan_expires(
     database: Database,
 ) -> None:
     service = TradingService(database)
@@ -639,12 +1342,18 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
     tx_hash = "0x" + "ab" * 32
     calls: list[tuple[str, str, dict[str, str]]] = []
     submitted = False
+    internal_transferred = False
 
     def transport(method: str, path: str, params: dict[str, str], _timeout: float):
-        nonlocal submitted
+        nonlocal internal_transferred, submitted
         calls.append((method, path, params))
         if path == "/sapi/v1/account/apiRestrictions":
-            return {"ipRestrict": True, "enableReading": True, "enableWithdrawals": True}
+            return {
+                "ipRestrict": True,
+                "enableReading": True,
+                "enableWithdrawals": True,
+                "enableInternalTransfer": True,
+            }
         if path == "/sapi/v1/capital/config/getall":
             return [
                 {
@@ -677,6 +1386,29 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
             return "NIL"
         if path == "/sapi/v1/capital/withdraw/quota":
             return {"wdQuota": "1000", "usedWdQuota": "0"}
+        if path == "/sapi/v1/asset/transfer":
+            if method == "POST":
+                assert params["type"] == "UMFUTURE_MAIN"
+                internal_transferred = True
+                return {"tranId": 12345}
+            return {
+                "rows": (
+                    [
+                        {
+                            "asset": "USDC",
+                            "type": "UMFUTURE_MAIN",
+                            "amount": "25",
+                            "status": "CONFIRMED",
+                            "tranId": 12345,
+                            "timestamp": int(now.timestamp() * 1000),
+                        }
+                    ]
+                    if internal_transferred
+                    else []
+                )
+            }
+        if path == "/sapi/v3/asset/getUserAsset":
+            return [{"asset": "USDC", "free": "125"}]
         if path == "/sapi/v1/capital/withdraw/apply":
             assert method == "POST"
             assert params["address"] == destination
@@ -693,7 +1425,7 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
                     "network": "ARBITRUM",
                     "address": destination,
                     "txId": tx_hash,
-                    "amount": "25",
+                    "amount": "24",
                     "transactionFee": "1",
                     "status": 6,
                 }
@@ -715,7 +1447,7 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
                         "0x" + "0" * 24 + "9" * 40,
                         "0x" + "0" * 24 + destination[2:],
                     ],
-                    "data": hex(25_000_000),
+                    "data": hex(24_000_000),
                 }
             ],
         }
@@ -772,10 +1504,41 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
                 },
             )
             assert submitted_response.status_code == 200, submitted_response.text
+            submitted_version = submitted_response.json()["version"]
+            with database.session_factory.begin() as session:
+                expired = session.get(DirectCapitalOperation, UUID(operation_id))
+                assert expired is not None
+                expired.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            service.acquire_direct_capital_binance_receipt_poll(
+                UUID(operation_id),
+                admin_id,
+                expected_version=submitted_version,
+                stage="BINANCE_WITHDRAWAL",
+                token="first-browser-tab",  # noqa: S106 - inert lease token
+                now=now,
+            )
+            calls_before_parallel_receipt = len(calls)
+            parallel_receipt = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/binance-receipt",
+                json={
+                    "expected_version": submitted_version,
+                    "stage": "BINANCE_WITHDRAWAL",
+                    "idempotency_key": "binance-receipt-parallel-tab",
+                },
+            )
+            assert parallel_receipt.status_code == 409, parallel_receipt.text
+            assert parallel_receipt.json()["error"]["code"] == "BINANCE_RECEIPT_CHECK_IN_PROGRESS"
+            assert len(calls) == calls_before_parallel_receipt
+            service.release_direct_capital_binance_receipt_poll(
+                UUID(operation_id),
+                stage="BINANCE_WITHDRAWAL",
+                token="first-browser-tab",  # noqa: S106 - inert lease token
+                now=now,
+            )
             receipt = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/binance-receipt",
                 json={
-                    "expected_version": 3,
+                    "expected_version": submitted_version,
                     "stage": "BINANCE_WITHDRAWAL",
                     "idempotency_key": "binance-receipt-1",
                 },
@@ -796,6 +1559,9 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
         assert operation is not None
         assert operation.status == "SETTLED"
         assert operation.receipt_status == "CONFIRMED"
+        assert operation.receipt_poll_stage is None
+        assert operation.receipt_poll_started_at is None
+        assert operation.receipt_poll_token is None
         assert session.query(OrderIntent).count() == 0
         events = set(session.scalars(select(AuditEvent.event_type)).all())
     assert {
@@ -803,6 +1569,175 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
         "CAPITAL_BINANCE_WITHDRAWAL_SUBMITTED",
         "CAPITAL_BINANCE_RECEIPT_VERIFIED",
     }.issubset(events)
+
+
+def test_binance_capital_uses_live_fee_with_dedicated_exact_account_credential(
+    database: Database,
+) -> None:
+    credential_key = (
+        base64.urlsafe_b64encode(b"capital-account-test-key-32-byte"[:32]).decode().rstrip("=")
+    )
+    service = TradingService(database, credential_encryption_key=credential_key)
+    now = datetime.now(UTC)
+    admin_id = service.bootstrap_admin("database-capital-admin", now=now)
+    exchange_account_id = service.create_exchange_account(
+        actor_id=admin_id,
+        account_id="binance-main",
+        venue="BINANCE",
+        label="Main Binance",
+        credentials={"api_key": "database-key", "api_secret": "database-secret"},
+        idempotency_key="database-capital-account",
+        now=now,
+    )
+    with database.session_factory.begin() as session:
+        account = session.get(ExchangeAccount, exchange_account_id)
+        assert account is not None
+        account.connection_status = "VERIFIED"
+        account.last_connection_check_at = now
+        account.last_verified_at = now
+    service.set_capability_gate(
+        "CAPITAL_TRANSFER",
+        CapabilityStatus.ENABLED,
+        "dedicated capital credential integration test",
+        admin_id,
+        now=now,
+    )
+
+    destination = "0x1111111111111111111111111111111111111111"
+    calls: list[tuple[str, str, dict[str, str]]] = []
+
+    def transport(method: str, path: str, params: dict[str, str], _timeout: float):
+        calls.append((method, path, params))
+        if path == "/sapi/v1/account/apiRestrictions":
+            return {
+                "ipRestrict": True,
+                "enableReading": True,
+                "enableWithdrawals": True,
+                "enableInternalTransfer": True,
+            }
+        if path == "/sapi/v1/capital/config/getall":
+            return [
+                {
+                    "coin": "USDC",
+                    "free": "100",
+                    "networkList": [
+                        {
+                            "network": "ARBITRUM",
+                            "depositEnable": True,
+                            "withdrawEnable": True,
+                            "busy": False,
+                            "withdrawTag": False,
+                            "withdrawFee": "0.1",
+                            "withdrawMin": "1",
+                            "withdrawMax": "1000",
+                        }
+                    ],
+                }
+            ]
+        if path == "/sapi/v1/capital/withdraw/address/list":
+            return [
+                {
+                    "coin": "USDC",
+                    "network": "ARBITRUM",
+                    "address": destination,
+                    "whiteStatus": True,
+                }
+            ]
+        if path == "/sapi/v1/localentity/questionnaire-requirements":
+            return "NIL"
+        if path == "/sapi/v1/capital/withdraw/quota":
+            return {"wdQuota": "1000", "usedWdQuota": "0"}
+        if path == "/sapi/v1/asset/transfer":
+            assert method == "GET"
+            return {"rows": []}
+        raise AssertionError(path)
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(
+                app=_app(
+                    database,
+                    binance_capital_gateway=BinanceCapitalGateway(
+                        api_key="dedicated-capital-key",
+                        api_secret="dedicated-capital-secret",  # noqa: S106
+                        transport=transport,
+                    ),
+                    binance_capital_withdraw_enabled=True,
+                    binance_capital_environment_credentials=False,
+                    credential_encryption_key=credential_key,
+                )
+            ),
+            base_url="http://test",
+        ) as client:
+            await _login(client, "database-capital-admin")
+            center = await client.get("/api/capital")
+            assert center.status_code == 200, center.text
+            configuration = center.json()["data"]["direct_configuration"]
+            assert configuration["binance_capital_credentials_configured"] is True
+            assert (
+                configuration["binance_capital_credentials_source"]
+                == "VERIFIED_ACCOUNT_DATABASE"
+            )
+            assert configuration["binance_capital_submission_enabled"] is True
+
+            small_withdrawal = await client.post(
+                "/api/capital/direct-operations",
+                json={
+                    "path": "BINANCE_TO_VAULT",
+                    "amount": "1",
+                    "final_confirmed": True,
+                    "idempotency_key": "database-capital-small-withdrawal",
+                },
+            )
+            assert small_withdrawal.status_code == 200, small_withdrawal.text
+            assert "CAPITAL_MIN_RECEIVED_INVALID" not in small_withdrawal.json()["blockers"]
+            assert "BINANCE_CAPITAL_CREDENTIALS_MISSING" not in small_withdrawal.json()["blockers"]
+            small_preview = await client.post(
+                f"/api/capital/direct-operations/"
+                f"{small_withdrawal.json()['operation_id']}/binance-preview",
+                json={
+                    "expected_version": 1,
+                    "final_confirmed": True,
+                    "idempotency_key": "database-capital-small-preview",
+                },
+            )
+            assert small_preview.status_code == 200, small_preview.text
+            assert small_preview.json()["artifact"]["fee"] == "0.1"
+            assert small_preview.json()["artifact"]["minReceived"] == "0.900000000000000000"
+            prepared = next(
+                operation
+                for operation in small_preview.json()["data"]["direct_operations"]
+                if operation["operation_id"] == small_withdrawal.json()["operation_id"]
+            )
+            assert prepared["min_received"] == "0.900000000000000000"
+
+            created = await client.post(
+                "/api/capital/direct-operations",
+                json={
+                    "path": "BINANCE_TO_VAULT",
+                    "amount": "25",
+                    "final_confirmed": True,
+                    "idempotency_key": "database-capital-create",
+                },
+            )
+            assert created.status_code == 200, created.text
+            assert "BINANCE_CAPITAL_CREDENTIALS_MISSING" not in created.json()["blockers"]
+            preview = await client.post(
+                f"/api/capital/direct-operations/{created.json()['operation_id']}/binance-preview",
+                json={
+                    "expected_version": 1,
+                    "final_confirmed": True,
+                    "idempotency_key": "database-capital-preview",
+                },
+            )
+            assert preview.status_code == 200, preview.text
+            assert preview.json()["credentials_configured"] is True
+            assert preview.json()["artifact"]["withdrawPermission"] is True
+            assert "database-secret" not in preview.text
+
+    asyncio.run(scenario())
+    assert calls
+    assert all("signature" not in params for _, _, params in calls)
 
 
 def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_blocked(
@@ -901,7 +1836,7 @@ def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_block
                     "account_id": "acct-live",
                     "risk_tier": "LOW",
                     "notional": "100",
-                    "max_risk": "1",
+                    "max_risk": "2",
                     "invalidation_bps": 200,
                     "expires_in_minutes": 480,
                     "rationale": "safe reviewed default",
@@ -1246,8 +2181,9 @@ def test_direct_binance_return_does_not_build_redundant_notilt_wallet_deposit(
             )
             assert configured.status_code == 200, configured.text
             assert configured.json()["data"]["direct_configuration"]["version"] == 1
-            assert configured.json()["data"]["direct_configuration"]["can_manage"] is True
-            assert "0x1111111111111111111111111111111111111111" not in configured.text
+            direct = configured.json()["data"]["direct_configuration"]
+            assert direct["can_manage"] is True
+            assert direct["vault_address"] == ("0x1111111111111111111111111111111111111111")
 
             await _login(client, "notilt-direct-treasury")
             denied_config = await client.put(
@@ -1518,3 +2454,214 @@ def test_direct_notilt_release_rereads_live_agent_budget_before_unsigned_preview
         assert (operation.stages[-1]["code"] == "NOTILT_UNSIGNED_RELEASE_REQUEST_PREVIEW") is (
             expected_code is None
         )
+
+
+def test_direct_notilt_release_wallet_flow_reaches_exact_binance_destination(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    now = datetime.now(UTC)
+    admin = service.bootstrap_admin("notilt-wallet-flow-admin", now=now)
+    _add_live_accounts(database, admin)
+    request_hash = "0x" + "12" * 32
+    execution_hash = "0x" + "34" * 32
+    destination_hash = "0x" + "56" * 32
+    request_id = "0x" + "78" * 32
+
+    def executor(payload: dict[str, object]) -> dict[str, object]:
+        operation = str(payload["operation"])
+        if operation == "read-vault":
+            return {
+                "chain": "arbitrum",
+                "vault": "0x1111111111111111111111111111111111111111",
+                "agent": "0x5555555555555555555555555555555555555555",
+                "budgets": [
+                    {
+                        "blockNumber": "123",
+                        "blockTimestamp": str(int(now.timestamp())),
+                        "vault": "0x1111111111111111111111111111111111111111",
+                        "agent": "0x5555555555555555555555555555555555555555",
+                        "owner": "0x7777777777777777777777777777777777777777",
+                        "asset": {
+                            "address": "0x6666666666666666666666666666666666666666",
+                            "symbol": "USDC",
+                            "decimals": 6,
+                            "native": False,
+                        },
+                        "isOfficialVault": True,
+                        "isActiveWhitelist": True,
+                        "assignedWhitelistVault": ("0x1111111111111111111111111111111111111111"),
+                        "balance": "100000000",
+                        "maxReleaseNet": "100000000",
+                        "pendingNet": "0",
+                        "panicLocked": False,
+                        "dailyReleaseRate": "0",
+                        "dailyFeeRate": "0",
+                    }
+                ],
+            }
+        if operation == "prepare-release-request":
+            return {
+                "transaction": {
+                    "chainId": 42161,
+                    "to": "0x1111111111111111111111111111111111111111",
+                    "data": "0x1234",
+                    "value": "0",
+                    "contract": "vault",
+                    "functionName": "requestWhitelistRelease",
+                    "summary": "Request exact NoTilt release",
+                }
+            }
+        if operation == "prepare-release-execution":
+            assert payload["requestId"] == request_id
+            return {
+                "chainId": 42161,
+                "to": "0x1111111111111111111111111111111111111111",
+                "data": "0xabcd",
+                "value": "0",
+                "contract": "vault",
+                "functionName": "executeWhitelistRelease",
+                "summary": "Execute exact NoTilt release",
+            }
+        assert operation == "verify-receipt"
+        receipt_kind = str(payload["receiptKind"])
+        base = {
+            "receiptKind": receipt_kind,
+            "chainId": 42161,
+            "chain": "arbitrum",
+            "transactionHash": payload["transactionHash"],
+            "vault": "0x1111111111111111111111111111111111111111",
+            "agent": "0x5555555555555555555555555555555555555555",
+            "blockNumber": "456",
+            "blockTimestamp": str(int(now.timestamp())),
+            "confirmations": 12,
+        }
+        if receipt_kind == "RELEASE_REQUEST":
+            base.update(
+                {
+                    "asset": "USDC",
+                    "requestId": request_id,
+                    "netAmount": "100",
+                    "fee": "0.1",
+                    "executeAfter": str(int((now - timedelta(seconds=1)).timestamp())),
+                    "expiresAt": str(int((now + timedelta(hours=1)).timestamp())),
+                }
+            )
+        else:
+            base["requestId"] = request_id
+        return base
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(
+                app=_app(database, notilt_gateway=NoTiltGateway(executor=executor))
+            ),
+            base_url="http://test",
+        ) as client:
+            await _login(client, "notilt-wallet-flow-admin")
+            created = await client.post(
+                "/api/capital/direct-operations",
+                json={
+                    "path": "VAULT_TO_BINANCE",
+                    "amount": "100",
+                    "final_confirmed": True,
+                    "idempotency_key": "notilt-wallet-flow",
+                },
+            )
+            operation_id = created.json()["operation_id"]
+            preview = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/notilt-unsigned-preview",
+                json={
+                    "expected_version": 1,
+                    "final_confirmed": True,
+                    "idempotency_key": "notilt-request-preview",
+                },
+            )
+            assert preview.status_code == 200, preview.text
+            request_submission = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/wallet-submission",
+                json={
+                    "expected_version": preview.json()["version"],
+                    "stage": "TREASURY_WITHDRAWAL",
+                    "outcome": "SUBMITTED",
+                    "transaction_hash": request_hash,
+                    "final_confirmed": True,
+                    "idempotency_key": "notilt-request-wallet",
+                },
+            )
+            request_receipt = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/notilt-release-receipt",
+                json={
+                    "expected_version": request_submission.json()["version"],
+                    "transaction_hash": request_hash,
+                    "idempotency_key": "notilt-request-receipt",
+                },
+            )
+            assert request_receipt.status_code == 200, request_receipt.text
+            execution_preview = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/notilt-release-execution-preview",
+                json={
+                    "expected_version": request_receipt.json()["version"],
+                    "final_confirmed": True,
+                    "idempotency_key": "notilt-execution-preview",
+                },
+            )
+            assert execution_preview.status_code == 200, execution_preview.text
+            execution_submission = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/wallet-submission",
+                json={
+                    "expected_version": execution_preview.json()["version"],
+                    "stage": "NOTILT_RELEASE_EXECUTION",
+                    "outcome": "SUBMITTED",
+                    "transaction_hash": execution_hash,
+                    "final_confirmed": True,
+                    "idempotency_key": "notilt-execution-wallet",
+                },
+            )
+            execution_receipt = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/notilt-release-receipt",
+                json={
+                    "expected_version": execution_submission.json()["version"],
+                    "transaction_hash": execution_hash,
+                    "idempotency_key": "notilt-execution-receipt",
+                },
+            )
+            assert execution_receipt.status_code == 200, execution_receipt.text
+            destination_preview = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/notilt-destination-preview",
+                json={
+                    "expected_version": execution_receipt.json()["version"],
+                    "final_confirmed": True,
+                    "idempotency_key": "notilt-destination-preview",
+                },
+            )
+            assert destination_preview.status_code == 200, destination_preview.text
+            artifact = destination_preview.json()["artifact"]
+            assert artifact["from"] == "0x5555555555555555555555555555555555555555"
+            assert artifact["recipient"] == "0x3333333333333333333333333333333333333333"
+            assert artifact["amount"] == "100.000000000000000000"
+            destination_submission = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/wallet-submission",
+                json={
+                    "expected_version": destination_preview.json()["version"],
+                    "stage": "NOTILT_DESTINATION_TRANSFER",
+                    "outcome": "SUBMITTED",
+                    "transaction_hash": destination_hash,
+                    "final_confirmed": True,
+                    "idempotency_key": "notilt-destination-wallet",
+                },
+            )
+            assert destination_submission.status_code == 200, destination_submission.text
+
+    asyncio.run(scenario())
+    with database.session_factory() as session:
+        operation = session.scalar(select(DirectCapitalOperation))
+        assert operation is not None
+        assert operation.stages[-1]["code"] == (
+            "NOTILT_DESTINATION_TRANSFER_SUBMITTED_BY_HUMAN_WALLET"
+        )
+        assert operation.version == 9
+        assert operation.status == "AWAITING_RECEIPT"
+        assert operation.receipt_status == "PENDING"
+        assert operation.receipt_attempt_count == 0
+        assert operation.receipt_next_due_at is not None

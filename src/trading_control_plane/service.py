@@ -1,24 +1,9 @@
 from __future__ import annotations
 
+from trading_control_plane import authorization_policy, runtime_contracts
 from trading_control_plane.credentials import CredentialCipher
 from trading_control_plane.database import Database
 from trading_control_plane.service_component import ServiceRuntime
-from trading_control_plane.service_core import ROLE_ACTIONS as ROLE_ACTIONS
-from trading_control_plane.service_core import (
-    PreparedExchangeConnectionVerification as PreparedExchangeConnectionVerification,
-)
-from trading_control_plane.service_core import (
-    PreparedFreqtradeDispatch as PreparedFreqtradeDispatch,
-)
-from trading_control_plane.service_core import (
-    PreparedFreqtradeWorkerBinding as PreparedFreqtradeWorkerBinding,
-)
-from trading_control_plane.service_core import (
-    PreparedPerptapeRuntimeBinding as PreparedPerptapeRuntimeBinding,
-)
-from trading_control_plane.service_core import (
-    PreparedRuntimeAccountBinding as PreparedRuntimeAccountBinding,
-)
 from trading_control_plane.service_domains.accounts import AccountService
 from trading_control_plane.service_domains.analytics_reports import AnalyticsReportService
 from trading_control_plane.service_domains.api_clients import ApiClientService
@@ -35,7 +20,7 @@ from trading_control_plane.service_domains.execution_freqtrade import (
     FreqtradeRecoveryExecutionService,
 )
 from trading_control_plane.service_domains.execution_intent import IntentExecutionService
-from trading_control_plane.service_domains.execution_venue import VenueCommandExecutionService
+from trading_control_plane.service_domains.notifications import NotificationService
 from trading_control_plane.service_domains.proposals import ProposalService
 from trading_control_plane.service_domains.risk_authorization import AuthorizationRiskService
 from trading_control_plane.service_domains.risk_policy import PolicyRiskService
@@ -46,12 +31,21 @@ from trading_control_plane.service_domains.trading_mode import TradingModeServic
 from trading_control_plane.service_domains.workspace import WorkspaceService
 from trading_control_plane.service_transactions import TransactionService
 
+ROLE_ACTIONS = authorization_policy.ROLE_ACTIONS
+PreparedExchangeConnectionVerification = runtime_contracts.PreparedExchangeConnectionVerification
+PreparedCapitalAccountBinding = runtime_contracts.PreparedCapitalAccountBinding
+PreparedFreqtradeDispatch = runtime_contracts.PreparedFreqtradeDispatch
+PreparedFreqtradeWorkerBinding = runtime_contracts.PreparedFreqtradeWorkerBinding
+PreparedPerptapeRuntimeBinding = runtime_contracts.PreparedPerptapeRuntimeBinding
+PreparedRuntimeAccountBinding = runtime_contracts.PreparedRuntimeAccountBinding
+
 
 class TradingService(
     WorkspaceService,
     AccountService,
     AnalyticsReportService,
     ApiClientService,
+    NotificationService,
     SignalService,
     ProposalService,
     PolicyRiskService,
@@ -59,7 +53,6 @@ class TradingService(
     RecoveryRiskService,
     ReconciliationRiskService,
     IntentExecutionService,
-    VenueCommandExecutionService,
     FactIngestionExecutionService,
     CampaignExecutionService,
     TradingModeService,
@@ -69,7 +62,6 @@ class TradingService(
     AutomationCapitalService,
     NoTiltCapitalService,
     ReconciliationCapitalService,
-    TransactionService,
 ):
     """Single business service composed from lifecycle-focused domain implementations."""
 
@@ -79,15 +71,11 @@ class TradingService(
         self,
         database: Database,
         *,
-        authoritative_live_accounts: dict[str, str] | None = None,
         credential_encryption_key: str | None = None,
     ) -> None:
         credential_cipher = CredentialCipher(credential_encryption_key)
         self.runtime = ServiceRuntime(
             database=database,
             credential_cipher=credential_cipher,
-            authoritative_live_accounts={
-                venue.upper(): account_id
-                for venue, account_id in (authoritative_live_accounts or {}).items()
-            },
+            transactions=TransactionService(database, credential_cipher),
         )

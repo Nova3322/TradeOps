@@ -49,11 +49,13 @@ def test_notification_worker_builds_dispatcher_with_only_notification_credential
         candidate: object,
         *,
         credential_encryption_key: str | None,
+        public_base_url: str,
         sender: object,
     ) -> object:
         observed.update(
             database=candidate,
             credential_encryption_key=credential_encryption_key,
+            public_base_url=public_base_url,
             sender=sender,
         )
         return object()
@@ -66,6 +68,7 @@ def test_notification_worker_builds_dispatcher_with_only_notification_credential
     assert observed == {
         "database": database,
         "credential_encryption_key": settings.credential_encryption_key,
+        "public_base_url": settings.public_base_url,
         "sender": observed["sender"],
     }
     assert observed["sender"].email_smtp_allowed_hosts == {"smtp.example.com"}  # type: ignore[union-attr]

@@ -16,6 +16,17 @@ from trading_control_plane.domain import Direction, DomainRejected
 
 PERPTAPE_OFFICIAL_HOST = "perptape.com"
 PERPTAPE_WEBSOCKET_PATH = "/ws/v1/alerts"
+PERPTAPE_LEGACY_FEED_KEY = "BREAKOUTS"
+PerptapeSourceExchange = Literal["BN", "HL"]
+PERPTAPE_SOURCE_EXCHANGES: tuple[PerptapeSourceExchange, ...] = ("BN", "HL")
+PERPTAPE_FEED_KEYS: dict[PerptapeSourceExchange, str] = {
+    "BN": "BREAKOUTS:BN",
+    "HL": "BREAKOUTS:HL",
+}
+PERPTAPE_VENUES: dict[PerptapeSourceExchange, str] = {
+    "BN": "BINANCE",
+    "HL": "HYPERLIQUID",
+}
 PERPTAPE_OPERATIONAL_TIME_HEADROOM = timedelta(seconds=30)
 # A normal full 2,048-candidate window is about 1.2-1.6 MiB; 4 MiB leaves
 # reconciliation headroom while making the authoritative JSONB payload finite.
@@ -283,6 +294,7 @@ class PerptapeFeedSnapshot:
     fetched_at: datetime
     next_allowed_at: datetime
     candidates: tuple[PerptapeCandidate, ...]
+    source_exchange: PerptapeSourceExchange | None = None
 
 
 PerptapeEventKey = tuple[str, str, str, str, datetime | None]
@@ -475,6 +487,11 @@ def validate_perptape_feed_contract(feed: PerptapeFeedSnapshot) -> None:
     validate_perptape_datetime(feed.generated_at)
     validate_perptape_datetime(feed.fetched_at)
     validate_perptape_datetime(feed.next_allowed_at)
+    if feed.source_exchange is not None and feed.source_exchange not in PERPTAPE_SOURCE_EXCHANGES:
+        raise DomainRejected(
+            "PERPTAPE_RESPONSE_INVALID",
+            "Perptape feed source exchange is unsupported",
+        )
     for candidate in feed.candidates:
         validate_perptape_candidate(candidate)
 
@@ -922,6 +939,7 @@ def apply_perptape_feed_delta(
             fetched_at=fetched_at,
             next_allowed_at=max(generated_at, next_allowed_at),
             candidates=tuple(merged.values()),
+            source_exchange=incoming.source_exchange or current.source_exchange,
         )
     )
 
@@ -1098,11 +1116,12 @@ class PerptapeClient:
         self._timeout_seconds = timeout_seconds
         self._fetcher = fetcher
         self._lock = threading.Lock()
-        self._cached_at: datetime | None = None
-        self._cached: tuple[PerptapeCandidate, ...] = ()
+        self._cached_at_by_exchange: dict[str, datetime] = {}
+        self._feeds: dict[str, PerptapeFeedSnapshot] = {}
         self._feed: PerptapeFeedSnapshot | None = None
         self._rate_limit_not_before: datetime | None = None
         self._server_not_before: datetime | None = None
+        self._poll_not_before: datetime | None = None
         self._remote_result_generation = 0
         self._remote_success_generation = 0
         self._remote_rate_limit_count = 0
@@ -1132,9 +1151,42 @@ class PerptapeClient:
         )
 
     def list_candidates(self, *, now: datetime) -> list[PerptapeCandidate]:
-        return list(self.refresh(now=now).candidates)
+        with self._lock:
+            source_exchange = min(
+                PERPTAPE_SOURCE_EXCHANGES,
+                key=lambda value: (
+                    self._cached_at_by_exchange.get(value, datetime.min.replace(tzinfo=UTC)),
+                    PERPTAPE_SOURCE_EXCHANGES.index(value),
+                ),
+            )
+        try:
+            self.refresh(now=now, source_exchange=source_exchange)
+        except PerptapeRateLimited:
+            with self._lock:
+                if not self._feeds:
+                    raise
+        with self._lock:
+            combined = PerptapeFeedSnapshot(
+                contract_version=self._contract_version,
+                generated_at=max(feed.generated_at for feed in self._feeds.values()),
+                fetched_at=max(feed.fetched_at for feed in self._feeds.values()),
+                next_allowed_at=max(feed.next_allowed_at for feed in self._feeds.values()),
+                candidates=tuple(
+                    candidate
+                    for exchange in PERPTAPE_SOURCE_EXCHANGES
+                    if exchange in self._feeds
+                    for candidate in self._feeds[exchange].candidates
+                ),
+            )
+        return list(bound_perptape_feed_snapshot(combined).candidates)
 
-    def refresh(self, *, now: datetime, force: bool = False) -> PerptapeFeedSnapshot:
+    def refresh(
+        self,
+        *,
+        now: datetime,
+        force: bool = False,
+        source_exchange: PerptapeSourceExchange = "BN",
+    ) -> PerptapeFeedSnapshot:
         if self._api_key is None:
             raise DomainRejected("PERPTAPE_NOT_CONFIGURED", "Perptape API key is not configured")
         now = normalize_perptape_operational_datetime(
@@ -1147,18 +1199,24 @@ class PerptapeClient:
                 raise PerptapeRateLimited(self._rate_limit_not_before)
             if (
                 not force
-                and self._feed is not None
-                and self._cached_at is not None
-                and now < self._feed.next_allowed_at
+                and source_exchange in self._feeds
+                and source_exchange in self._cached_at_by_exchange
+                and now < self._feeds[source_exchange].next_allowed_at
             ):
-                return self._feed
+                return self._feeds[source_exchange]
             if self._server_not_before is not None and now < self._server_not_before:
                 raise PerptapeRateLimited(self._server_not_before)
+            if (
+                self._poll_not_before is not None
+                and now < self._poll_not_before
+                and (not force or source_exchange not in self._feeds)
+            ):
+                raise PerptapeRateLimited(self._poll_not_before)
             query = urllib.parse.urlencode(
                 {
                     "tf": "1h,4h,1d,1w",
                     "dir": "ALL",
-                    "ex": "ALL",
+                    "ex": source_exchange,
                     "limit": "200",
                     "sort": "triggeredAt",
                 }
@@ -1183,31 +1241,39 @@ class PerptapeClient:
                         self._rate_limit_not_before or exc.next_allowed_at,
                         exc.next_allowed_at,
                     )
-                    if self._feed is not None:
-                        self._feed = replace(
-                            self._feed,
+                    if source_exchange in self._feeds:
+                        self._feeds[source_exchange] = replace(
+                            self._feeds[source_exchange],
                             next_allowed_at=max(
-                                self._feed.next_allowed_at,
+                                self._feeds[source_exchange].next_allowed_at,
                                 exc.next_allowed_at,
                             ),
                         )
+                        self._feed = self._feeds[source_exchange]
                 raise
-            candidates = self._parse_response(value)
+            candidates = tuple(
+                candidate
+                for candidate in self._parse_response(value)
+                if candidate.source_exchange == source_exchange
+            )
             generated_at, next_allowed_at = self._parse_feed_times(value, now=now)
             self._remote_result_generation += 1
             self._remote_success_generation = self._remote_result_generation
             self._consecutive_remote_rate_limits = 0
             self._rate_limit_not_before = None
+            effective_next_allowed_at = max(cache_deadline, next_allowed_at)
             self._server_not_before = next_allowed_at
-            self._cached_at = now
-            self._cached = tuple(candidates)
+            self._poll_not_before = effective_next_allowed_at
+            self._cached_at_by_exchange[source_exchange] = now
             self._feed = PerptapeFeedSnapshot(
                 contract_version=self._contract_version,
                 generated_at=generated_at,
                 fetched_at=now,
-                next_allowed_at=max(cache_deadline, next_allowed_at),
-                candidates=self._cached,
+                next_allowed_at=effective_next_allowed_at,
+                candidates=candidates,
+                source_exchange=source_exchange,
             )
+            self._feeds[source_exchange] = self._feed
             return self._feed
 
     @staticmethod

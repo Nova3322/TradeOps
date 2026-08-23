@@ -21,6 +21,71 @@ const proposalExpiryPresentation = item => {
   }
   return {at:item.expires_at, state:fmtTimeRemaining(item.expires_at)};
 };
+const normalizeRecordPageSize = value => Number(value) === 100 ? 100 : 50;
+function recordPage(items, page = 1, pageSize = 50) {
+  const size = normalizeRecordPageSize(pageSize);
+  const total = items.length;
+  const totalPages = Math.max(1, Math.ceil(total / size));
+  const currentPage = Math.min(Math.max(1, Number(page) || 1), totalPages);
+  const start = (currentPage - 1) * size;
+  return {
+    items:items.slice(start, start + size),
+    page:currentPage,
+    pageSize:size,
+    total,
+    totalPages,
+  };
+}
+function recordPageSummary(page) {
+  return currentLanguage === 'en'
+    ? `Page ${page.page} of ${page.totalPages} · ${page.total} records`
+    : `第 ${page.page} / ${page.totalPages} 页 · 共 ${page.total} 条`;
+}
+function recordPaginationMarkup(total, ariaLabel) {
+  const initial = {page:1, totalPages:Math.max(1, Math.ceil(total / 50)), total};
+  return `<nav class="record-pagination" aria-label="${escapeHtml(ariaLabel)}" data-record-pagination><span data-record-page-summary>${escapeHtml(recordPageSummary(initial))}</span><div><label>每页<select data-record-page-size aria-label="每页记录数"><option value="50" selected>50</option><option value="100">100</option></select>条记录</label><button class="secondary" type="button" data-record-page-delta="-1" disabled>上一页</button><button class="secondary" type="button" data-record-page-delta="1" ${initial.totalPages <= 1 ? 'disabled' : ''}>下一页</button></div></nav>`;
+}
+function bindRecordList({rootSelector, rowSelector, filterSelectors, matches, emptySelector, visibleCountSelector, totalCountSelector}) {
+  const root = rootSelector ? document.querySelector(rootSelector) : document;
+  if (!root) return;
+  const rows = [...root.querySelectorAll(rowSelector)];
+  const pagination = root.querySelector('[data-record-pagination]');
+  let page = 1;
+  let pageSize = 50;
+  const apply = ({resetPage = false} = {}) => {
+    if (resetPage) page = 1;
+    const matched = rows.filter(matches);
+    const current = recordPage(matched, page, pageSize);
+    page = current.page;
+    pageSize = current.pageSize;
+    rows.forEach(row => { row.hidden = true; });
+    current.items.forEach(row => { row.hidden = false; });
+    root.querySelectorAll(totalCountSelector).forEach(node => { node.textContent = current.total; });
+    const visible = root.querySelector(visibleCountSelector);
+    if (visible) visible.textContent = current.items.length;
+    const empty = root.querySelector(emptySelector);
+    if (empty) empty.hidden = current.total !== 0;
+    if (pagination) {
+      pagination.hidden = current.total === 0;
+      pagination.querySelector('[data-record-page-summary]').textContent = recordPageSummary(current);
+      pagination.querySelector('[data-record-page-size]').value = String(current.pageSize);
+      const previous = pagination.querySelector('[data-record-page-delta="-1"]');
+      const next = pagination.querySelector('[data-record-page-delta="1"]');
+      previous.disabled = current.page <= 1;
+      next.disabled = current.page >= current.totalPages;
+    }
+  };
+  filterSelectors.forEach(selector => root.querySelector(selector)?.addEventListener('input', () => apply({resetPage:true})));
+  pagination?.querySelectorAll('[data-record-page-delta]').forEach(button => button.addEventListener('click', () => {
+    page += Number(button.dataset.recordPageDelta);
+    apply();
+  }));
+  pagination?.querySelector('[data-record-page-size]')?.addEventListener('change', event => {
+    pageSize = normalizeRecordPageSize(event.currentTarget.value);
+    apply({resetPage:true});
+  });
+  apply();
+}
 const statusLabels = {DRAFT:'草稿',PENDING_REVIEW:'待审核',APPROVED:'已批准',REJECTED:'已拒绝',EXPIRED:'已过期',ALLOW:'通过',SCALE:'缩小仓位',DENY:'拒绝',PENDING:'等待中',RETRY_WAIT:'等待重试',SENDING:'发送中',DEAD_LETTER:'投递失败',OUTCOME_UNKNOWN:'发送结果未知',RESERVED:'已预留',READY:'待发送',DISPATCHING:'已派发，等待确认',SENT:'已发送',PARTIALLY_FILLED:'部分成交',FILLED:'已成交',CANCELLED:'已取消',UNKNOWN:'结果未知',KNOWN:'已确认',OPENING:'建仓中',OPEN:'持仓中',REDUCING:'减仓中',CLOSING:'退出中',CLOSED:'已结束',ACTIVE:'有效',DEGRADED:'保护不足',RELEASED:'已释放',MATCH:'对账一致',DIFFERENCE:'存在差异',MANUAL_REQUIRED:'需要人工处理',RESOLVED:'已解决',NORMAL:'正常',URGENT:'紧急',IMMEDIATE:'立即',ENABLED:'已开启',DISABLED:'已关闭',SUCCESS:'连接正常',FAILED:'连接失败',SKIPPED:'未运行',STALE:'数据已过期',WAITING:'等待首次同步',UNCONFIGURED:'未配置',NOT_CONFIGURED:'未配置',NOT_VERIFIED:'待验证',VERIFIED:'已验证',ON_DEMAND:'按需读取',MISSING:'缺失',CURRENT:'当前有效',INCOMPLETE:'数据不完整',EMPTY:'暂无数据',AVAILABLE:'可用',CONTROLLED:'受控',READ_ONLY:'只读',BLOCKED:'已安全阻断',NOT_SUBMITTED:'未提交',SOURCE_RESERVED:'源端已预留',SUBMITTED:'已提交',IN_FLIGHT:'划转中',DESTINATION_CONFIRMED:'目的端已确认',SETTLED:'已结算',FAILED_SOURCE_RESTORED:'失败，源端已恢复',DEPOSIT_PLAN_READY:'充值计划待执行',DEPOSIT_CONFIRMED:'充值已确认',RELEASE_REQUEST_PLAN_READY:'释放申请计划待执行',RELEASE_REQUEST_CONFIRMED:'释放申请已确认',RELEASE_EXECUTION_PLAN_READY:'释放执行计划待执行',RELEASE_EXECUTION_CONFIRMED:'释放执行已确认',RELEASE_CANCELLATION_PLAN_READY:'释放取消计划待执行',RELEASE_CANCELLED:'释放已取消'};
 const riskLabels = {LOW:'低风险',MEDIUM:'中风险',HIGH:'高风险'};
 const intentKindLabels = {INITIAL:'初仓',ADD:'加仓',REDUCE:'减仓',EXIT:'退出'};
@@ -77,7 +142,7 @@ const connectionEnglishCopy = {
   READ_ONLY_PROBE_FAILED:['The latest read-only probe failed; the data is not marked available.','Inspect the non-sensitive error category and rerun the read-only probe.'],
 };
 const venueModeLabels = {USER_DATA_READ_ONLY:'账户数据只读',INFO_READ_ONLY:'账户数据只读',READ_ONLY:'只读'};
-const accountModeLabels = {PORTFOLIO_MARGIN:'统一账户',MAIN_ACCOUNT:'主账户',SUBACCOUNT:'子账户'};
+const accountModeLabels = {STANDARD:'标准账户',PORTFOLIO_MARGIN:'统一账户',MAIN_ACCOUNT:'主账户',SUBACCOUNT:'子账户'};
 const fmtIntentKind = (value) => localizedText(intentKindLabels[value] || value || '未知意图');
 const fmtDirection = (value) => localizedText(directionLabels[value] || value || '未知方向');
 const fmtSide = (value) => currentLanguage === 'en'
@@ -91,6 +156,8 @@ const deploymentEnvironmentEnglishLabels = {
   LOCAL:'Local runtime', TEST:'Test runtime', PRODUCTION:'Production runtime',
   LIVE:'Production mode', TESTNET:'Test mode',
 };
+const compactEnvironmentLabels = {LIVE:'生产', TESTNET:'测试'};
+const compactEnvironmentEnglishLabels = {LIVE:'Production', TESTNET:'Test'};
 const fmtEnvironment = (value, withCode = false) => {
   const code = String(value || '').trim().toUpperCase();
   const labels = currentLanguage === 'en'
@@ -99,18 +166,29 @@ const fmtEnvironment = (value, withCode = false) => {
   const label = labels[code] || (currentLanguage === 'en' ? 'Unknown environment' : '环境未确认');
   return withCode && code ? `${label} · ${code}` : label;
 };
+const fmtCompactEnvironment = value => {
+  const code = String(value || '').trim().toUpperCase();
+  const labels = currentLanguage === 'en'
+    ? compactEnvironmentEnglishLabels
+    : compactEnvironmentLabels;
+  return labels[code] || (currentLanguage === 'en' ? 'Not set' : '待配置');
+};
 const fmtExecutionMode = mode => mode === 'LIVE' ? '生产模式' : mode === 'TESTNET' ? '测试模式' : '待配置';
 function updateEnvironmentIndicators() {
   const deploymentLabel = fmtEnvironment(authStatus?.environment);
   const teamMode = session?.active_team?.execution_mode;
   const modeLabel = ['LIVE','TESTNET'].includes(teamMode)
-    ? fmtEnvironment(teamMode)
+    ? fmtCompactEnvironment(teamMode)
     : localizedText('待配置');
+  const modeMeaning = ['LIVE','TESTNET'].includes(teamMode) ? fmtEnvironment(teamMode, true) : modeLabel;
   const labelSeparator = currentLanguage === 'en' ? ': ' : '：';
-  environmentBadge.textContent = `${localizedText('当前模式')}${labelSeparator}${modeLabel}`;
+  environmentModeValue.textContent = modeLabel;
   environmentBadge.dataset.environment = String(teamMode || 'setup').toLowerCase();
-  environmentBadge.setAttribute('aria-label', `${localizedText('当前模式')}${labelSeparator}${modeLabel}`);
-  environmentBadge.title = `${localizedText('当前模式')}${labelSeparator}${modeLabel} · ${localizedText('当前环境')}${labelSeparator}${deploymentLabel}`;
+  environmentBadge.setAttribute('aria-label', `${localizedText('当前模式')}${labelSeparator}${modeMeaning}`);
+  environmentBadge.title = `${localizedText('当前模式')}${labelSeparator}${modeMeaning} · ${localizedText('当前环境')}${labelSeparator}${deploymentLabel}`;
+  const canOpenModeSwitcher = Boolean(session && hasCapability('venue.view'));
+  environmentBadge.disabled = !canOpenModeSwitcher;
+  if (!canOpenModeSwitcher) environmentBadge.setAttribute('aria-expanded', 'false');
 }
 const fmtVenueLabel = (value) => currentLanguage === 'en'
   ? ({BINANCE:'Binance', HYPERLIQUID:'Hyperliquid', OKX:'OKX', BYBIT:'Bybit', '币安':'Binance', '链上永续':'Hyperliquid'}[value] || value || 'Unknown venue')
@@ -257,6 +335,9 @@ const apiErrorGuidance = {
   PASSWORD_UNCHANGED:'新密码必须与当前密码不同。',
   AUTH_VERSION_CONFLICT:'登录身份已变化，请刷新页面后重新验证。',
   PASSWORD_AUTH_REQUIRED:'当前会话不是密码登录，请使用密码重新登录后修改。',
+  STEP_UP_PASSWORD_INVALID:'当前账户密码不正确，本次操作未执行。',
+  STEP_UP_RATE_LIMITED:'密码验证尝试过多，请稍后再试；本次操作未执行。',
+  EXECUTION_PREVIEW_UNAVAILABLE:'生产订单确认字段不完整；审核保持未提交。请刷新页面后重新核对。',
   AGENT_TOKEN_INVALID:'该 API Key 已失效、已轮换或不匹配。请使用当前凭证。',
   AGENT_TOKEN_EXPIRED:'该 API Key 已到期。请在网页中轮换凭证。',
   API_CLIENT_RATE_LIMITED:'该 API Key 请求过于频繁，请稍后重试。',
@@ -278,6 +359,69 @@ const apiErrorGuidance = {
   CAPABILITY_FORBIDDEN:'当前身份没有查看或执行此操作的权限。',
   LIVE_SCOPE_CONFIGURATION_REQUIRED:'实盘账户或交易所范围尚未配置完整。',
   EXCHANGE_ACCOUNT_NOT_FOUND:'账户已删除、已停用或不属于当前团队，请刷新账户列表后重试。',
+  DEFAULT_ACCOUNT_REQUIRED:'请填写与服务端生产运行绑定完全一致的账户 ID。系统校验不可变 account_id，不使用可编辑的账户名称。',
+  CAPITAL_CONFIGURATION_FEE_LIMIT_INVALID:'最大费用上限必须低于单次金额上限，请调整后重新保存。',
+  CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_SCOPE_MISMATCH:'币安受限提现地址必须与当前使用的链上金库地址完全一致。使用 Safe 时请填写 Safe Smart Account；使用 NoTilt 时请填写 NoTilt 金库地址。',
+  BINANCE_CAPITAL_CREDENTIALS_MISSING:'所选生产币安账户缺少已验证的资金 API 凭据。请到账户管理补齐 API Key 与 Secret，并重新执行连接测试。',
+  BINANCE_CAPITAL_TIME_SYNC_FAILED:'服务端未能读取币安官方时间，签名请求保持阻断。请检查服务器到币安 API 的网络后重试。',
+  BINANCE_CAPITAL_AUTHORIZATION_REJECTED:'币安拒绝了资金 API 的密钥、来源 IP 或接口权限。请确认该 Key 已开启读取与提现权限，并把服务端固定出口 IP 加入币安 IP 白名单。',
+  BINANCE_CAPITAL_TIMESTAMP_REJECTED:'币安拒绝了签名请求时间。系统已使用官方时间；请重试，持续失败时检查服务端时间与网络代理。',
+  BINANCE_CAPITAL_RATE_LIMITED:'币安资金 API 当前触发限流或临时 IP 封禁，请按 Retry-After 等待后重试。',
+  BINANCE_CAPITAL_IP_RESTRICTION_REQUIRED:'当前币安 API Key 未启用受限 IP。请在币安 API 管理中绑定本服务的固定出口 IP 后重试。',
+  BINANCE_CAPITAL_WITHDRAW_PERMISSION_DISABLED:'当前币安 API Key 没有提现权限。请在币安 API 管理中核对权限后重试。',
+  BINANCE_INTERNAL_TRANSFER_PERMISSION_DISABLED:'币安 Universal Transfer 实际端点拒绝了该 API Key。请核对币安 API 的现货与合约账户划转权限、IP 白名单和账户范围后重试。',
+  BINANCE_INTERNAL_TRANSFER_PENDING:'币安已受理账户内部划转，但现货余额或划转历史尚未确认。本次提现未重复提交；请刷新查看阻断状态，由系统先按只读历史完成对账。',
+  BINANCE_INTERNAL_TRANSFER_SUBMISSION_UNKNOWN:'币安账户内部划转的提交结果未知。系统已阻断重复提交；请先按币安划转历史核对固定金额和方向。',
+  BINANCE_CAPITAL_SUBMISSION_UNKNOWN:'币安提现提交结果未知。系统已记录阻断并禁止盲目重试；请先按固定 withdrawOrderId 核对提现历史。',
+  CAPITAL_RESULT_UNKNOWN:'币安资金操作结果未确认。系统已记录阻断并停止重复提交；请先核对币安账户内部划转与提现历史。',
+  BINANCE_WITHDRAWAL_SUBMISSION_IN_PROGRESS:'币安提现已进入受控提交阶段；刷新页面查看最终结果，不要重复点击。',
+  BINANCE_DEPOSIT_CONTINUATION_WORKER_OWNED:'该笔链上充值已由后台任务接管；系统每 5 分钟按 txHash 核对，最多 10 次，无需保持浏览器打开。',
+  BINANCE_DEPOSIT_CONTINUATION_EXHAUSTED:'后台已完成 10 次币安充值核对，仍未找到匹配 txHash 的已入账 USDC。任务已停止，请核对链上交易和币安充值记录。',
+  BINANCE_DEPOSIT_CONTINUATION_SCOPE_INVALID:'后台续接发现账户、地址、网络或系统 txHash 范围不完整，已安全停止。请由系统管理员核对该操作记录。',
+  BINANCE_CAPITAL_DESTINATION_NOT_ALLOWLISTED:'当前链上金库地址未出现在币安 USDC / Arbitrum 提现地址白名单。请在币安地址管理中添加当前 Safe 或 NoTilt 金库地址，等待生效后重试。',
+  BINANCE_CAPITAL_DEPOSIT_ADDRESS_MISMATCH:'币安实时返回的 USDC / Arbitrum 充值地址与资金配置不一致。请核对币安充值地址后保存新的资金配置版本。',
+  BINANCE_CAPITAL_NETWORK_BUSY:'币安当前将 USDC / Arbitrum 网络标记为繁忙，资金操作保持阻断。请等待网络恢复后重试。',
+  BINANCE_CAPITAL_DEPOSIT_DISABLED:'币安当前关闭了 USDC / Arbitrum 充值，资金操作保持阻断。请等待充值恢复后重试。',
+  BINANCE_CAPITAL_WITHDRAW_DISABLED:'币安当前关闭了 USDC / Arbitrum 提现，资金操作保持阻断。请等待提现恢复后重试。',
+  BINANCE_CAPITAL_AMOUNT_OUT_OF_RANGE:'划转金额不在币安当前 USDC / Arbitrum 提现范围内。请按实时最小值和最大值调整金额。',
+  BINANCE_CAPITAL_FEE_LIMIT_EXCEEDED:'币安当前提现手续费超过资金配置冻结的最大费用上限。请核对实时费用后提高上限或稍后重试。',
+  BINANCE_CAPITAL_BALANCE_INSUFFICIENT:'币安生产账户的可用 USDC 余额不足以覆盖本次提现金额和手续费。',
+  BINANCE_CAPITAL_QUOTA_EXCEEDED:'币安生产账户当前可用提现额度不足。请等待额度恢复或降低金额。',
+  BINANCE_CAPITAL_TRAVEL_RULE_REQUIRED:'币安要求本次提现完成 Travel Rule 信息。当前固定资金路径保持阻断，请先在币安完成所需信息。',
+  BINANCE_CAPITAL_SUBMISSION_DISABLED:'币安真实提现提交开关当前关闭。请由系统管理员核对生产运行配置。',
+  BINANCE_CAPITAL_RESPONSE_INVALID:'币安资金 API 返回了未识别的数据格式，本次操作未提交。请刷新后重试；持续出现时请由系统管理员检查币安接口兼容性。',
+  BINANCE_CAPITAL_API_REJECTED:'币安拒绝了资金 API 请求。请核对 API 权限、固定出口 IP、账户状态和请求时间。',
+  BINANCE_CAPITAL_API_UNAVAILABLE:'币安资金 API 当前不可达，资金操作保持原位。请稍后重试。',
+  SAFE_ACCOUNT_NOT_DEPLOYED:'当前 Safe Smart Account 尚未部署在 Arbitrum。请核对链与 Safe 地址。',
+  SAFE_ALLOWANCE_MODULE_DISABLED:'当前 Safe 尚未启用官方 Allowance Module。请由 Safe 多签所有者启用模块后重试。',
+  SAFE_ALLOWANCE_OR_BALANCE_INSUFFICIENT:'Safe 当前可用 Spending Limit 或 USDC 余额不足。请降低金额，或由 Safe 所有者提高 delegate 额度并确保余额充足。',
+  SAFE_PREFLIGHT_REJECTED:'Safe 官方 Allowance Module 实时预检未通过。请核对 Safe、delegate、模块、额度与余额。',
+  HYPERLIQUID_DEPOSIT_ACCOUNT_MISMATCH:'当前自有 Arbitrum 地址与 Hyperliquid API Wallet 所属主账户不一致。请把资金路径地址改为该主账户，或换用属于当前自有地址的 Hyperliquid API Wallet。',
+  HYPERLIQUID_AGENT_SCOPE_MISMATCH:'配置的 Hyperliquid API Wallet 属于另一主账户。请修正 API Wallet 与生产账户绑定后重试。',
+  HYPERLIQUID_AGENT_NOT_AUTHORIZED:'配置的 Hyperliquid API Wallet 当前不是有效 Agent。请在 Hyperliquid 主账户重新授权后重试。',
+  HYPERLIQUID_DEPOSIT_BELOW_MINIMUM:'Hyperliquid Arbitrum 入金必须至少为 5 USDC；请同时为最大费用预留空间。',
+  HYPERLIQUID_DEPOSIT_BALANCE_INSUFFICIENT:'已确认转入的 Hyperliquid 主钱包当前 USDC 余额不足。本次操作已终止；请重新发起一条新路径，不会继续旧的未签名请求。',
+  HYPERLIQUID_WITHDRAWAL_FEE_LIMIT_TOO_LOW:'资金配置的最大费用上限低于 Hyperliquid 当前官方路由费用。请按实时预检显示的费用调整上限后重试。',
+  HYPERLIQUID_WITHDRAWABLE_INSUFFICIENT:'Hyperliquid 当前可提现余额不足以覆盖划转金额和实时路由费用。请降低金额或补足可用余额。',
+  HYPERLIQUID_MAIN_ACCOUNT_MISSING:'当前生产账户没有可核验的 Hyperliquid 主账户地址。请在账户管理中核对主账户与 API Wallet 绑定。',
+  HYPERLIQUID_CAPITAL_SCOPE_MISSING:'Hyperliquid 主账户、官方 Bridge2 或 Arbitrum 钱包范围不完整，请核对资金配置。',
+  HYPERLIQUID_CAPITAL_PREFLIGHT_UNAVAILABLE:'Hyperliquid 官方资金预检当前不可达，资金操作保持原位。请稍后重试。',
+  HYPERLIQUID_SPOT_METADATA_INVALID:'Hyperliquid 官方 spotMeta 没有返回有效的规范资产标识，本次签名请求未生成。请稍后重试。',
+  HYPERLIQUID_SPOT_TOKEN_UNKNOWN:'Hyperliquid 官方 spotMeta 没有唯一规范 USDC 资产，本次签名请求未生成。请稍后重试。',
+  HYPERLIQUID_BROWSER_SUBMISSION_UNAVAILABLE:'钱包签名已完成，但浏览器未能连接 Hyperliquid 官方提交端点。请先核对 Hyperliquid 资金记录，确认未提交后再重试。',
+  HYPERLIQUID_SUBMISSION_REJECTED:'Hyperliquid 官方端点拒绝了已签名请求。资金记录保持未确认；请核对钱包账户、金额和 Hyperliquid 当前状态。',
+  WALLET_PROVIDER_NOT_AVAILABLE:'当前标签页没有检测到钱包。请允许钱包扩展访问 127.0.0.1，刷新资金页面后重试。',
+  WALLET_PROVIDER_SELECTION_REQUIRED:'检测到多个钱包，但没有钱包连接到本次要求的账户。请在目标钱包中连接 TradeOps 后重试。',
+  WALLET_ACCOUNT_ACCESS_DENIED:'钱包尚未授权 TradeOps 读取当前账户。请在钱包中允许连接后重试。',
+  WALLET_ACCOUNT_INVALID:'钱包没有返回有效账户，请解锁钱包并重新连接 TradeOps。',
+  WALLET_ACCOUNT_MISMATCH:'当前钱包账户不是本次资金路径要求的 Hyperliquid 主账户或 Safe delegate，请切换正确账户后重试。',
+  WALLET_NETWORK_SWITCH_FAILED:'钱包未能切换到 Arbitrum One，请在钱包中手动选择 Arbitrum One 后重试。',
+  WALLET_GAS_INSUFFICIENT:'当前钱包没有足够的 Arbitrum ETH 支付 Gas，请补充少量 ETH 后重试。',
+  WALLET_REQUEST_PENDING:'钱包中已有待处理请求，请先在钱包里完成或取消，再回到 TradeOps 重试。',
+  WALLET_REQUEST_FAILED:'钱包没有接受本次请求。请打开钱包查看具体提示，确认没有待处理弹窗后重试。',
+  WALLET_CONFIRMATION_CANCELLED:'已取消钱包确认，链上交易未发送；该次未签名请求不再继续。',
+  WALLET_CONFIRMATION_PARTIALLY_CANCELLED:'已取消后续钱包确认；前序已提交的公开交易保持回执跟踪，不会重复发送。',
+  NOTILT_VAULT_SCOPE_MISMATCH:'NoTilt 金库地址与当前可信生产范围不一致，请核对金库地址后重试。',
   SECOND_CONFIRMATION_REQUIRED:'二次确认内容与当前账户不一致，请刷新页面后重新确认。',
   VERSION_CONFLICT:'页面数据已更新，请刷新后再执行操作。',
   NOTILT_RELEASE_BUDGET_MISSING:'当前资产没有可用的 NoTilt 实时额度，系统不会生成释放请求。',
@@ -290,6 +434,57 @@ const apiErrorGuidance = {
   NOTILT_RELEASE_LIMIT_EXCEEDED:'金额超过 NoTilt 当前实时可释放上限，请降低金额或等待额度恢复。',
 };
 const fmtStatus = (value) => localizedText(statusLabels[value] || value || '未知');
+const exchangeConnectionErrorLabels = {
+  BINANCE_AUTHENTICATION_FAILED:'币安拒绝了凭据、只读权限或出口 IP 范围',
+  BINANCE_TIMESTAMP_REJECTED:'币安拒绝了请求时间；系统会使用官方服务器时间重试',
+  BINANCE_RATE_LIMITED:'币安只读接口正在限流，请稍后重试',
+  BINANCE_RATE_LIMITED_COOLDOWN:'币安当前进程仍在临时冷却，本次未向币安发送请求',
+  BINANCE_CONNECTION_RETRY_DEFERRED:'币安当前进程仍在临时冷却，本次未向币安发送请求',
+  BINANCE_CONNECTION_WEIGHT_HEADROOM_DEFERRED:'币安只读连接验证已为请求权重余量延后',
+  BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED:'币安低优先级回执核对已为请求权重余量延后',
+  BINANCE_READ_ONLY_UNAVAILABLE:'币安官方只读接口暂时不可达',
+  BINANCE_RESPONSE_INVALID:'币安返回了当前适配器无法采信的响应',
+  READ_ONLY_PROBE_FAILED:'只读连接检查失败',
+};
+const exchangeConnectionErrorEnglishLabels = {
+  BINANCE_AUTHENTICATION_FAILED:'Binance rejected the credential, read permission, or egress IP scope',
+  BINANCE_TIMESTAMP_REJECTED:'Binance rejected the request time; the system will retry with official server time',
+  BINANCE_RATE_LIMITED:'The Binance read-only API is rate-limiting requests; retry later',
+  BINANCE_RATE_LIMITED_COOLDOWN:'The current process is still in a temporary Binance cooldown; no request was sent',
+  BINANCE_CONNECTION_RETRY_DEFERRED:'The current process is still in a temporary Binance cooldown; no request was sent',
+  BINANCE_CONNECTION_WEIGHT_HEADROOM_DEFERRED:'Binance deferred the read-only connection check to preserve request-weight headroom',
+  BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED:'Binance deferred the low-priority receipt check to preserve request-weight headroom',
+  BINANCE_READ_ONLY_UNAVAILABLE:'The official Binance read-only API is currently unreachable',
+  BINANCE_RESPONSE_INVALID:'Binance returned a response the current adapter cannot trust',
+  READ_ONLY_PROBE_FAILED:'The read-only connection probe failed',
+};
+const fmtExchangeConnectionError = value => currentLanguage === 'en'
+  ? exchangeConnectionErrorEnglishLabels[value] || value || 'No diagnostic is available'
+  : exchangeConnectionErrorLabels[value] || value || '暂无可用诊断';
+const binanceLimitCategoryLabels = {
+  ORDINARY_RATE_LIMIT:'普通请求限流',
+  REQUEST_WEIGHT_EXCEEDED:'请求权重超限',
+  IP_TEMPORARILY_BANNED:'IP 临时封禁',
+};
+function fmtBinanceConnectionDiagnostic(connection) {
+  const diagnostics = connection?.diagnostics;
+  if (!diagnostics) return fmtExchangeConnectionError(connection?.error_code);
+  const retryAt = diagnostics.next_retry_at ? fmtDate(diagnostics.next_retry_at) : '稍后';
+  if (!diagnostics.category) {
+    const summary = fmtExchangeConnectionError(connection?.error_code);
+    return diagnostics.next_retry_at ? `${summary}；建议 ${retryAt} 后重试` : summary;
+  }
+  const category = binanceLimitCategoryLabels[diagnostics.category] || diagnostics.category;
+  const status = diagnostics.http_status ? `HTTP ${diagnostics.http_status}` : 'HTTP 状态未知';
+  const code = diagnostics.binance_error_code === null || diagnostics.binance_error_code === undefined
+    ? 'Binance code 未返回' : `Binance ${diagnostics.binance_error_code}`;
+  return `${category}（${status}，${code}）；建议 ${retryAt} 后重试`;
+}
+function fmtConnectionVerificationSuccess(result) {
+  return result?.trading?.enabled
+    ? '连接测试成功；交易资格未改变，当前已开启'
+    : '连接测试成功；交易资格未改变，当前保持关闭';
+}
 const fmtRisk = (value) => localizedText(riskLabels[value] || value || '未知');
 const riskGuidance = (reason) => riskReasonGuidance[reason] || {label:'风险检查未通过',action:'查看当前风险事实，处理阻塞后重新检查。'};
 const friendlyApiError = (error) => {
@@ -309,6 +504,12 @@ const friendlyApiError = (error) => {
   const risk = riskReasonGuidance[error?.code] || riskReasonGuidance[error?.message];
   if (risk) return `${risk.label}：${risk.action}`;
   if (actionErrorGuidance[error?.code]) return actionErrorGuidance[error.code];
+  if (['BINANCE_CAPITAL_RATE_LIMITED','BINANCE_CONNECTION_RETRY_DEFERRED','BINANCE_CONNECTION_WEIGHT_HEADROOM_DEFERRED','BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED'].includes(error?.code) && error?.details) {
+    return fmtBinanceConnectionDiagnostic({error_code:error.code, diagnostics:error.details});
+  }
+  if (['HYPERLIQUID_SUBMISSION_REJECTED','HYPERLIQUID_RATE_LIMITED'].includes(error?.code) && error?.message) {
+    return error.message;
+  }
   if (apiErrorGuidance[error?.code]) return apiErrorGuidance[error.code];
   if (['REQUEST_TIMEOUT','REQUEST_ABORTED','NETWORK_ERROR'].includes(error?.code) && error?.message) return error.message;
   return '系统暂时无法完成请求，请稍后重试；如果问题持续存在，请联系系统管理员。';

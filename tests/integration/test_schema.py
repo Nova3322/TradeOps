@@ -301,6 +301,7 @@ def test_account_bound_freqtrade_worker_migration_guards_data_and_round_trips(
         base_url="http://127.0.0.1:18081",
         username="schema-user",
         password="schema-password",  # noqa: S106
+        ws_token="schema-rpc-token-fixture",  # noqa: S106
         hip3_dexes=(),
         expected_version=1,
         idempotency_key="schema-worker-configure",
@@ -371,6 +372,7 @@ def test_okx_bybit_freqtrade_constraint_migration_guards_data_and_round_trips(
         base_url="http://127.0.0.1:18084",
         username="schema-user",
         password="schema-password",  # noqa: S106
+        ws_token=f"schema-{slug}-rpc-token",
         hip3_dexes=(),
         expected_version=1,
         idempotency_key=f"schema-{slug}-worker-configure",

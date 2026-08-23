@@ -3,13 +3,13 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 
 import trading_control_plane.runtime as runtime_module
 from trading_control_plane.config import Settings
-from trading_control_plane.domain import DomainRejected, ReconciliationStatus
+from trading_control_plane.domain import DomainRejected
 from trading_control_plane.perptape import PerptapeClient, PerptapeFeedSnapshot
 from trading_control_plane.runtime import (
     RuntimeBindingSupervisor,
@@ -22,7 +22,6 @@ from trading_control_plane.runtime import (
 )
 from trading_control_plane.service import (
     PreparedPerptapeRuntimeBinding,
-    PreparedRuntimeAccountBinding,
 )
 
 
@@ -136,27 +135,13 @@ def test_runtime_readiness_requires_both_source_success_and_complete_capital() -
     assert incomplete.to_dict()["source_sync_successful"] is True
     assert incomplete.to_dict()["ready_for_new_risk"] is False
     assert failed.successful is False
-    assert failed.ready_for_new_risk is False
+    assert failed.ready_for_new_risk is True
 
 
-def test_database_binding_supervisor_builds_exact_scoped_read_only_workers() -> None:
+def test_database_binding_supervisor_builds_exact_scoped_perptape_workers() -> None:
     team_id = UUID("11111111-1111-1111-1111-111111111111")
     workspace_id = UUID("22222222-2222-2222-2222-222222222222")
-    account_principal = UUID("33333333-3333-3333-3333-333333333333")
     signal_principal = UUID("44444444-4444-4444-4444-444444444444")
-    account_binding = PreparedRuntimeAccountBinding(
-        exchange_account_id=UUID("55555555-5555-5555-5555-555555555555"),
-        workspace_id=workspace_id,
-        team_id=team_id,
-        service_principal_id=account_principal,
-        service_principal_username="runtime-team-account",
-        account_id="binance-team-main",
-        venue="BINANCE",
-        environment="TESTNET",
-        account_version=3,
-        credential_version=1,
-        credentials={"api_key": "fixture-key", "api_secret": "fixture-secret"},
-    )
     signal_binding = PreparedPerptapeRuntimeBinding(
         signal_source_id=UUID("66666666-6666-6666-6666-666666666666"),
         workspace_id=workspace_id,
@@ -173,19 +158,6 @@ def test_database_binding_supervisor_builds_exact_scoped_read_only_workers() -> 
         def __init__(self, settings: Settings) -> None:
             self.settings = settings
 
-        def run_bound_account_once(
-            self, binding: PreparedRuntimeAccountBinding, *, now: datetime
-        ) -> SourceSyncResult:
-            assert binding is account_binding
-            assert now == datetime(2026, 8, 5, tzinfo=UTC)
-            assert self.settings.runtime_binance_account_id == "binance-team-main"
-            assert self.settings.runtime_hyperliquid_account_id is None
-            assert self.settings.binance_api_key == "fixture-key"
-            assert self.settings.binance_api_secret == "fixture-secret"  # noqa: S105
-            assert self.settings.binance_read_only_enabled is True
-            assert self.settings.hyperliquid_read_only_enabled is False
-            return SourceSyncResult("SUCCESS", items_observed=2)
-
         def run_bound_perptape_once(
             self, binding: PreparedPerptapeRuntimeBinding, *, now: datetime
         ) -> SourceSyncResult:
@@ -193,8 +165,7 @@ def test_database_binding_supervisor_builds_exact_scoped_read_only_workers() -> 
             assert now == datetime(2026, 8, 5, tzinfo=UTC)
             assert self.settings.perptape_api_key == "perptape-fixture-key"
             assert self.settings.perptape_service_username == "signal-team-source"
-            assert self.settings.binance_read_only_enabled is False
-            assert self.settings.hyperliquid_read_only_enabled is False
+            assert self.settings.notilt_enabled is False
             return SourceSyncResult("SUCCESS", items_observed=4)
 
     def factory(settings: Settings, _database: Any) -> FakeWorker:
@@ -212,7 +183,6 @@ def test_database_binding_supervisor_builds_exact_scoped_read_only_workers() -> 
         worker_factory=factory,  # type: ignore[arg-type]
     )
     supervisor.service = SimpleNamespace(
-        runtime_account_bindings=lambda: (account_binding,),
         perptape_runtime_bindings=lambda: (signal_binding,),
     )
 
@@ -221,12 +191,61 @@ def test_database_binding_supervisor_builds_exact_scoped_read_only_workers() -> 
     assert report.successful is True
     assert report.to_dict()["binding_source"] == "DATABASE_ENVELOPE"
     assert report.sources == {
-        f"{team_id}:BINANCE:binance-team-main": SourceSyncResult("SUCCESS", items_observed=2),
         f"{team_id}:PERPTAPE": SourceSyncResult("SUCCESS", items_observed=4),
     }
-    assert len(built) == 2
-    assert "fixture-secret" not in repr(account_binding)
+    assert len(built) == 1
     assert "perptape-fixture-key" not in repr(signal_binding)
+
+
+def test_database_binding_supervisor_reuses_stream_worker_for_polling() -> None:
+    now = datetime(2026, 8, 21, tzinfo=UTC)
+    binding = PreparedPerptapeRuntimeBinding(
+        signal_source_id=UUID("11111111-1111-1111-1111-111111111111"),
+        workspace_id=UUID("22222222-2222-2222-2222-222222222222"),
+        team_id=UUID("33333333-3333-3333-3333-333333333333"),
+        service_principal_id=UUID("44444444-4444-4444-4444-444444444444"),
+        service_principal_username="signal-team-source",
+        source_version=2,
+        credential_version=1,
+        api_key="shared-client-fixture-key",
+    )
+    polling_calls = 0
+
+    class FakeWorker:
+        def run_bound_perptape_once(
+            self,
+            prepared: PreparedPerptapeRuntimeBinding,
+            *,
+            now: datetime,
+        ) -> SourceSyncResult:
+            nonlocal polling_calls
+            assert prepared is binding
+            assert now == datetime(2026, 8, 21, tzinfo=UTC)
+            polling_calls += 1
+            return SourceSyncResult("SUCCESS", items_observed=2)
+
+    worker = FakeWorker()
+    supervisor = RuntimeBindingSupervisor(
+        settings=Settings(
+            database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+            _env_file=None,
+        ),
+        database=object(),  # type: ignore[arg-type]
+        clock=lambda: now,
+        worker_factory=lambda _settings, _database: pytest.fail(
+            "polling must reuse the stream worker and its shared Perptape client"
+        ),
+    )
+    supervisor.service = SimpleNamespace(perptape_runtime_bindings=lambda: (binding,))
+    supervisor._perptape_streams[binding.signal_source_id] = SimpleNamespace(
+        version=supervisor._perptape_binding_version(binding),
+        worker=worker,
+    )
+
+    report = supervisor.run_once()
+
+    assert report.successful is True
+    assert polling_calls == 1
 
 
 def test_database_binding_supervisor_isolates_team_stream_failure_and_restarts_rotation() -> None:
@@ -353,100 +372,104 @@ def test_database_binding_supervisor_isolates_team_stream_failure_and_restarts_r
     assert supervisor.dependencies_in_use is False
 
 
-def test_database_binding_supervisor_keeps_okx_secrets_out_of_settings() -> None:
-    binding = PreparedRuntimeAccountBinding(
-        exchange_account_id=UUID("55555555-5555-5555-5555-555555555555"),
+def test_database_binding_supervisor_restarts_transient_stream_after_bounded_cooldown() -> None:
+    now = datetime(2026, 8, 21, tzinfo=UTC)
+    binding = PreparedPerptapeRuntimeBinding(
+        signal_source_id=UUID("11111111-1111-1111-1111-111111111111"),
         workspace_id=UUID("22222222-2222-2222-2222-222222222222"),
-        team_id=UUID("11111111-1111-1111-1111-111111111111"),
-        service_principal_id=UUID("33333333-3333-3333-3333-333333333333"),
-        service_principal_username="runtime-okx-account",
-        account_id="okx-team-main",
-        venue="OKX",
-        environment="LIVE",
-        account_version=3,
+        team_id=UUID("33333333-3333-3333-3333-333333333333"),
+        service_principal_id=UUID("44444444-4444-4444-4444-444444444444"),
+        service_principal_username="signal-team-source",
+        source_version=2,
         credential_version=1,
-        credentials={
-            "api_key": "okx-fixture-key",
-            "api_secret": "okx-fixture-secret",
-            "passphrase": "okx-fixture-passphrase",
-        },
+        api_key="transient-stream-secret",
     )
+    builds = 0
+
+    class FakeStream:
+        def __init__(self, *, transient_failure: bool) -> None:
+            self.transient_failure = transient_failure
+            self.fatal_error_code: str | None = None
+            self.connection_healthy = False
+            self.stats = SimpleNamespace(messages_received=0)
+            self.started = threading.Event()
+
+        def run_forever(self, stop_event: threading.Event) -> None:
+            self.started.set()
+            if self.transient_failure:
+                self.fatal_error_code = "PERPTAPE_STREAM_UNAVAILABLE"
+                stop_event.set()
+                return
+            self.connection_healthy = True
+            self.stats.messages_received = 1
+            stop_event.wait()
 
     class FakeWorker:
-        installed: PreparedRuntimeAccountBinding | None = None
+        def build_bound_perptape_stream(
+            self, prepared: PreparedPerptapeRuntimeBinding
+        ) -> FakeStream:
+            nonlocal builds
+            assert prepared is binding
+            builds += 1
+            return FakeStream(transient_failure=builds == 1)
 
-        def install_database_account_reader(
-            self, account_binding: PreparedRuntimeAccountBinding
-        ) -> None:
-            self.installed = account_binding
-
-    captured: list[Settings] = []
-
-    def factory(settings: Settings, _database: Any) -> FakeWorker:
-        captured.append(settings)
-        return FakeWorker()
-
+    health: list[dict[str, dict[str, Any]]] = []
     supervisor = RuntimeBindingSupervisor(
         settings=Settings(
             database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+            runtime_sync_interval_seconds=30,
+            perptape_websocket_reconnect_max_seconds=1,
+            credential_encryption_key=("eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg"),
             _env_file=None,
         ),
         database=object(),  # type: ignore[arg-type]
-        worker_factory=factory,  # type: ignore[arg-type]
+        worker_factory=lambda _settings, _database: FakeWorker(),  # type: ignore[arg-type]
+    )
+    supervisor.service = SimpleNamespace(
+        record_runtime_source_health=lambda _actor, sources, **_kwargs: health.append(sources)
     )
 
-    worker = supervisor._account_worker(binding)
+    try:
+        supervisor._reconcile_perptape_streams((binding,), now=now)
+        assert supervisor._perptape_streams[binding.signal_source_id].stream.started.wait(1)
+        supervisor._reconcile_perptape_streams((binding,), now=now)
 
-    assert worker.installed is binding
-    serialized = repr(captured[0].model_dump())
-    assert "okx-fixture-key" not in serialized
-    assert "okx-fixture-secret" not in serialized
-    assert "okx-fixture-passphrase" not in serialized
-    assert "okx-fixture-secret" not in repr(binding)
-
-
-def test_runtime_rate_limit_cooldown_skips_only_until_retry_deadline() -> None:
-    now = datetime(2026, 8, 5, 1, 0, tzinfo=UTC)
-    worker: Any = object.__new__(RuntimeSyncWorker)
-    worker.queries = SimpleNamespace(
-        runtime_source_health=lambda _actor, _source, **_scope: {
-            "error_code": "HYPERLIQUID_RATE_LIMITED",
-            "retry_at": (now + timedelta(minutes=2)).isoformat(),
-        }
-    )
-
-    cooldown = worker._rate_limit_cooldown("HYPERLIQUID", actor_id=uuid4(), now=now)
-
-    assert cooldown == SourceSyncResult(
-        "SKIPPED",
-        error_code="HYPERLIQUID_RATE_LIMITED_COOLDOWN",
-    )
-    assert (
-        worker._rate_limit_cooldown("HYPERLIQUID", actor_id=uuid4(), now=now + timedelta(minutes=2))
-        is None
-    )
-
-
-def test_runtime_rate_limit_cooldown_fails_open_to_a_real_probe_on_bad_metadata() -> None:
-    worker: Any = object.__new__(RuntimeSyncWorker)
-    worker.queries = SimpleNamespace(
-        runtime_source_health=lambda _actor, _source, **_scope: {
-            "error_code": "HYPERLIQUID_RATE_LIMITED",
-            "retry_at": "not-a-time",
-        }
-    )
-
-    assert (
-        worker._rate_limit_cooldown(
-            "HYPERLIQUID",
-            actor_id=uuid4(),
-            now=datetime(2026, 8, 5, tzinfo=UTC),
+        assert builds == 1
+        assert supervisor._perptape_stream_retry_at[binding.signal_source_id] == now + timedelta(
+            seconds=30
         )
-        is None
-    )
+        supervisor._reconcile_perptape_streams(
+            (binding,),
+            now=now + timedelta(seconds=29),
+        )
+        assert builds == 1
+
+        supervisor._reconcile_perptape_streams(
+            (binding,),
+            now=now + timedelta(seconds=30),
+        )
+        restarted = supervisor._perptape_streams[binding.signal_source_id]
+        assert restarted.stream.started.wait(1)
+        assert builds == 2
+        supervisor._reconcile_perptape_streams(
+            (binding,),
+            now=now + timedelta(seconds=30),
+        )
+
+        assert binding.signal_source_id not in supervisor._failed_perptape_stream_versions
+        assert binding.signal_source_id not in supervisor._perptape_stream_retry_at
+        assert binding.signal_source_id not in supervisor._perptape_stream_failure_counts
+        assert any(
+            value["PERPTAPE_WEBSOCKET"]["retry_at"]
+            == (now + timedelta(seconds=30)).isoformat()
+            for value in health
+            if value["PERPTAPE_WEBSOCKET"]["status"] == "FAILED"
+        )
+    finally:
+        supervisor._shutdown_perptape_streams()
 
 
-def test_skipped_capital_sources_cannot_be_hidden_by_a_fresh_complete_snapshot() -> None:
+def test_persisted_capital_completeness_is_independent_of_retired_venue_pollers() -> None:
     skipped = RuntimeSyncReport(
         started_at="2026-07-31T00:00:00+00:00",
         completed_at="2026-07-31T00:00:01+00:00",
@@ -460,9 +483,9 @@ def test_skipped_capital_sources_cannot_be_hidden_by_a_fresh_complete_snapshot()
     )
 
     assert skipped.successful is False
-    assert skipped.capital_sources_successful is False
-    assert skipped.ready_for_new_risk is False
-    assert skipped.to_dict()["capital_sources_successful"] is False
+    assert skipped.capital_sources_successful is True
+    assert skipped.ready_for_new_risk is True
+    assert skipped.to_dict()["capital_sources_successful"] is True
 
 
 def test_perptape_skip_is_separate_from_current_cycle_capital_readiness() -> None:
@@ -628,7 +651,11 @@ def test_runtime_https_snapshot_preserves_persisted_incomplete_stream_target() -
         perptape_cache_seconds=60,
         perptape_websocket_reconciliation_seconds=300,
     )
-    worker.queries = SimpleNamespace(perptape_feed=lambda _actor: current)
+    worker.queries = SimpleNamespace(
+        perptape_feed=lambda _actor, **_kwargs: current,
+        perptape_feeds=lambda _actor, **_kwargs: {"BN": current},
+        perptape_polling_health=lambda _actor: {},
+    )
     worker.perptape = SimpleNamespace(refresh=lambda **_kwargs: incoming)
     worker.service = SimpleNamespace(
         record_perptape_feed=lambda _actor_id, feed, **_kwargs: recorded.append(feed),
@@ -645,55 +672,7 @@ def test_runtime_https_snapshot_preserves_persisted_incomplete_stream_target() -
     assert recorded[0].candidates == (target,)
 
 
-def test_runtime_venue_success_requires_this_cycle_reconciliation_match() -> None:
-    reconciliation_id = UUID("11111111-1111-1111-1111-111111111111")
-
-    class Service:
-        status = ReconciliationStatus.DIFFERENCE
-
-        def reconcile_scope(self, scope: str, actor_id: UUID, *, now: Any) -> UUID:
-            assert scope == "LIVE:account:BINANCE"
-            return reconciliation_id
-
-        def reconciliation_status(self, value: UUID) -> ReconciliationStatus:
-            assert value == reconciliation_id
-            return self.status
-
-    worker: Any = object.__new__(RuntimeSyncWorker)
-    worker.service = Service()
-
-    with pytest.raises(DomainRejected, match="RUNTIME_RECONCILIATION_NOT_MATCH"):
-        worker._require_scope_match(
-            "LIVE:account:BINANCE",
-            UUID("22222222-2222-2222-2222-222222222222"),
-            runtime_module.datetime.fromisoformat("2026-07-31T00:00:00+00:00"),
-        )
-
-    worker.service.status = ReconciliationStatus.UNKNOWN
-    with pytest.raises(DomainRejected, match="RUNTIME_RECONCILIATION_NOT_MATCH"):
-        worker._require_scope_match(
-            "LIVE:account:BINANCE",
-            UUID("22222222-2222-2222-2222-222222222222"),
-            runtime_module.datetime.fromisoformat("2026-07-31T00:00:00+00:00"),
-        )
-
-    worker.service.status = ReconciliationStatus.MATCH
-    worker._require_scope_match(
-        "LIVE:account:BINANCE",
-        UUID("22222222-2222-2222-2222-222222222222"),
-        runtime_module.datetime.fromisoformat("2026-07-31T00:00:00+00:00"),
-    )
-
-    with pytest.raises(DomainRejected, match="BINANCE_READ_ONLY_UNAVAILABLE"):
-        worker._require_scope_match(
-            "LIVE:account:BINANCE",
-            UUID("22222222-2222-2222-2222-222222222222"),
-            runtime_module.datetime.fromisoformat("2026-07-31T00:00:00+00:00"),
-            source_error_code="BINANCE_READ_ONLY_UNAVAILABLE",
-        )
-
-
-def test_runtime_worker_factory_constructs_read_only_clients() -> None:
+def test_runtime_worker_factory_constructs_signal_and_vault_clients() -> None:
     settings = Settings(
         database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
         _env_file=None,
@@ -703,8 +682,7 @@ def test_runtime_worker_factory_constructs_read_only_clients() -> None:
     worker = build_runtime_worker(settings, database)  # type: ignore[arg-type]
 
     assert worker.database is database
-    assert worker.binance.configured is False
-    assert worker.hyperliquid.configured is False
+    assert isinstance(worker.perptape, PerptapeClient)
     assert worker.notilt.available is True
 
 

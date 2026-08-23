@@ -14,7 +14,7 @@ class PositionScope(Protocol):
     account_id: str
     venue: str
     environment: str
-    instrument_id: str
+    instrument_id: UUID
 
 
 def find_position_for_scope(

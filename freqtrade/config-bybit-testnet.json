@@ -1,0 +1,136 @@
+{
+  "$schema": "https://schema.freqtrade.io/schema.json",
+  "bot_name": "tradeops-bybit-testnet",
+  "dry_run": false,
+  "trading_mode": "futures",
+  "margin_mode": "isolated",
+  "stake_currency": "USDT",
+  "stake_amount": 6,
+  "max_open_trades": 1,
+  "timeframe": "5m",
+  "initial_state": "stopped",
+  "process_only_new_candles": true,
+  "position_adjustment_enable": true,
+  "force_entry_enable": false,
+  "cancel_open_orders_on_exit": false,
+  "stoploss": -0.01,
+  "exchange": {
+    "name": "bybit",
+    "key": "",
+    "secret": "",
+    "demo_trading": false,
+    "ccxt_config": {
+      "urls": {
+        "api": {
+          "spot": "https://api-testnet.bybit.com",
+          "futures": "https://api-testnet.bybit.com",
+          "v2": "https://api-testnet.bybit.com",
+          "public": "https://api-testnet.bybit.com",
+          "private": "https://api-testnet.bybit.com"
+        }
+      },
+      "options": {
+        "defaultType": "swap",
+        "defaultSettle": "USDT",
+        "adjustForTimeDifference": true,
+        "recvWindow": 60000
+      },
+      "enableRateLimit": true
+    },
+    "ccxt_async_config": {
+      "urls": {
+        "api": {
+          "spot": "https://api-testnet.bybit.com",
+          "futures": "https://api-testnet.bybit.com",
+          "v2": "https://api-testnet.bybit.com",
+          "public": "https://api-testnet.bybit.com",
+          "private": "https://api-testnet.bybit.com"
+        }
+      },
+      "options": {
+        "defaultType": "swap",
+        "defaultSettle": "USDT",
+        "adjustForTimeDifference": true,
+        "recvWindow": 60000
+      },
+      "enableRateLimit": true
+    },
+    "pair_whitelist": [
+      ".+/USDT:USDT"
+    ],
+    "pair_blacklist": []
+  },
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    },
+    {
+      "method": "PrecisionFilter"
+    }
+  ],
+  "entry_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1,
+    "price_last_balance": 0,
+    "check_depth_of_market": {
+      "enabled": false,
+      "bids_to_ask_delta": 1
+    }
+  },
+  "exit_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1
+  },
+  "order_types": {
+    "entry": "limit",
+    "exit": "limit",
+    "emergency_exit": "market",
+    "force_entry": "market",
+    "force_exit": "market",
+    "stoploss": "market",
+    "stoploss_on_exchange": true,
+    "stoploss_on_exchange_interval": 60
+  },
+  "unfilledtimeout": {
+    "entry": 1,
+    "exit": 1,
+    "unit": "minutes"
+  },
+  "telegram": {
+    "enabled": false,
+    "token": "",
+    "chat_id": "",
+    "authorized_users": [],
+    "allow_custom_messages": true,
+    "notification_settings": {
+      "status": "on",
+      "warning": "on",
+      "startup": "on",
+      "entry": "on",
+      "entry_fill": "on",
+      "entry_cancel": "on",
+      "exit": "on",
+      "exit_fill": "on",
+      "exit_cancel": "on",
+      "protection_trigger": "on",
+      "protection_trigger_global": "on",
+      "strategy_msg": "on",
+      "show_candle": "off"
+    },
+    "reload": false
+  },
+  "api_server": {
+    "enabled": true,
+    "listen_ip_address": "0.0.0.0",
+    "listen_port": 8080,
+    "verbosity": "error",
+    "enable_openapi": false,
+    "jwt_secret_key": "local-testnet-jwt-override-required",
+    "ws_token": "overridden-by-environment",
+    "CORS_origins": [],
+    "username": "overridden-by-environment",
+    "password": "overridden-by-environment"
+  }
+}
