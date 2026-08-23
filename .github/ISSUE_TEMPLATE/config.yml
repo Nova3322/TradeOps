@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Private security report
-    url: https://github.com/nineheavens223-sys/TradeOps/security/advisories/new
+    url: https://github.com/Nova3322/TradeOps/security/advisories/new
     about: Never report a vulnerability or credential in a public issue.
   - name: Support policy
-    url: https://github.com/nineheavens223-sys/TradeOps/blob/main/SUPPORT.md
+    url: https://github.com/Nova3322/TradeOps/blob/main/SUPPORT.md
     about: Read the community and commercial support boundaries.
