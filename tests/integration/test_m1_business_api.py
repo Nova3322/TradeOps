@@ -974,7 +974,7 @@ def test_perptape_candidate_can_start_as_explicit_live_proposal(
     asyncio.run(scenario())
 
 
-def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
+def test_high_risk_review_refresh_keeps_versions_without_legacy_gateway(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
@@ -1008,10 +1008,10 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
             assert created.status_code == 200, created.text
             proposal_id = created.json()["proposal_id"]
             first_version = created.json()["version"]
-            assert {item.reviewer_id for item in telegram.notifications()} == {
-                ids["reviewer_one"],
-                ids["reviewer_two"],
-            }
+            # Subscribed notification routes own delivery now. The legacy injected
+            # gateway must remain empty so proposal submission cannot create a
+            # second, unfiltered Telegram path.
+            assert telegram.notifications() == []
 
             await logout(client)
             await login(client, "reviewer-1")
@@ -1028,17 +1028,8 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
             assert first_review.json()["status"] == "PENDING_REVIEW"
             current_version = first_review.json()["detail"]["version"]
 
-            reviewer_one_notifications = [
-                item for item in telegram.notifications() if item.reviewer_id == ids["reviewer_one"]
-            ]
-            reviewer_two_notifications = [
-                item for item in telegram.notifications() if item.reviewer_id == ids["reviewer_two"]
-            ]
-            assert len(reviewer_one_notifications) == 1
-            assert [item.proposal_version for item in reviewer_two_notifications] == [
-                first_version,
-                current_version,
-            ]
+            assert current_version > first_version
+            assert telegram.notifications() == []
 
             await logout(client)
             await login(client, "reviewer-2")
@@ -1058,7 +1049,7 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
             assert second_review.json()["detail"]["risk_decision"]["reasons"] == [
                 "READ_ONLY_SOURCE_UNAVAILABLE"
             ]
-            assert len(telegram.notifications()) == 3
+            assert telegram.notifications() == []
 
     asyncio.run(scenario())
 

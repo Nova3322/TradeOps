@@ -986,7 +986,9 @@ def create_app(
     register_execution_routes(route_context)
     register_capital_routes(route_context)
 
-    if isinstance(resolved_telegram, TelegramBotGateway):
+    if isinstance(resolved_telegram, TelegramBotGateway) and isinstance(
+        resolved_database, Database
+    ):
         resolved_telegram.set_action_handler(handle_real_telegram_action)
         resolved_telegram.set_action_resolver(
             lambda callback_key: resolve_telegram_review_prompt(

@@ -2,9 +2,9 @@
 
 No release is created from an unreviewed working tree.
 
-Before any public visibility change, replace `COPYRIGHT_HOLDER`,
-`COMMERCIAL_EMAIL`, and `SECURITY_EMAIL` with the approved publication
-identity. Local `refs/codex/snapshots/*` are tool state and must never be pushed.
+The approved public identity is `Nova3322`, with licensing and private security
+contact `gaargrg@gmail.com`. Local `refs/codex/snapshots/*` are tool state and
+must never be pushed.
 
 1. Confirm the intended commit and clean public boundary.
 2. Run `python scripts/generate_publication_metadata.py --check`.
