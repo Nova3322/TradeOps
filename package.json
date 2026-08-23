@@ -2,7 +2,7 @@
   "name": "tradingops-notilt-gateway",
   "version": "0.1.0",
   "description": "NoTilt Vault and Safe gateway support for the TradeOps control layer",
-  "author": "Nova3322 <gaargrg@gmail.com>",
+  "author": "Nova3322 <165258092+Nova3322@users.noreply.github.com>",
   "license": "GPL-3.0-only OR LicenseRef-TradingOPS-Commercial-1.0",
   "private": true,
   "type": "module",

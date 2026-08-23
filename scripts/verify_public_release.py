@@ -38,13 +38,13 @@ SECRET_NAME = re.compile(
 PRIVATE_PATH = re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+/")
 REPOSITORY_PLACEHOLDER = re.compile("OWNER" + "/" + "REPOSITORY" + "|" + "REPOSITORY" + "_" + "URL")
 REQUIRED_IDENTITY_TEXT = {
-    "LICENSE": ("Nova3322", "gaargrg@gmail.com"),
-    "NOTICE": ("Nova3322", "gaargrg@gmail.com"),
+    "LICENSE": ("Nova3322", "165258092+Nova3322@users.noreply.github.com"),
+    "NOTICE": ("Nova3322", "165258092+Nova3322@users.noreply.github.com"),
     "CLA.md": ("Nova3322",),
-    "SECURITY.md": ("gaargrg@gmail.com", "Nova3322/TradeOps"),
-    "SUPPORT.md": ("gaargrg@gmail.com",),
-    "README.md": ("Nova3322/TradeOps.git", "gaargrg@gmail.com"),
-    "README.zh-CN.md": ("Nova3322/TradeOps.git", "gaargrg@gmail.com"),
+    "SECURITY.md": ("165258092+Nova3322@users.noreply.github.com", "Nova3322/TradeOps"),
+    "SUPPORT.md": ("165258092+Nova3322@users.noreply.github.com",),
+    "README.md": ("Nova3322/TradeOps.git", "165258092+Nova3322@users.noreply.github.com"),
+    "README.zh-CN.md": ("Nova3322/TradeOps.git", "165258092+Nova3322@users.noreply.github.com"),
 }
 FORBIDDEN_GATES = {
     "TRADING_AUTO_ADD_ENABLED",

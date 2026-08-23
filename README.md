@@ -233,9 +233,9 @@ The GPL option permits commercial use, modification, and distribution subject
 to GPLv3. Parties that need closed-source integration, proprietary distribution,
 or negotiated terms may obtain a separate commercial license.
 
-Copyright holder and commercial licensing: `Nova3322` · `gaargrg@gmail.com`
+Copyright holder and commercial licensing: `Nova3322` · `165258092+Nova3322@users.noreply.github.com`
 
-Private security reports: `gaargrg@gmail.com` or the repository's private security
+Private security reports: `165258092+Nova3322@users.noreply.github.com` or the repository's private security
 advisory channel.
 
 See [`LICENSE`](LICENSE), [`GPL-3.0-only`](LICENSES/GPL-3.0-only.txt), the

@@ -169,6 +169,6 @@ GPL-3.0-only OR LicenseRef-TradingOPS-Commercial-1.0
 
 GPL 允许商业使用、修改和分发，但传播受覆盖作品时需要遵守 GPLv3。需要闭源集成、专有分发或协商条款的用户可以选择单独商业许可证。
 
-版权所有者及商业许可：`Nova3322` · `gaargrg@gmail.com`。安全问题请通过 `gaargrg@gmail.com` 或仓库的私有安全公告渠道报告。
+版权所有者及商业许可：`Nova3322` · `165258092+Nova3322@users.noreply.github.com`。安全问题请通过 `165258092+Nova3322@users.noreply.github.com` 或仓库的私有安全公告渠道报告。
 
 详见 [`LICENSE`](LICENSE)、[GPLv3 正文](LICENSES/GPL-3.0-only.txt)、[商业许可证说明](LICENSES/LicenseRef-TradingOPS-Commercial-1.0.txt) 和 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

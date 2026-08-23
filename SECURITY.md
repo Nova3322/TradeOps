@@ -12,7 +12,7 @@ Use the repository host's private vulnerability-reporting channel or a private s
 Do not open a public issue containing credentials, account identifiers, orders, positions, wallet
 addresses tied to a person, or a working exploit against a deployed instance.
 
-Private reporting contact: `gaargrg@gmail.com`. Repository advisory channel:
+Private reporting contact: `165258092+Nova3322@users.noreply.github.com`. Repository advisory channel:
 <https://github.com/Nova3322/TradeOps/security/advisories/new>.
 
 Include the affected commit/release, component, impact, reproducible preconditions, and the smallest

@@ -12,7 +12,7 @@ setup, API integration, documentation, and confirmed defects. Before posting:
 
 ## Security reports
 
-Follow [`SECURITY.md`](SECURITY.md) or contact `gaargrg@gmail.com`. Never open a
+Follow [`SECURITY.md`](SECURITY.md) or contact `165258092+Nova3322@users.noreply.github.com`. Never open a
 public issue containing a suspected vulnerability, credential, live account
 detail, or exploit evidence.
 
@@ -20,7 +20,7 @@ detail, or exploit evidence.
 
 Closed-source integration, proprietary distribution, SLAs, warranty,
 indemnity, managed service, and other negotiated terms require a separate
-commercial agreement. Contact `gaargrg@gmail.com`; do not post confidential
+commercial agreement. Contact `165258092+Nova3322@users.noreply.github.com`; do not post confidential
 terms publicly.
 
 Community support is best effort. No response time or operational guarantee is

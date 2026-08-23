@@ -3,7 +3,7 @@
 No release is created from an unreviewed working tree.
 
 The approved public identity is `Nova3322`, with licensing and private security
-contact `gaargrg@gmail.com`. Local `refs/codex/snapshots/*` are tool state and
+contact `165258092+Nova3322@users.noreply.github.com`. Local `refs/codex/snapshots/*` are tool state and
 must never be pushed.
 
 1. Confirm the intended commit and clean public boundary.
