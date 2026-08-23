@@ -39,6 +39,58 @@ test("record pagination defaults to 50 rows and caps the selectable size at 100"
   assert.doesNotMatch(shared, /<option value="200"/);
 });
 
+test("record pagination can bind multiple independently scoped lists on one page", () => {
+  const helperSource = shared.slice(
+    shared.indexOf("const normalizeRecordPageSize"),
+    shared.indexOf("const statusLabels"),
+  );
+  const makeRoot = total => {
+    const rows = Array.from({length:total}, (_, index) => ({dataset:{search:String(index), filter:""}, hidden:false}));
+    const summary = {textContent:""};
+    const size = {value:"", addEventListener:() => {}};
+    const previous = {disabled:false, addEventListener:() => {}};
+    const next = {disabled:false, addEventListener:() => {}};
+    const pagination = {
+      hidden:false,
+      querySelector:selector => ({
+        "[data-record-page-summary]":summary,
+        "[data-record-page-size]":size,
+        '[data-record-page-delta="-1"]':previous,
+        '[data-record-page-delta="1"]':next,
+      })[selector],
+      querySelectorAll:() => [previous, next],
+    };
+    const visible = {textContent:""};
+    const count = {textContent:""};
+    const empty = {hidden:false};
+    return {
+      rows, summary, visible, count, empty,
+      querySelectorAll:selector => selector === "[data-row]" ? rows : selector === "[data-count]" ? [count] : [],
+      querySelector:selector => ({
+        "[data-record-pagination]":pagination,
+        "[data-visible]":visible,
+        "[data-empty]":empty,
+      })[selector],
+    };
+  };
+  const first = makeRoot(125);
+  const second = makeRoot(7);
+  const context = {
+    currentLanguage:"zh-CN",
+    document:{querySelector:selector => selector === "#first" ? first : second},
+  };
+  vm.runInNewContext(
+    `${helperSource}; bindRecordList({rootSelector:'#first', rowSelector:'[data-row]', filterSelectors:[], matches:() => true, emptySelector:'[data-empty]', visibleCountSelector:'[data-visible]', totalCountSelector:'[data-count]'}); bindRecordList({rootSelector:'#second', rowSelector:'[data-row]', filterSelectors:[], matches:() => true, emptySelector:'[data-empty]', visibleCountSelector:'[data-visible]', totalCountSelector:'[data-count]'});`,
+    context,
+  );
+  assert.equal(first.rows.filter(row => !row.hidden).length, 50);
+  assert.equal(second.rows.filter(row => !row.hidden).length, 7);
+  assert.equal(first.summary.textContent, "第 1 / 3 页 · 共 125 条");
+  assert.equal(second.summary.textContent, "第 1 / 1 页 · 共 7 条");
+  assert.equal(first.count.textContent, 125);
+  assert.equal(second.count.textContent, 7);
+});
+
 test("the review queue is newest-first and uses filtered page navigation instead of load-more", () => {
   assert.match(proposals, /new Date\(right\.created_at\) - new Date\(left\.created_at\)/);
   for (const marker of [
@@ -123,5 +175,5 @@ test("recent notification deliveries support bounded history filters and paginat
     "recordPaginationMarkup(deliveries.length, '通知投递记录分页')",
     "data-notification-row",
   ]) assert.equal(reporting.includes(marker), true, marker);
-  assert.equal(serviceWorker.includes("trading-shell-v236"), true);
+  assert.equal(serviceWorker.includes("trading-shell-v240"), true);
 });

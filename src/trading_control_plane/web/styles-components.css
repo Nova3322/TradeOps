@@ -1326,3 +1326,33 @@ dialog { padding: var(--space-5); }
 @media (min-width: 560px) and (max-width: 780px) {
   .proposal-table tr, .position-table tr, .campaign-list-table tr, .result-table tr, .notification-table tr { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
+
+/* Keep the existing action hierarchy while placing the three quick paths on one row. */
+.home-quick-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); }
+.home-quick-actions > .secondary { padding-left: var(--space-2); padding-right: var(--space-2); }
+.home-quick-actions .text-link { min-height: var(--control-height); display: inline-flex; align-items: center; white-space: nowrap; }
+
+/* Account cards size to their own content instead of stretching to the tallest peer. */
+.mode-account-grid,
+.account-detail-config-grid { align-items: start; }
+
+.venue-record-tools {
+  grid-template-columns: minmax(220px, 1fr) minmax(140px, 190px) max-content;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.venue-record-tools > span { grid-column: auto; }
+.venue-record-list > .empty-state { margin-top: var(--space-3); }
+
+@media (max-width: 780px) {
+  .venue-record-tools { grid-template-columns: minmax(0, 1fr) minmax(130px, .65fr); }
+  .venue-record-tools > span { grid-column: 1 / -1; }
+}
+
+@media (max-width: 480px) {
+  .home-quick-actions { display: grid; grid-template-columns: 1fr; }
+  .home-quick-actions > a { width: 100%; justify-content: center; }
+  .venue-record-tools { grid-template-columns: 1fr; }
+  .venue-record-tools > span { grid-column: auto; }
+}

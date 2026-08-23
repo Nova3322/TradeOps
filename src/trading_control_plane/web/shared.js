@@ -45,9 +45,11 @@ function recordPaginationMarkup(total, ariaLabel) {
   const initial = {page:1, totalPages:Math.max(1, Math.ceil(total / 50)), total};
   return `<nav class="record-pagination" aria-label="${escapeHtml(ariaLabel)}" data-record-pagination><span data-record-page-summary>${escapeHtml(recordPageSummary(initial))}</span><div><label>每页<select data-record-page-size aria-label="每页记录数"><option value="50" selected>50</option><option value="100">100</option></select>条记录</label><button class="secondary" type="button" data-record-page-delta="-1" disabled>上一页</button><button class="secondary" type="button" data-record-page-delta="1" ${initial.totalPages <= 1 ? 'disabled' : ''}>下一页</button></div></nav>`;
 }
-function bindRecordList({rowSelector, filterSelectors, matches, emptySelector, visibleCountSelector, totalCountSelector}) {
-  const rows = [...document.querySelectorAll(rowSelector)];
-  const pagination = document.querySelector('[data-record-pagination]');
+function bindRecordList({rootSelector, rowSelector, filterSelectors, matches, emptySelector, visibleCountSelector, totalCountSelector}) {
+  const root = rootSelector ? document.querySelector(rootSelector) : document;
+  if (!root) return;
+  const rows = [...root.querySelectorAll(rowSelector)];
+  const pagination = root.querySelector('[data-record-pagination]');
   let page = 1;
   let pageSize = 50;
   const apply = ({resetPage = false} = {}) => {
@@ -58,10 +60,10 @@ function bindRecordList({rowSelector, filterSelectors, matches, emptySelector, v
     pageSize = current.pageSize;
     rows.forEach(row => { row.hidden = true; });
     current.items.forEach(row => { row.hidden = false; });
-    document.querySelectorAll(totalCountSelector).forEach(node => { node.textContent = current.total; });
-    const visible = document.querySelector(visibleCountSelector);
+    root.querySelectorAll(totalCountSelector).forEach(node => { node.textContent = current.total; });
+    const visible = root.querySelector(visibleCountSelector);
     if (visible) visible.textContent = current.items.length;
-    const empty = document.querySelector(emptySelector);
+    const empty = root.querySelector(emptySelector);
     if (empty) empty.hidden = current.total !== 0;
     if (pagination) {
       pagination.hidden = current.total === 0;
@@ -73,7 +75,7 @@ function bindRecordList({rowSelector, filterSelectors, matches, emptySelector, v
       next.disabled = current.page >= current.totalPages;
     }
   };
-  filterSelectors.forEach(selector => document.querySelector(selector)?.addEventListener('input', () => apply({resetPage:true})));
+  filterSelectors.forEach(selector => root.querySelector(selector)?.addEventListener('input', () => apply({resetPage:true})));
   pagination?.querySelectorAll('[data-record-page-delta]').forEach(button => button.addEventListener('click', () => {
     page += Number(button.dataset.recordPageDelta);
     apply();
