@@ -588,17 +588,17 @@ class StdlibNotificationSender:
             self._post_json(normalized["webhook_url"], {"text": message.text})
             return NotificationSendResult()
         if channel == "LARK":
-            payload: dict[str, Any] = {
+            lark_payload: dict[str, Any] = {
                 "msg_type": "text",
                 "content": {"text": message.text},
             }
             if secret := normalized.get("signing_secret"):
                 timestamp = str(int(time.time()))
-                payload.update(
+                lark_payload.update(
                     timestamp=timestamp,
                     sign=self._lark_signature(secret, timestamp),
                 )
-            response = self._post_json(normalized["webhook_url"], payload)
+            response = self._post_json(normalized["webhook_url"], lark_payload)
             response_code = (
                 0 if response is None else response.get("code", response.get("StatusCode", 0))
             )
