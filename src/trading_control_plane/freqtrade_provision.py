@@ -32,6 +32,7 @@ CONTROL_PLANE_TIMEFRAME = "1h"
 HYPERLIQUID_READ_RATE_LIMIT_MS = 1500
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 HYPERLIQUID_HIP3_DEX_LIMIT = 128
+HYPERLIQUID_USDC_COLLATERAL_TOKEN = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,7 +120,7 @@ def _env_value(value: str) -> str:
 
 
 def _discover_hyperliquid_hip3_dexes() -> tuple[str, ...]:
-    """Read the complete current official HIP-3 DEX directory or fail closed."""
+    """Read every active official HIP-3 DEX executable by the USDC worker."""
 
     try:
         response = requests.post(
@@ -178,7 +179,63 @@ def _discover_hyperliquid_hip3_dexes() -> tuple[str, ...]:
             "FREQTRADE_HIP3_DIRECTORY_INVALID",
             "the official Hyperliquid HIP-3 DEX directory contains ambiguous entries",
         )
-    return normalized
+    executable: list[str] = []
+    for name in normalized:
+        try:
+            response = requests.post(
+                HYPERLIQUID_INFO_URL,
+                json={"type": "meta", "dex": name},
+                timeout=15,
+            )
+            if response.status_code != 200:
+                raise ValueError("unexpected response status")
+            metadata = response.json()
+        except (requests.RequestException, requests.JSONDecodeError, ValueError) as exc:
+            raise domain.DomainRejected(
+                "FREQTRADE_HIP3_DIRECTORY_UNAVAILABLE",
+                "the official Hyperliquid HIP-3 DEX metadata is unavailable",
+            ) from exc
+        if not isinstance(metadata, dict):
+            rejections.reject(
+                "FREQTRADE_HIP3_DIRECTORY_INVALID",
+                "the official Hyperliquid HIP-3 DEX metadata is invalid",
+            )
+        collateral_token = metadata.get("collateralToken")
+        universe = metadata.get("universe")
+        if (
+            not isinstance(collateral_token, int)
+            or isinstance(collateral_token, bool)
+            or not isinstance(universe, list)
+        ):
+            rejections.reject(
+                "FREQTRADE_HIP3_DIRECTORY_INVALID",
+                "the official Hyperliquid HIP-3 DEX metadata is ambiguous",
+            )
+        has_active_market = False
+        for market in universe:
+            if not isinstance(market, dict):
+                rejections.reject(
+                    "FREQTRADE_HIP3_DIRECTORY_INVALID",
+                    "the official Hyperliquid HIP-3 market metadata is invalid",
+                )
+            market_name = market.get("name")
+            is_delisted = market.get("isDelisted", False)
+            if (
+                not isinstance(market_name, str)
+                or not market_name.startswith(f"{name}:")
+                or not isinstance(is_delisted, bool)
+            ):
+                rejections.reject(
+                    "FREQTRADE_HIP3_DIRECTORY_INVALID",
+                    "the official Hyperliquid HIP-3 market identity is ambiguous",
+                )
+            has_active_market = has_active_market or not is_delisted
+        if (
+            collateral_token == HYPERLIQUID_USDC_COLLATERAL_TOKEN
+            and has_active_market
+        ):
+            executable.append(name)
+    return tuple(executable)
 
 
 def _runtime_config(
