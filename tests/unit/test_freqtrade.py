@@ -295,6 +295,7 @@ def test_exact_catalog_symbols_map_to_freqtrade_ccxt_pairs() -> None:
     assert freqtrade_pair("BINANCE", "BTCUSDT") == "BTC/USDT:USDT"
     assert freqtrade_pair("BINANCE", "币安人生USDT") == "币安人生/USDT:USDT"
     assert freqtrade_pair("HYPERLIQUID", "BTC") == "BTC/USDC:USDC"
+    assert freqtrade_pair("HYPERLIQUID", "kPEPE") == "KPEPE/USDC:USDC"
     assert freqtrade_pair("HYPERLIQUID", "xyz:TSLA", hip3_dexes=("xyz",)) == "XYZ-TSLA/USDC:USDC"
     assert freqtrade_pair("OKX", "BTC-USDT-SWAP") == "BTC/USDT:USDT"
     assert freqtrade_pair("BYBIT", "BTCUSDT") == "BTC/USDT:USDT"
