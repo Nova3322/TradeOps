@@ -29,6 +29,7 @@ FREQTRADE_GID = 1000
 SUPPORTED_VENUES = ("BINANCE", "HYPERLIQUID")
 CONTROL_PLANE_TIMEFRAME = "1h"
 HYPERLIQUID_READ_RATE_LIMIT_MS = 1500
+HYPERLIQUID_HIP3_DEXES = ("xyz",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,7 +144,7 @@ def _runtime_config(template: dict[str, Any], definition: WorkerDefinition, acco
     exchange["pair_whitelist"] = [definition.pair_pattern]
     exchange["pair_blacklist"] = []
     if definition.venue == "HYPERLIQUID":
-        exchange["hip3_dexes"] = []
+        exchange["hip3_dexes"] = list(HYPERLIQUID_HIP3_DEXES)
         for key in ("ccxt_config", "ccxt_async_config"):
             ccxt = exchange.get(key)
             if not isinstance(ccxt, dict):
@@ -160,7 +161,13 @@ def _runtime_config(template: dict[str, Any], definition: WorkerDefinition, acco
                     "Freqtrade production template has invalid CCXT options",
                 )
             options["defaultType"] = "swap"
-            options["fetchMarkets"] = {"types": ["swap"]}
+            options["fetchMarkets"] = {
+                "types": ["swap", "hip3"],
+                "hip3": {
+                    "dexes": list(HYPERLIQUID_HIP3_DEXES),
+                    "limit": len(HYPERLIQUID_HIP3_DEXES),
+                },
+            }
     api_server.update(
         {
             "enabled": True,
@@ -250,11 +257,14 @@ def _ensure_binding(
 ) -> tuple[PreparedFreqtradeWorkerBinding, bool]:
     current = _binding_map(service).get(account.exchange_account_id)
     desired_name = definition.worker_name(account.exchange_account_id)
+    desired_hip3_dexes = (
+        HYPERLIQUID_HIP3_DEXES if definition.venue == "HYPERLIQUID" else ()
+    )
     if current is not None and (
         current.worker_name == desired_name
         and current.worker_url == definition.worker_url
         and current.worker_mode == "LIVE"
-        and current.hip3_dexes == ()
+        and current.hip3_dexes == desired_hip3_dexes
         and current.ws_token is not None
     ):
         return current, True
@@ -268,9 +278,12 @@ def _ensure_binding(
         username=f"tradeops-{definition.venue.lower()}",
         password=secrets.token_urlsafe(48),
         ws_token=secrets.token_urlsafe(48),
-        hip3_dexes=(),
+        hip3_dexes=desired_hip3_dexes,
         expected_version=account.version,
-        idempotency_key=f"auto-freqtrade-config-{account.exchange_account_id}-{account.version}",
+        idempotency_key=(
+            f"auto-freqtrade-config-{account.exchange_account_id}-{account.version}-"
+            f"{'-'.join(desired_hip3_dexes) or 'core'}"
+        ),
         now=now,
     )
     prepared = _binding_map(service).get(account.exchange_account_id)

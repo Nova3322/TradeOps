@@ -60,7 +60,7 @@ FreqtradeClientFactory = Callable[[PreparedFreqtradeWorkerBinding], FreqtradeWor
 
 @dataclass(slots=True)
 class _RunningAdapter:
-    version: tuple[int, str]
+    version: tuple[int, str, tuple[str, ...]]
     supervisor: FactStreamSupervisor
     task: asyncio.Task[None]
 
@@ -116,11 +116,18 @@ class FactAdapterRuntime:
             environment=cast(Environment, binding.environment),
             symbols=tuple(pairs),
             account_mode=binding.account_mode,
+            hip3_dexes=binding.hip3_dexes,
         )
 
     @staticmethod
-    def _connection_version(binding: PreparedRuntimeAccountBinding) -> tuple[int, str]:
-        return binding.credential_version, str(binding.service_principal_id)
+    def _connection_version(
+        binding: PreparedRuntimeAccountBinding,
+    ) -> tuple[int, str, tuple[str, ...]]:
+        return (
+            binding.credential_version,
+            str(binding.service_principal_id),
+            binding.hip3_dexes,
+        )
 
     async def _start_binding(self, binding: PreparedRuntimeAccountBinding) -> str:
         scope = self._scope(binding)

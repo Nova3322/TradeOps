@@ -5,6 +5,7 @@ from uuid import UUID
 
 from trading_control_plane.freqtrade_provision import (
     CONTROL_PLANE_TIMEFRAME,
+    HYPERLIQUID_HIP3_DEXES,
     HYPERLIQUID_READ_RATE_LIMIT_MS,
     WORKERS,
     _runtime_config,
@@ -71,7 +72,7 @@ def test_runtime_configs_enable_exact_live_workers_with_full_official_pair_scope
         assert payload["api_server"]["enable_openapi"] is False
         assert payload["telegram"]["enabled"] is False
         if venue == "HYPERLIQUID":
-            assert payload["exchange"]["hip3_dexes"] == []
+            assert payload["exchange"]["hip3_dexes"] == list(HYPERLIQUID_HIP3_DEXES)
             for key in ("ccxt_config", "ccxt_async_config"):
                 assert payload["exchange"][key]["enableRateLimit"] is True
                 assert (
@@ -80,7 +81,13 @@ def test_runtime_configs_enable_exact_live_workers_with_full_official_pair_scope
                 )
                 assert payload["exchange"][key]["options"] == {
                     "defaultType": "swap",
-                    "fetchMarkets": {"types": ["swap"]},
+                    "fetchMarkets": {
+                        "types": ["swap", "hip3"],
+                        "hip3": {
+                            "dexes": list(HYPERLIQUID_HIP3_DEXES),
+                            "limit": len(HYPERLIQUID_HIP3_DEXES),
+                        },
+                    },
                 }
 
 
