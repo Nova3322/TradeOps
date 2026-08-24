@@ -823,6 +823,7 @@ def test_hyperliquid_fact_adapter_loads_only_configured_hip3_dexes() -> None:
     scope = replace(
         _scope("HYPERLIQUID"),
         symbols=("BTC/USDC:USDC", "XYZ-TSLA/USDC:USDC"),
+        hip3_dexes=("xyz",),
     )
 
     CcxtProFactAdapter(
@@ -837,6 +838,73 @@ def test_hyperliquid_fact_adapter_loads_only_configured_hip3_dexes() -> None:
         "defaultType": "swap",
         "fetchMarkets": {"types": ["swap", "hip3"], "hip3": {"dexes": ["xyz"]}},
     }
+
+
+def test_runtime_rotates_hyperliquid_connection_when_hip3_scope_changes() -> None:
+    async def scenario() -> None:
+        binding = PreparedRuntimeAccountBinding(
+            exchange_account_id=UUID("00000000-0000-0000-0000-000000000011"),
+            workspace_id=UUID("00000000-0000-0000-0000-000000000012"),
+            team_id=UUID("00000000-0000-0000-0000-000000000013"),
+            service_principal_id=UUID("00000000-0000-0000-0000-000000000014"),
+            service_principal_username="runtime-sync",
+            account_id="hyperliquid-account",
+            venue="HYPERLIQUID",
+            environment="LIVE",
+            account_version=1,
+            credential_version=1,
+            credentials={"account_address": "0x0000000000000000000000000000000000000001"},
+            hip3_dexes=("xyz",),
+        )
+        bindings = [binding]
+        exchanges: list[FakeCcxtRestOnlyExchange] = []
+        options: list[dict[str, Any]] = []
+
+        def factory(
+            _scope: FactAdapterScope,
+            _credentials: Mapping[str, str],
+            configured: Mapping[str, Any],
+        ) -> FakeCcxtRestOnlyExchange:
+            exchange = FakeCcxtRestOnlyExchange()
+            exchanges.append(exchange)
+            options.append(dict(configured))
+            return exchange
+
+        settings = Settings(
+            environment="test",
+            database_url="postgresql+psycopg://user:pass@localhost/trading",
+            runtime_sync_enabled=True,
+            credential_encryption_key=base64.urlsafe_b64encode(b"a" * 32).decode(),
+            fact_adapter_enabled=True,
+            fact_adapter_bearer_token=_TOKEN,
+            _env_file=None,  # type: ignore[call-arg]
+        )
+        registry = FactAdapterRegistry()
+        runtime = FactAdapterRuntime(
+            settings=settings,
+            registry=registry,
+            binding_provider=lambda: tuple(bindings),
+            symbol_provider=lambda _venue: ("BTC",),
+            exchange_factory=factory,
+        )
+
+        await runtime.reconcile_once()
+        assert options[0]["fetchMarkets"] == {
+            "types": ["swap", "hip3"],
+            "hip3": {"dexes": ["xyz"]},
+        }
+
+        bindings[0] = replace(binding, account_version=2, hip3_dexes=())
+        await runtime.reconcile_once()
+        assert exchanges[0].closed is True
+        assert len(exchanges) == 2
+        assert options[1]["fetchMarkets"] == {
+            "types": ["swap"],
+            "hip3": {"dexes": []},
+        }
+        await runtime.close()
+
+    asyncio.run(scenario())
 
 
 def test_hyperliquid_mark_and_native_identity_use_exchange_contract() -> None:

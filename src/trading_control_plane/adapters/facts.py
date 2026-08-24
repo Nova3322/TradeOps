@@ -19,7 +19,7 @@ from trading_control_plane.binance_errors import (
     classify_binance_rate_limit,
 )
 from trading_control_plane.domain import DomainRejected
-from trading_control_plane.freqtrade_contracts import freqtrade_pair
+from trading_control_plane.freqtrade_contracts import freqtrade_pair, parse_hip3_dexes
 from trading_control_plane.runtime_contracts import ConnectionProbeResult
 
 logger = logging.getLogger(__name__)
@@ -133,6 +133,7 @@ class FactAdapterScope:
     environment: Environment
     symbols: tuple[str, ...]
     account_mode: str = "STANDARD"
+    hip3_dexes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -152,6 +153,15 @@ class FactAdapterScope:
                 "FACT_ADAPTER_ACCOUNT_MODE_UNSUPPORTED",
                 "the account mode is not supported for the selected exchange",
             )
+        if self.hip3_dexes:
+            if self.venue != "HYPERLIQUID":
+                raise ValueError("HIP-3 DEX scope is only valid for Hyperliquid")
+            try:
+                normalized = parse_hip3_dexes(",".join(self.hip3_dexes))
+            except ValueError as exc:
+                raise ValueError("fact adapter HIP-3 DEX scope is invalid") from exc
+            if normalized != self.hip3_dexes:
+                raise ValueError("fact adapter HIP-3 DEX scope must be normalized")
 
     @property
     def key(self) -> str:
@@ -168,6 +178,7 @@ class FactAdapterScope:
             "environment": self.environment,
             "symbols": list(self.symbols),
             "account_mode": self.account_mode,
+            "hip3_dexes": list(self.hip3_dexes),
         }
 
 
@@ -471,13 +482,7 @@ class CcxtProFactAdapter:
         if scope.venue == "BINANCE" and scope.account_mode == "PORTFOLIO_MARGIN":
             options.update({"papi": True, "portfolioMargin": True})
         if scope.venue == "HYPERLIQUID":
-            hip3_dexes = sorted(
-                {
-                    symbol.split("-", 1)[0].lower()
-                    for symbol in scope.symbols
-                    if "-" in symbol.split("/", 1)[0]
-                }
-            )
+            hip3_dexes = list(scope.hip3_dexes)
             options["fetchMarkets"] = {
                 "types": ["swap", "hip3"] if hip3_dexes else ["swap"],
                 "hip3": {"dexes": hip3_dexes},
