@@ -101,6 +101,41 @@ def test_freqtrade_rpc_websocket_uses_official_message_endpoint() -> None:
     )
 
 
+def test_freqtrade_rpc_connection_verification_authenticates_without_waiting_for_event() -> None:
+    observed: dict[str, object] = {}
+    socket = _FakeFreqtradeWebSocket([])
+
+    def connector(url: str, timeout: float) -> _FakeFreqtradeWebSocket:
+        observed.update(url=url, timeout=timeout)
+        return socket
+
+    client = FreqtradeWorkerClient(
+        FreqtradeWorkerSpec(
+            name="hyperliquid-rpc",
+            venue="HYPERLIQUID",
+            base_url="http://freqtrade-hyperliquid-live:8080",
+            username="control-plane",
+            password="fixture-password",  # noqa: S106
+            ws_token="fixture-rpc-token-0123456789",  # noqa: S106
+        ),
+        websocket_connector=connector,
+    )
+
+    asyncio.run(client.verify_rpc_connection())
+
+    assert observed == {
+        "url": (
+            "ws://freqtrade-hyperliquid-live:8080/api/v1/message/ws"
+            "?token=fixture-rpc-token-0123456789"
+        ),
+        "timeout": 5,
+    }
+    assert json.loads(socket.sent[0]) == {
+        "type": "subscribe",
+        "data": ["status", "warning"],
+    }
+
+
 def test_freqtrade_rpc_message_contract_fails_closed() -> None:
     with pytest.raises(DomainRejected, match="FREQTRADE_RPC_MESSAGE_INVALID"):
         parse_freqtrade_rpc_message('{"type":"entry","data":[]}')

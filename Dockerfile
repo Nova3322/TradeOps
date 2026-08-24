@@ -39,6 +39,7 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 COPY scripts ./scripts
 COPY src ./src
+COPY freqtrade ./freqtrade
 RUN uv sync --frozen --no-dev --no-cache \
     && chown -R tradingops:tradingops /app
 
