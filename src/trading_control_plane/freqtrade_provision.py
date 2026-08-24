@@ -27,6 +27,8 @@ from trading_control_plane.service import TradingService
 FREQTRADE_UID = 1000
 FREQTRADE_GID = 1000
 SUPPORTED_VENUES = ("BINANCE", "HYPERLIQUID")
+CONTROL_PLANE_TIMEFRAME = "1h"
+HYPERLIQUID_READ_RATE_LIMIT_MS = 1500
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +126,10 @@ def _runtime_config(template: dict[str, Any], definition: WorkerDefinition, acco
             "max_open_trades": -1,
             "position_adjustment_enable": True,
             "cancel_open_orders_on_exit": False,
+            # The strategy never emits autonomous signals.  A slower candle
+            # cadence keeps the complete executable catalog available to
+            # Force Entry without continuously consuming venue read limits.
+            "timeframe": CONTROL_PLANE_TIMEFRAME,
         }
     )
     exchange = config.get("exchange")
@@ -138,6 +144,15 @@ def _runtime_config(template: dict[str, Any], definition: WorkerDefinition, acco
     exchange["pair_blacklist"] = []
     if definition.venue == "HYPERLIQUID":
         exchange["hip3_dexes"] = []
+        for key in ("ccxt_config", "ccxt_async_config"):
+            ccxt = exchange.get(key)
+            if not isinstance(ccxt, dict):
+                rejections.reject(
+                    "FREQTRADE_PROVISION_TEMPLATE_INVALID",
+                    "Freqtrade production template lacks CCXT rate limiting",
+                )
+            ccxt["enableRateLimit"] = True
+            ccxt["rateLimit"] = HYPERLIQUID_READ_RATE_LIMIT_MS
     api_server.update(
         {
             "enabled": True,

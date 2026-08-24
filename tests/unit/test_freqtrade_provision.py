@@ -4,6 +4,8 @@ import json
 from uuid import UUID
 
 from trading_control_plane.freqtrade_provision import (
+    CONTROL_PLANE_TIMEFRAME,
+    HYPERLIQUID_READ_RATE_LIMIT_MS,
     WORKERS,
     _runtime_config,
     _worker_environment,
@@ -42,6 +44,8 @@ def _template(venue: str) -> dict[str, object]:
         "cancel_open_orders_on_exit": False,
         "exchange": {
             "name": venue.lower(),
+            "ccxt_config": {"enableRateLimit": True},
+            "ccxt_async_config": {"enableRateLimit": True},
             "pair_whitelist": ["CANARY/USDT:USDT"],
             "pair_blacklist": [],
             "hip3_dexes": ["xyz"],
@@ -61,12 +65,19 @@ def test_runtime_configs_enable_exact_live_workers_with_full_official_pair_scope
         assert payload["max_open_trades"] == -1
         assert payload["position_adjustment_enable"] is True
         assert payload["cancel_open_orders_on_exit"] is False
+        assert payload["timeframe"] == CONTROL_PLANE_TIMEFRAME
         assert payload["exchange"]["pair_whitelist"] == [definition.pair_pattern]
         assert payload["exchange"]["pair_blacklist"] == []
         assert payload["api_server"]["enable_openapi"] is False
         assert payload["telegram"]["enabled"] is False
         if venue == "HYPERLIQUID":
             assert payload["exchange"]["hip3_dexes"] == []
+            for key in ("ccxt_config", "ccxt_async_config"):
+                assert payload["exchange"][key]["enableRateLimit"] is True
+                assert (
+                    payload["exchange"][key]["rateLimit"]
+                    == HYPERLIQUID_READ_RATE_LIMIT_MS
+                )
 
 
 def test_worker_environment_uses_generated_internal_auth_and_exact_encrypted_credentials() -> None:
