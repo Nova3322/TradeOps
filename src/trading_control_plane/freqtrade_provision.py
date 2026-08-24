@@ -143,6 +143,9 @@ def _discover_hyperliquid_hip3_dexes() -> tuple[str, ...]:
     names: list[str] = []
     core_rows = 0
     for item in payload:
+        if item is None:
+            core_rows += 1
+            continue
         if not isinstance(item, dict) or "name" not in item:
             rejections.reject(
                 "FREQTRADE_HIP3_DIRECTORY_INVALID",
