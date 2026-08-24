@@ -153,6 +153,66 @@ class FactIngestionExecutionService(ServiceComponent):
         for field, value in values.items():
             setattr(current, field, value)
 
+    @staticmethod
+    def _upsert_read_only_account_equity(
+        session: Session,
+        *,
+        team: models.Team,
+        account_id: str,
+        venue: str,
+        environment: domain.ExecutionEnvironment,
+        account_equity: venue_read_only.VenueEquity,
+        now: datetime,
+    ) -> models.AccountEquity:
+        fact = session.scalar(
+            select(models.AccountEquity)
+            .where(
+                models.AccountEquity.team_id == team.team_id,
+                models.AccountEquity.account_id == account_id,
+                models.AccountEquity.venue == venue,
+                models.AccountEquity.environment == environment.value,
+                models.AccountEquity.currency == account_equity.currency,
+            )
+            .with_for_update()
+        )
+        stable = account_equity.currency.upper() in notilt.USD_STABLE_ASSETS
+        if fact is None:
+            fact = models.AccountEquity(
+                team_id=team.team_id,
+                account_id=account_id,
+                venue=venue,
+                environment=environment.value,
+                equity=account_equity.equity,
+                available_balance=account_equity.available_balance,
+                currency=account_equity.currency,
+                valuation_currency="USD" if stable else None,
+                valuation_price=Decimal(1) if stable else None,
+                valuation_equity=account_equity.equity if stable else None,
+                valuation_observed_at=now if stable else None,
+                fact_status=domain.FactStatus.KNOWN.value,
+                observed_at=now,
+                updated_at=now,
+            )
+            session.add(fact)
+        else:
+            if fact.updated_at > now:
+                _reject(
+                    f"{venue}_SNAPSHOT_SUPERSEDED",
+                    "an older snapshot cannot overwrite newer equity facts",
+                )
+            fact.equity = account_equity.equity
+            fact.available_balance = account_equity.available_balance
+            fact.currency = account_equity.currency
+            fact.valuation_currency = "USD" if stable else None
+            fact.valuation_price = Decimal(1) if stable else None
+            fact.valuation_equity = account_equity.equity if stable else None
+            fact.valuation_observed_at = now if stable else None
+            fact.fact_status = domain.FactStatus.KNOWN.value
+            fact.observed_at = now
+            fact.updated_at = now
+        record_account_equity_observation(session, fact, recorded_at=now)
+        return fact
+
     def ingest_normalized_read_only_account_snapshot(
         self,
         account_id: str,
@@ -162,6 +222,7 @@ class FactIngestionExecutionService(ServiceComponent):
         venue: str,
         environment: domain.ExecutionEnvironment,
         runtime_binding: PreparedRuntimeAccountBinding,
+        account_equities: tuple[venue_read_only.VenueEquity, ...] | None = None,
         now: datetime,
     ) -> dict[str, Any]:
         """Persist the exchange-neutral fact-adapter contract for an exact binding."""
@@ -178,6 +239,7 @@ class FactIngestionExecutionService(ServiceComponent):
             venue=venue,
             environment=environment,
             runtime_binding=runtime_binding,
+            account_equities=account_equities,
             now=now,
         )
 
@@ -555,6 +617,7 @@ class FactIngestionExecutionService(ServiceComponent):
         venue: str,
         environment: domain.ExecutionEnvironment,
         runtime_binding: PreparedRuntimeAccountBinding | None = None,
+        account_equities: tuple[venue_read_only.VenueEquity, ...] | None = None,
         now: datetime,
     ) -> dict[str, Any]:
         if not snapshots:
@@ -578,6 +641,29 @@ class FactIngestionExecutionService(ServiceComponent):
                 f"{venue}_RESPONSE_INVALID",
                 "incomplete account history cannot contain partial facts",
             )
+        if account_equities is not None:
+            if venue != "BINANCE":
+                _reject(
+                    "FACT_ADAPTER_SCOPE_MISMATCH",
+                    "complete wallet equity coverage is only supported for Binance",
+                )
+            currencies = [item.currency.upper() for item in account_equities]
+            if len(currencies) != len(set(currencies)):
+                _reject(
+                    "BINANCE_RESPONSE_INVALID",
+                    "account wallet snapshot contains duplicate currencies",
+                )
+            if any(
+                item.observed_at != observed_at
+                or item.currency.upper() not in notilt.USD_STABLE_ASSETS
+                or item.equity < 0
+                or item.available_balance < 0
+                for item in account_equities
+            ):
+                _reject(
+                    "BINANCE_RESPONSE_INVALID",
+                    "account wallet snapshot is outside the supported stablecoin scope",
+                )
         covered_hyperliquid_dexes = (
             {
                 snapshot.symbol.split(":", 1)[0] if ":" in snapshot.symbol else ""
@@ -619,6 +705,52 @@ class FactIngestionExecutionService(ServiceComponent):
                     now=now,
                     session=session,
                 )
+            if account_equities is not None:
+                team = self.transactions.require_role(
+                    session,
+                    actor_id,
+                    "venue.record",
+                    account_id,
+                    venue,
+                )
+                reported_currencies = {item.currency.upper() for item in account_equities}
+                for account_equity in account_equities:
+                    self._upsert_read_only_account_equity(
+                        session,
+                        team=team,
+                        account_id=account_id,
+                        venue=venue,
+                        environment=environment,
+                        account_equity=account_equity,
+                        now=now,
+                    )
+                missing = session.scalars(
+                    select(models.AccountEquity)
+                    .where(
+                        models.AccountEquity.team_id == team.team_id,
+                        models.AccountEquity.account_id == account_id,
+                        models.AccountEquity.venue == venue,
+                        models.AccountEquity.environment == environment.value,
+                        models.AccountEquity.currency.in_(tuple(notilt.USD_STABLE_ASSETS)),
+                        models.AccountEquity.currency.not_in(reported_currencies),
+                    )
+                    .with_for_update()
+                ).all()
+                for fact in missing:
+                    self._upsert_read_only_account_equity(
+                        session,
+                        team=team,
+                        account_id=account_id,
+                        venue=venue,
+                        environment=environment,
+                        account_equity=venue_read_only.VenueEquity(
+                            equity=Decimal(0),
+                            available_balance=Decimal(0),
+                            currency=fact.currency,
+                            observed_at=observed_at,
+                        ),
+                        now=now,
+                    )
             explicitly_closed = sum(
                 1 for item in persisted.values() if item["position_authoritatively_closed"] is True
             )

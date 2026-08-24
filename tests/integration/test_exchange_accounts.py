@@ -19,6 +19,7 @@ from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, ExecutionEnvironment, Role
 from trading_control_plane.freqtrade import FreqtradeWorkerClient, FreqtradeWorkerSpec
 from trading_control_plane.models import (
+    AccountEquity,
     AuditEvent,
     DirectCapitalOperation,
     ExchangeAccount,
@@ -333,6 +334,20 @@ def test_fact_adapter_ingestion_refreshes_exact_account_runtime_health(
         venue=binding.venue,
         environment=ExecutionEnvironment.LIVE,
         runtime_binding=binding,
+        account_equities=(
+            VenueEquity(
+                equity=Decimal("100"),
+                available_balance=Decimal("100"),
+                currency="USDT",
+                observed_at=now,
+            ),
+            VenueEquity(
+                equity=Decimal("10.68"),
+                available_balance=Decimal("8.68"),
+                currency="USDC",
+                observed_at=now,
+            ),
+        ),
         now=now,
     )
     with database.session_factory() as session:
@@ -348,6 +363,19 @@ def test_fact_adapter_ingestion_refreshes_exact_account_runtime_health(
         assert health.checked_at == now
         assert health.last_success_at == now
         assert health.error_code is None
+        equities = session.scalars(
+            select(AccountEquity)
+            .where(
+                AccountEquity.team_id == binding.team_id,
+                AccountEquity.account_id == binding.account_id,
+                AccountEquity.venue == binding.venue,
+            )
+            .order_by(AccountEquity.currency)
+        ).all()
+        assert [(item.currency, item.equity, item.available_balance) for item in equities] == [
+            ("USDC", Decimal("10.68"), Decimal("8.68")),
+            ("USDT", Decimal("100"), Decimal("100")),
+        ]
 
     degraded_at = now + timedelta(seconds=1)
     service.ingest_normalized_read_only_account_snapshot(
@@ -363,6 +391,7 @@ def test_fact_adapter_ingestion_refreshes_exact_account_runtime_health(
         venue=binding.venue,
         environment=ExecutionEnvironment.LIVE,
         runtime_binding=binding,
+        account_equities=(replace(snapshot.equity, observed_at=degraded_at),),
         now=degraded_at,
     )
     projected = TradingQueries(database).exchange_account_fact_health(
@@ -396,6 +425,17 @@ def test_fact_adapter_ingestion_refreshes_exact_account_runtime_health(
         assert eth_position.quantity == 0
         assert eth_position.observed_at == degraded_at
         assert len(covered_events) == 1
+        usdc_equity = session.scalar(
+            select(AccountEquity).where(
+                AccountEquity.team_id == binding.team_id,
+                AccountEquity.account_id == binding.account_id,
+                AccountEquity.venue == binding.venue,
+                AccountEquity.currency == "USDC",
+            )
+        )
+        assert usdc_equity is not None
+        assert usdc_equity.equity == 0
+        assert usdc_equity.available_balance == 0
 
     refreshed_at = degraded_at + timedelta(seconds=1)
     service.ingest_normalized_read_only_account_snapshot(
