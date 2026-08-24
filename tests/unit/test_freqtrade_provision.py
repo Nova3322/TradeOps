@@ -102,22 +102,54 @@ def test_runtime_configs_enable_exact_live_workers_with_full_official_pair_scope
                 }
 
 
-def test_official_hip3_directory_discovers_every_named_dex(
+def test_official_hip3_directory_discovers_every_active_usdc_dex(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Response:
-        status_code = 200
+        def __init__(self, payload: object) -> None:
+            self.status_code = 200
+            self.payload = payload
 
-        @staticmethod
-        def json() -> list[dict[str, object] | None]:
-            return [None, {"name": "xyz"}, {"name": "flx"}]
+        def json(self) -> object:
+            return self.payload
+
+    def post(_url: str, *, json: dict[str, object], **_kwargs: object) -> Response:
+        if json == {"type": "perpDexs"}:
+            return Response(
+                [
+                    None,
+                    {"name": "xyz"},
+                    {"name": "flx"},
+                    {"name": "para"},
+                    {"name": "abcd"},
+                ]
+            )
+        metadata = {
+            "xyz": {
+                "collateralToken": 0,
+                "universe": [{"name": "xyz:TSLA"}],
+            },
+            "flx": {
+                "collateralToken": 360,
+                "universe": [{"name": "flx:GOLD"}],
+            },
+            "para": {
+                "collateralToken": 0,
+                "universe": [{"name": "para:TOTAL2"}],
+            },
+            "abcd": {
+                "collateralToken": 0,
+                "universe": [{"name": "abcd:USA500", "isDelisted": True}],
+            },
+        }
+        return Response(metadata[str(json["dex"])])
 
     monkeypatch.setattr(
         "trading_control_plane.freqtrade_provision.requests.post",
-        lambda *_args, **_kwargs: Response(),
+        post,
     )
 
-    assert _discover_hyperliquid_hip3_dexes() == ("xyz", "flx")
+    assert _discover_hyperliquid_hip3_dexes() == ("xyz", "para")
 
 
 def test_official_hip3_directory_fails_closed_on_ambiguous_entries(
