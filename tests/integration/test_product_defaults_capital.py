@@ -1830,6 +1830,23 @@ def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_block
             assert (await client.get("/api/capital")).status_code == 403
 
             await _login(client, "product-admin")
+            rejected_label = await client.put(
+                "/api/proposal-defaults",
+                json={
+                    "account_id": "BINANCE LIVE integration account",
+                    "risk_tier": "LOW",
+                    "notional": "100",
+                    "max_risk": "2",
+                    "invalidation_bps": 200,
+                    "expires_in_minutes": 480,
+                    "rationale": "editable labels are not account identifiers",
+                    "auto_proposal_enabled": False,
+                    "auto_proposal_min_timeframes": 3,
+                    "idempotency_key": "admin-default-label-rejected",
+                },
+            )
+            assert rejected_label.status_code == 422, rejected_label.text
+            assert rejected_label.json()["error"]["code"] == "DEFAULT_ACCOUNT_REQUIRED"
             update = await client.put(
                 "/api/proposal-defaults",
                 json={
@@ -1850,6 +1867,11 @@ def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_block
             assert update.json()["data"]["updated_by_username"] == "product-admin"
             assert update.json()["data"]["auto_proposal_enabled"] is True
             assert update.json()["data"]["auto_proposal_min_timeframes"] == 4
+            assert service.resolve_proposal_default_account(proposer, "BINANCE") == "acct-live"
+            assert (
+                service.resolve_proposal_default_account(proposer, "HYPERLIQUID")
+                == "hyperliquid-main"
+            )
 
             await _login(client, "product-proposer")
             visible = await client.get("/api/proposal-defaults")

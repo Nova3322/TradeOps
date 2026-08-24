@@ -291,6 +291,75 @@ class ProposalService(ServiceComponent):
             updater = session.get(models.User, config.updated_by)
             return self._proposal_default_payload(config, updater, team.workspace_id)
 
+    def resolve_proposal_default_account(self, actor_id: UUID, venue: str) -> str:
+        """Resolve the active default to one exact LIVE account for the candidate venue."""
+
+        normalized_venue = venue.strip().upper()
+        with self.database.session_factory() as session:
+            team = self.transactions.require_action_assignment(
+                session,
+                actor_id,
+                "proposal.create",
+            )
+            self.transactions.require_team_environment(
+                team,
+                domain.ExecutionEnvironment.LIVE,
+            )
+            config = session.scalar(
+                select(models.ProposalDefaultConfig).where(
+                    models.ProposalDefaultConfig.team_id == team.team_id,
+                    models.ProposalDefaultConfig.active,
+                )
+            )
+            if config is None:
+                rejections.reject(
+                    "PROPOSAL_DEFAULT_NOT_CONFIGURED",
+                    "an administrator must configure one-click proposal defaults",
+                )
+            configured_accounts = session.scalars(
+                select(models.ExchangeAccount).where(
+                    models.ExchangeAccount.team_id == team.team_id,
+                    models.ExchangeAccount.environment == domain.ExecutionEnvironment.LIVE.value,
+                    models.ExchangeAccount.account_id == config.account_id,
+                    models.ExchangeAccount.active,
+                    models.ExchangeAccount.deleted_at.is_(None),
+                )
+            ).all()
+            if len(configured_accounts) != 1:
+                rejections.reject(
+                    "DEFAULT_ACCOUNT_REQUIRED",
+                    "the saved proposal default must reference one exact active LIVE account",
+                )
+            configured = configured_accounts[0]
+            if configured.venue == normalized_venue:
+                candidate_ids = [configured.account_id]
+            else:
+                candidate_ids = list(
+                    session.scalars(
+                        select(models.ExchangeAccount.account_id)
+                        .where(
+                            models.ExchangeAccount.team_id == team.team_id,
+                            models.ExchangeAccount.environment
+                            == domain.ExecutionEnvironment.LIVE.value,
+                            models.ExchangeAccount.venue == normalized_venue,
+                            models.ExchangeAccount.active,
+                            models.ExchangeAccount.deleted_at.is_(None),
+                        )
+                        .order_by(models.ExchangeAccount.account_id)
+                    ).all()
+                )
+        allowed = [
+            account_id
+            for account_id in candidate_ids
+            if self.can_user(actor_id, "proposal.create", account_id, normalized_venue)
+        ]
+        if len(allowed) != 1:
+            rejections.reject(
+                "DEFAULT_ACCOUNT_REQUIRED",
+                "select one exact active LIVE account for the candidate venue",
+            )
+        return allowed[0]
+
     @staticmethod
     def _proposal_default_payload(
         config: models.ProposalDefaultConfig,
@@ -429,6 +498,29 @@ class ProposalService(ServiceComponent):
                     "PROPOSAL_DEFAULT_ADMIN_REQUIRED",
                     "only a team SYSTEM_ADMIN can change team proposal defaults",
                 )
+            default_accounts = session.scalars(
+                select(models.ExchangeAccount).where(
+                    models.ExchangeAccount.team_id == team.team_id,
+                    models.ExchangeAccount.environment == domain.ExecutionEnvironment.LIVE.value,
+                    models.ExchangeAccount.account_id == account_id,
+                    models.ExchangeAccount.active,
+                    models.ExchangeAccount.deleted_at.is_(None),
+                )
+            ).all()
+            if len(default_accounts) != 1:
+                rejections.reject(
+                    "DEFAULT_ACCOUNT_REQUIRED",
+                    "select one exact active LIVE account ID, not an editable account label",
+                )
+            ensure_exchange_account_reference(
+                session,
+                team=team,
+                actor_id=actor_id,
+                account_id=account_id,
+                venue=default_accounts[0].venue,
+                environment=domain.ExecutionEnvironment.LIVE.value,
+                now=now,
+            )
             source = session.scalar(
                 select(models.TeamSignalSource).where(
                     models.TeamSignalSource.team_id == team.team_id,

@@ -497,7 +497,7 @@ class RuntimeSyncWorker:
                     "expired_count": expired_duplicates,
                 },
             )
-        account_id = str(config["account_id"])
+        account_ids_by_venue: dict[str, str] = {}
         minimum_timeframes = int(config["auto_proposal_min_timeframes"])
         notional = Decimal(str(config["notional"]))
         max_risk = Decimal(str(config["max_risk"]))
@@ -522,6 +522,25 @@ class RuntimeSyncWorker:
                 candidates,
                 key=lambda item: (item.observed_at, item.triggered_at or item.observed_at),
             )
+            try:
+                account_id = account_ids_by_venue.get(primary.venue)
+                if account_id is None:
+                    account_id = self.service.resolve_proposal_default_account(
+                        actor_id,
+                        primary.venue,
+                    )
+                    account_ids_by_venue[primary.venue] = account_id
+            except DomainRejected as exc:
+                logger.info(
+                    "Perptape resonance skipped without one exact account for the venue",
+                    extra={
+                        "event": "perptape_resonance_proposal_skipped",
+                        "component": "perptape",
+                        "venue": primary.venue,
+                        "error_code": exc.code,
+                    },
+                )
+                continue
             try:
                 instrument_id = self.queries.instrument_id_by_venue_symbol(
                     primary.venue, primary.symbol
