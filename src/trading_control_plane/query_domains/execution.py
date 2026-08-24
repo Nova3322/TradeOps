@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from trading_control_plane import domain, models
+from trading_control_plane import domain, models, perptape
 from trading_control_plane.query_component import QueryComponent, iso_datetime
 from trading_control_plane.repositories.execution import find_position_for_scope
 
@@ -925,7 +925,47 @@ class ExecutionQueries(QueryComponent):
                     "WHERE table_schema = 'public' AND table_name <> 'alembic_version'"
                 )
             ).scalar_one()
-            perptape_feed = session.get(models.PerptapeFeed, (team_id, "BREAKOUTS"))
+            perptape_feeds = session.scalars(
+                select(models.PerptapeFeed).where(
+                    models.PerptapeFeed.team_id == team_id,
+                    models.PerptapeFeed.feed_key.in_(
+                        tuple(perptape.PERPTAPE_FEED_KEYS.values())
+                    ),
+                )
+            ).all()
+            if not perptape_feeds:
+                legacy_feed = session.get(
+                    models.PerptapeFeed,
+                    (team_id, perptape.PERPTAPE_LEGACY_FEED_KEY),
+                )
+                perptape_feeds = [] if legacy_feed is None else [legacy_feed]
+            if perptape_feeds:
+                newest_feed = max(perptape_feeds, key=lambda item: item.fetched_at)
+                perptape_feed = {
+                    "available": True,
+                    "contract_version": newest_feed.contract_version,
+                    "candidate_count": sum(
+                        len(item.candidates) for item in perptape_feeds
+                    ),
+                    "generated_at": iso_datetime(
+                        max(item.generated_at for item in perptape_feeds)
+                    ),
+                    "fetched_at": iso_datetime(
+                        max(item.fetched_at for item in perptape_feeds)
+                    ),
+                    "updated_at": iso_datetime(
+                        max(item.updated_at for item in perptape_feeds)
+                    ),
+                }
+            else:
+                perptape_feed = {
+                    "available": False,
+                    "contract_version": None,
+                    "candidate_count": 0,
+                    "generated_at": None,
+                    "fetched_at": None,
+                    "updated_at": None,
+                }
             source_health = session.scalars(
                 select(models.RuntimeSourceHealth)
                 .where(models.RuntimeSourceHealth.team_id == team_id)
@@ -968,25 +1008,7 @@ class ExecutionQueries(QueryComponent):
                     }
                     for item in gates
                 },
-                "perptape_feed": (
-                    {
-                        "available": True,
-                        "contract_version": perptape_feed.contract_version,
-                        "candidate_count": len(perptape_feed.candidates),
-                        "generated_at": iso_datetime(perptape_feed.generated_at),
-                        "fetched_at": iso_datetime(perptape_feed.fetched_at),
-                        "updated_at": iso_datetime(perptape_feed.updated_at),
-                    }
-                    if perptape_feed is not None
-                    else {
-                        "available": False,
-                        "contract_version": None,
-                        "candidate_count": 0,
-                        "generated_at": None,
-                        "fetched_at": None,
-                        "updated_at": None,
-                    }
-                ),
+                "perptape_feed": perptape_feed,
                 "source_health": {
                     (
                         item.source_name

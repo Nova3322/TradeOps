@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
+import pytest
+
+from trading_control_plane import domain
 from trading_control_plane.freqtrade_provision import (
     CONTROL_PLANE_TIMEFRAME,
-    HYPERLIQUID_HIP3_DEXES,
     HYPERLIQUID_READ_RATE_LIMIT_MS,
     WORKERS,
+    _discover_hyperliquid_hip3_dexes,
     _runtime_config,
     _worker_environment,
 )
@@ -57,8 +60,16 @@ def _template(venue: str) -> dict[str, object]:
 
 
 def test_runtime_configs_enable_exact_live_workers_with_full_official_pair_scope() -> None:
+    hip3_dexes = ("xyz", "flx")
     for venue, definition in WORKERS.items():
-        payload = json.loads(_runtime_config(_template(venue), definition, "account-1"))
+        payload = json.loads(
+            _runtime_config(
+                _template(venue),
+                definition,
+                "account-1",
+                hip3_dexes=hip3_dexes,
+            )
+        )
 
         assert payload["dry_run"] is False
         assert payload["initial_state"] == "running"
@@ -72,7 +83,7 @@ def test_runtime_configs_enable_exact_live_workers_with_full_official_pair_scope
         assert payload["api_server"]["enable_openapi"] is False
         assert payload["telegram"]["enabled"] is False
         if venue == "HYPERLIQUID":
-            assert payload["exchange"]["hip3_dexes"] == list(HYPERLIQUID_HIP3_DEXES)
+            assert payload["exchange"]["hip3_dexes"] == list(hip3_dexes)
             for key in ("ccxt_config", "ccxt_async_config"):
                 assert payload["exchange"][key]["enableRateLimit"] is True
                 assert (
@@ -84,11 +95,48 @@ def test_runtime_configs_enable_exact_live_workers_with_full_official_pair_scope
                     "fetchMarkets": {
                         "types": ["swap", "hip3"],
                         "hip3": {
-                            "dexes": list(HYPERLIQUID_HIP3_DEXES),
-                            "limit": len(HYPERLIQUID_HIP3_DEXES),
+                            "dexes": list(hip3_dexes),
+                            "limit": len(hip3_dexes),
                         },
                     },
                 }
+
+
+def test_official_hip3_directory_discovers_every_named_dex(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> list[dict[str, object]]:
+            return [{"name": None}, {"name": "xyz"}, {"name": "flx"}]
+
+    monkeypatch.setattr(
+        "trading_control_plane.freqtrade_provision.requests.post",
+        lambda *_args, **_kwargs: Response(),
+    )
+
+    assert _discover_hyperliquid_hip3_dexes() == ("xyz", "flx")
+
+
+def test_official_hip3_directory_fails_closed_on_ambiguous_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> list[dict[str, object]]:
+            return [{"name": None}, {"name": "xyz"}, {"unexpected": "flx"}]
+
+    monkeypatch.setattr(
+        "trading_control_plane.freqtrade_provision.requests.post",
+        lambda *_args, **_kwargs: Response(),
+    )
+
+    with pytest.raises(domain.DomainRejected, match="FREQTRADE_HIP3_DIRECTORY_INVALID"):
+        _discover_hyperliquid_hip3_dexes()
 
 
 def test_worker_environment_uses_generated_internal_auth_and_exact_encrypted_credentials() -> None:

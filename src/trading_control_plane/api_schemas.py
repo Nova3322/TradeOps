@@ -300,7 +300,7 @@ class FreqtradeWorkerConfigureRequest(BaseModel):
     username: SecretStr | None = Field(default=None, min_length=1, max_length=120)
     password: SecretStr | None = Field(default=None, min_length=1, max_length=2_048)
     ws_token: SecretStr | None = Field(default=None, min_length=16, max_length=2_048)
-    hip3_dexes: list[str] = Field(default_factory=list, max_length=32)
+    hip3_dexes: list[str] = Field(default_factory=list, max_length=128)
     expected_version: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=160)
 

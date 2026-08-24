@@ -148,6 +148,39 @@ def test_connection_projection_uses_fresh_database_perptape_worker_health() -> N
     assert stale["PERPTAPE"]["available"] is False
 
 
+def test_connection_projection_requires_every_exact_perptape_venue_probe() -> None:
+    now = datetime(2026, 8, 19, 12, tzinfo=UTC)
+    projected = project_runtime_connections(
+        _settings(runtime_sync_enabled=True),
+        {
+            "PERPTAPE": {"status": "SUCCESS", "checked_at": now.isoformat()},
+            "PERPTAPE:BN": {"status": "SUCCESS", "checked_at": now.isoformat()},
+            "PERPTAPE:HL": {
+                "status": "FAILED",
+                "error_code": "PERPTAPE_RATE_LIMITED",
+                "checked_at": now.isoformat(),
+            },
+        },
+        database_perptape_configured=True,
+        now=now,
+        perptape_stale_after_seconds=135,
+    )
+
+    assert projected["PERPTAPE"]["available"] is False
+    assert projected["PERPTAPE"]["category"] == "UPSTREAM_RATE_LIMITED"
+    assert projected["PERPTAPE"]["error_code"] == "PERPTAPE_RATE_LIMITED"
+
+    incomplete = project_runtime_connections(
+        _settings(runtime_sync_enabled=True),
+        {"PERPTAPE:BN": {"status": "SUCCESS", "checked_at": now.isoformat()}},
+        database_perptape_configured=True,
+        now=now,
+        perptape_stale_after_seconds=135,
+    )
+    assert incomplete["PERPTAPE"]["available"] is False
+    assert incomplete["PERPTAPE"]["error_code"] == "PERPTAPE_VENUE_HEALTH_INCOMPLETE"
+
+
 def test_connection_projection_classifies_exact_adapter_failures() -> None:
     settings = _settings(runtime_sync_enabled=True, fact_adapter_enabled=True)
     bindings = {venue: 1 for venue in ("BINANCE", "HYPERLIQUID", "OKX", "BYBIT")}

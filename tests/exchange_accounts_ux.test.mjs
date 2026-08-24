@@ -35,10 +35,10 @@ test('production account cards expose the exact-account detail workflow', () => 
   );
   assert.match(routerSource, /venueAccountMatch = path\.match\(\/\^\\\/venues\\\/\(\[\^\/\]\+\)\$\/\)/);
   assert.match(routerSource, /renderVenueAccountDetail\(venueAccountMatch\[1\]\)/);
-  assert.match(indexSource, /execution\.js\?v=200/);
+  assert.match(indexSource, /execution\.js\?v=201/);
   assert.match(indexSource, /shared\.js\?v=21/);
-  assert.match(indexSource, /accounts\.js\?v=185/);
-  assert.match(serviceWorkerSource, /trading-shell-v240/);
+  assert.match(indexSource, /accounts\.js\?v=186/);
+  assert.match(serviceWorkerSource, /trading-shell-v241/);
 });
 
 test('account history uses three independently filtered and paginated record lists', () => {
@@ -107,4 +107,14 @@ test('Bybit testnet onboarding supports a pinned worker while OKX stays fact-onl
   assert.match(executionSource, /item\.venue === 'OKX'/);
   assert.match(executionSource, /该交易所测试环境仅支持事实同步；执行保持不可用/);
   assert.doesNotMatch(executionSource, /value="\$\{venue\}" \$\{selectedEnvironment.*\? 'disabled'/);
+});
+
+test('system status summarizes the dynamic contract range without rendering a persisted whitelist', () => {
+  assert.match(executionSource, /全部有效永续合约 · \$\{Number\(runtimeState\.active_pair_count \|\| 0\)\} 个/);
+  assert.match(executionSource, /当前任务：\$\{escapeHtml\(task\.symbol\)\} · \$\{task\.allowed \? '允许' : '阻断'\}/);
+  assert.match(executionSource, /<details class="worker-catalog-detail">/);
+  assert.match(executionSource, /data-worker-catalog-search/);
+  assert.doesNotMatch(executionSource, /runtimeState\.whitelist/);
+  assert.doesNotMatch(accountsSource, /HIP-3 DEX 白名单/);
+  assert.match(accountsSource, /全部有效 Core 与账户全部 HIP-3 永续合约/);
 });

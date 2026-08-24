@@ -14,13 +14,14 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
 
+import requests
 from sqlalchemy import select
 
 from trading_control_plane import domain, models, rejections
 from trading_control_plane.config import get_settings
 from trading_control_plane.database import Database
 from trading_control_plane.freqtrade import FreqtradeWorkerClient, FreqtradeWorkerSpec
-from trading_control_plane.freqtrade_contracts import freqtrade_pair
+from trading_control_plane.freqtrade_contracts import freqtrade_pair, parse_hip3_dexes
 from trading_control_plane.runtime_contracts import PreparedFreqtradeWorkerBinding
 from trading_control_plane.service import TradingService
 
@@ -29,7 +30,8 @@ FREQTRADE_GID = 1000
 SUPPORTED_VENUES = ("BINANCE", "HYPERLIQUID")
 CONTROL_PLANE_TIMEFRAME = "1h"
 HYPERLIQUID_READ_RATE_LIMIT_MS = 1500
-HYPERLIQUID_HIP3_DEXES = ("xyz",)
+HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
+HYPERLIQUID_HIP3_DEX_LIMIT = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +118,73 @@ def _env_value(value: str) -> str:
     return json.dumps(value, ensure_ascii=True)
 
 
-def _runtime_config(template: dict[str, Any], definition: WorkerDefinition, account_id: str) -> str:
+def _discover_hyperliquid_hip3_dexes() -> tuple[str, ...]:
+    """Read the complete current official HIP-3 DEX directory or fail closed."""
+
+    try:
+        response = requests.post(
+            HYPERLIQUID_INFO_URL,
+            json={"type": "perpDexs"},
+            timeout=15,
+        )
+        if response.status_code != 200:
+            raise ValueError("unexpected response status")
+        payload = response.json()
+    except (requests.RequestException, requests.JSONDecodeError, ValueError) as exc:
+        raise domain.DomainRejected(
+            "FREQTRADE_HIP3_DIRECTORY_UNAVAILABLE",
+            "the official Hyperliquid HIP-3 DEX directory is unavailable",
+        ) from exc
+    if not isinstance(payload, list):
+        rejections.reject(
+            "FREQTRADE_HIP3_DIRECTORY_INVALID",
+            "the official Hyperliquid HIP-3 DEX directory response is invalid",
+        )
+    names: list[str] = []
+    core_rows = 0
+    for item in payload:
+        if not isinstance(item, dict) or "name" not in item:
+            rejections.reject(
+                "FREQTRADE_HIP3_DIRECTORY_INVALID",
+                "the official Hyperliquid HIP-3 DEX directory contains ambiguous entries",
+            )
+        name = item["name"]
+        if name is None:
+            core_rows += 1
+        elif isinstance(name, str):
+            names.append(name)
+        else:
+            rejections.reject(
+                "FREQTRADE_HIP3_DIRECTORY_INVALID",
+                "the official Hyperliquid HIP-3 DEX directory contains invalid identities",
+            )
+    if core_rows != 1 or not names or len(names) > HYPERLIQUID_HIP3_DEX_LIMIT:
+        rejections.reject(
+            "FREQTRADE_HIP3_DIRECTORY_INVALID",
+            "the official Hyperliquid HIP-3 DEX directory is empty or exceeds its bound",
+        )
+    try:
+        normalized = parse_hip3_dexes(",".join(names))
+    except ValueError as exc:
+        raise domain.DomainRejected(
+            "FREQTRADE_HIP3_DIRECTORY_INVALID",
+            "the official Hyperliquid HIP-3 DEX directory contains invalid identities",
+        ) from exc
+    if len(normalized) != len(names):
+        rejections.reject(
+            "FREQTRADE_HIP3_DIRECTORY_INVALID",
+            "the official Hyperliquid HIP-3 DEX directory contains ambiguous entries",
+        )
+    return normalized
+
+
+def _runtime_config(
+    template: dict[str, Any],
+    definition: WorkerDefinition,
+    account_id: str,
+    *,
+    hip3_dexes: tuple[str, ...] = (),
+) -> str:
     config = json.loads(json.dumps(template))
     config.update(
         {
@@ -144,7 +212,12 @@ def _runtime_config(template: dict[str, Any], definition: WorkerDefinition, acco
     exchange["pair_whitelist"] = [definition.pair_pattern]
     exchange["pair_blacklist"] = []
     if definition.venue == "HYPERLIQUID":
-        exchange["hip3_dexes"] = list(HYPERLIQUID_HIP3_DEXES)
+        if not hip3_dexes:
+            rejections.reject(
+                "FREQTRADE_HIP3_DIRECTORY_INVALID",
+                "the Hyperliquid LIVE Worker requires the complete official HIP-3 DEX directory",
+            )
+        exchange["hip3_dexes"] = list(hip3_dexes)
         for key in ("ccxt_config", "ccxt_async_config"):
             ccxt = exchange.get(key)
             if not isinstance(ccxt, dict):
@@ -164,8 +237,8 @@ def _runtime_config(template: dict[str, Any], definition: WorkerDefinition, acco
             options["fetchMarkets"] = {
                 "types": ["swap", "hip3"],
                 "hip3": {
-                    "dexes": list(HYPERLIQUID_HIP3_DEXES),
-                    "limit": len(HYPERLIQUID_HIP3_DEXES),
+                    "dexes": list(hip3_dexes),
+                    "limit": len(hip3_dexes),
                 },
             }
     api_server.update(
@@ -253,12 +326,13 @@ def _ensure_binding(
     account: models.ExchangeAccount,
     definition: WorkerDefinition,
     *,
+    hip3_dexes: tuple[str, ...],
     now: datetime,
 ) -> tuple[PreparedFreqtradeWorkerBinding, bool]:
     current = _binding_map(service).get(account.exchange_account_id)
     desired_name = definition.worker_name(account.exchange_account_id)
     desired_hip3_dexes = (
-        HYPERLIQUID_HIP3_DEXES if definition.venue == "HYPERLIQUID" else ()
+        hip3_dexes if definition.venue == "HYPERLIQUID" else ()
     )
     if current is not None and (
         current.worker_name == desired_name
@@ -282,7 +356,7 @@ def _ensure_binding(
         expected_version=account.version,
         idempotency_key=(
             f"auto-freqtrade-config-{account.exchange_account_id}-{account.version}-"
-            f"{'-'.join(desired_hip3_dexes) or 'core'}"
+            f"{hashlib.sha256(','.join(desired_hip3_dexes).encode()).hexdigest()[:16]}"
         ),
         now=now,
     )
@@ -386,12 +460,19 @@ def prepare(output_dir: Path) -> list[dict[str, object]]:
     results: list[dict[str, object]] = []
     try:
         accounts = _live_accounts(database)
+        hyperliquid_hip3_dexes = _discover_hyperliquid_hip3_dexes()
         for stale in target.glob("*.env"):
             if stale.name not in {definition.env_name for definition in WORKERS.values()}:
                 stale.unlink()
         for account in accounts:
             definition = WORKERS[account.venue]
-            binding, reused = _ensure_binding(service, account, definition, now=now)
+            binding, reused = _ensure_binding(
+                service,
+                account,
+                definition,
+                hip3_dexes=hyperliquid_hip3_dexes,
+                now=now,
+            )
             current_account, credential_values = _exchange_credentials(
                 service,
                 account.exchange_account_id,
@@ -406,7 +487,12 @@ def prepare(output_dir: Path) -> list[dict[str, object]]:
             template = json.loads(template_path.read_text(encoding="utf-8"))
             _write_file(
                 target / definition.config_name,
-                _runtime_config(template, definition, current_account.account_id),
+                _runtime_config(
+                    template,
+                    definition,
+                    current_account.account_id,
+                    hip3_dexes=binding.hip3_dexes,
+                ),
                 mode=0o644,
             )
             _write_file(
