@@ -1203,6 +1203,19 @@ td { font-size: var(--font-size-control); }
 .system-health-grid { gap: var(--grid-gap); margin: var(--space-4) 0 var(--section-gap); }
 .system-health-card { padding: var(--card-padding); }
 .system-health-card > p { min-height: 38px; }
+.worker-catalog-detail { margin-top: var(--space-2); }
+.worker-catalog-detail > summary { width: fit-content; cursor: pointer; color: var(--accent); font-weight: 650; }
+.worker-catalog-detail > label { display: block; margin-top: var(--space-2); }
+.worker-catalog-detail input { width: min(100%, 280px); }
+.worker-catalog-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 4px var(--space-2);
+  max-height: 180px;
+  margin-top: var(--space-2);
+  overflow: auto;
+}
+.worker-catalog-list code { overflow-wrap: anywhere; }
 .system-status-page > .system-monitoring-disclosure {
   margin: var(--space-3) 0 var(--section-gap);
   padding: 0;

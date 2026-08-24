@@ -247,6 +247,66 @@ def test_binance_refresh_does_not_delete_saved_hyperliquid_feed(database: Databa
     assert [candidate.symbol for candidate in persisted["HL"].candidates] == ["ETH"]
 
 
+def test_runtime_and_signal_status_combine_exact_perptape_venue_feeds(
+    database: Database,
+) -> None:
+    service = TradingService(database, credential_encryption_key=runtime_encryption_key())
+    queries = TradingQueries(database)
+    admin = service.bootstrap_admin("combined-perptape-status-admin", now=NOW)
+    current = service.signal_source_status(admin)["source"]
+    service.configure_signal_source(
+        actor_id=admin,
+        mode=SignalSourceMode.PERPTAPE,
+        secret="combined-perptape-status-key",  # noqa: S106
+        enabled=True,
+        webhook_max_age_seconds=300,
+        expected_version=0 if current is None else int(current["version"]),
+        idempotency_key="configure-combined-perptape-status",
+        now=NOW,
+    )
+    binding = service.perptape_runtime_bindings()[0]
+    client = perptape_test_client()
+    for source_exchange, symbol in (("BN", "BTCUSDT"), ("HL", "ETH")):
+        candidate = client.parse_stream_alert(
+            {
+                "id": f"combined-{source_exchange}",
+                "ex": source_exchange,
+                "s": symbol,
+                "cs": symbol,
+                "dir": "HH",
+                "p": 100,
+                "th": 99,
+                "tf": "1h",
+                "t": int(NOW.timestamp() * 1_000),
+                "u": int(NOW.timestamp() * 1_000),
+                "kr": {"status": "ready"},
+                "vq24": 20_000,
+                "oi": 10_000,
+            },
+            event_time=NOW,
+        )
+        service.record_perptape_feed(
+            binding.service_principal_id,
+            PerptapeFeedSnapshot(
+                contract_version="breakouts-v1",
+                generated_at=NOW,
+                fetched_at=NOW,
+                next_allowed_at=NOW,
+                candidates=(candidate,),
+                source_exchange=source_exchange,
+            ),
+            now=NOW,
+            base_snapshot=None,
+        )
+
+    runtime = queries.runtime_snapshot(admin)["perptape_feed"]
+    source = service.signal_source_status(admin)["source"]
+
+    assert runtime["available"] is True
+    assert runtime["candidate_count"] == 2
+    assert source["perptape"]["candidate_count"] == 2
+
+
 @pytest.mark.parametrize("hyperliquid_failure", ["RATE_LIMITED", "TIMEOUT"])
 def test_perptape_venue_poll_failures_preserve_independent_data_and_health(
     database: Database,

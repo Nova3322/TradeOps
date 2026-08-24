@@ -74,6 +74,19 @@ def test_freqtrade_runtime_fingerprint_change_invalidates_verified_binding(
     now = datetime.now(UTC)
     service = TradingService(database, credential_encryption_key=encryption_key())
     admin = service.bootstrap_admin("worker-fingerprint-admin", now=now)
+    service.register_instrument(
+        actor_id=admin,
+        venue="BINANCE",
+        symbol="SOLUSDT",
+        tick_size=Decimal("0.01"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        contract_multiplier=Decimal("1"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        protection_supported=True,
+        now=now,
+    )
     account_id = service.create_exchange_account(
         actor_id=admin,
         account_id="worker-fingerprint-account",
@@ -188,36 +201,50 @@ def test_freqtrade_runtime_fingerprint_change_invalidates_verified_binding(
         error_code=None,
         now=now + timedelta(seconds=1),
     )
-    assert error == "FREQTRADE_RUNTIME_FINGERPRINT_CHANGED"
+    assert error == "FREQTRADE_CATALOG_MISMATCH"
     stale = TradingQueries(database).exchange_accounts(admin)["data"][0]
     assert stale["execution_worker"]["status"] == "STALE"
     assert (
         stale["execution_worker"]["error_code"]
-        == "FREQTRADE_RUNTIME_FINGERPRINT_CHANGED"
+        == "FREQTRADE_CATALOG_MISMATCH"
     )
     assert stale["execution_worker"]["runtime"]["fingerprint_verified"] is False
 
+    service.register_instrument(
+        actor_id=admin,
+        venue="BINANCE",
+        symbol="AVAUSDT",
+        tick_size=Decimal("0.01"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        contract_multiplier=Decimal("1"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        protection_supported=True,
+        now=now + timedelta(seconds=2),
+    )
     replacement, replay = service.prepare_exchange_account_freqtrade_verification(
         account_id,
         actor_id=admin,
         expected_version=int(stale["version"]),
-        idempotency_key="worker-fingerprint-verify-b",
+        idempotency_key="worker-fingerprint-runtime-catalog-refresh",
     )
     assert replacement is not None and replay is None
-    service.record_exchange_account_freqtrade_verification(
+    assert service.record_freqtrade_runtime_probe(
         replacement,
-        actor_id=admin,
         error_code=None,
-        idempotency_key="worker-fingerprint-verify-b",
         now=now + timedelta(seconds=2),
         probe_result=_runtime_probe(
             "b" * 64,
             whitelist=["SOL/USDT:USDT", "AVA/USDT:USDT"],
         ),
-    )
+    ) is None
     current = TradingQueries(database).exchange_accounts(admin)["data"][0]
     assert current["execution_worker"]["status"] == "VERIFIED"
     assert current["execution_worker"]["runtime"]["fingerprint_verified"] is True
+    assert current["execution_worker"]["runtime"]["active_pair_count"] == 2
+    assert len(current["execution_worker"]["runtime"]["pair_catalog_digest"]) == 64
+    assert "whitelist" not in current["execution_worker"]["runtime"]
 
 
 def test_fact_adapter_ingestion_refreshes_exact_account_runtime_health(
@@ -1202,6 +1229,19 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
     now = datetime.now(UTC)
     service = TradingService(database, credential_encryption_key=encryption_key())
     admin = service.bootstrap_admin("worker-binding-admin", now=now)
+    service.register_instrument(
+        actor_id=admin,
+        venue="BINANCE",
+        symbol="BTCUSDT",
+        tick_size=Decimal("0.1"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        contract_multiplier=Decimal("1"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        protection_supported=True,
+        now=now,
+    )
     context = TradingQueries(database).user_context(admin)
     team_id = context["active_team"]["team_id"]
     first_id = service.create_exchange_account(

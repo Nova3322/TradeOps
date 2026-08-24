@@ -50,7 +50,7 @@ class SignalService(ServiceComponent):
         service_principal: models.User | None,
         signal_count: int = 0,
         last_signal_at: datetime | None = None,
-        perptape_feed: models.PerptapeFeed | None = None,
+        perptape_feed: models.PerptapeFeed | perptape.PerptapeFeedSnapshot | None = None,
     ) -> dict[str, Any]:
         if source.credential_ciphertext is not None:
             credential_state = "CONFIGURED"
@@ -163,6 +163,37 @@ class SignalService(ServiceComponent):
             models.TeamSignalSource.deleted_at.is_(None),
         )
 
+    @staticmethod
+    def _combined_perptape_feed(
+        session: Session,
+        team_id: UUID,
+    ) -> models.PerptapeFeed | perptape.PerptapeFeedSnapshot | None:
+        feeds = session.scalars(
+            select(models.PerptapeFeed).where(
+                models.PerptapeFeed.team_id == team_id,
+                models.PerptapeFeed.feed_key.in_(
+                    tuple(perptape.PERPTAPE_FEED_KEYS.values())
+                ),
+            )
+        ).all()
+        if not feeds:
+            return session.get(
+                models.PerptapeFeed,
+                (team_id, perptape.PERPTAPE_LEGACY_FEED_KEY),
+            )
+        newest = max(feeds, key=lambda item: item.fetched_at)
+        return perptape.PerptapeFeedSnapshot(
+            contract_version=newest.contract_version,
+            generated_at=max(item.generated_at for item in feeds),
+            fetched_at=max(item.fetched_at for item in feeds),
+            next_allowed_at=max(item.next_allowed_at for item in feeds),
+            candidates=tuple(
+                perptape.PerptapeCandidate.from_dict(candidate)
+                for item in feeds
+                for candidate in item.candidates
+            ),
+        )
+
     def signal_sources_status(self, actor_id: UUID) -> dict[str, Any]:
         with self.database.session_factory() as session:
             team = self.transactions.require_action_assignment(session, actor_id, "signal.view")
@@ -200,7 +231,7 @@ class SignalService(ServiceComponent):
                     .group_by(models.SignalEvent.signal_source_id)
                 ).all()
             }
-            feed = session.get(models.PerptapeFeed, (team.team_id, "BREAKOUTS"))
+            feed = self._combined_perptape_feed(session, team.team_id)
             data = []
             for source in sources:
                 signal_count, last_signal_at = event_stats.get(source.signal_source_id, (0, None))

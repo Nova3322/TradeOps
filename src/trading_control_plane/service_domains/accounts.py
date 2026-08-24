@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import UTC, datetime, timedelta
@@ -1536,7 +1537,18 @@ class AccountService(ServiceComponent):
             account.freqtrade_last_check_at = now
             if normalized_error is None:
                 if probe_result is not None:
-                    fingerprint, metadata = self._freqtrade_runtime_probe_values(probe_result)
+                    fingerprint, metadata, observed_pairs = (
+                        self._freqtrade_runtime_probe_values(probe_result)
+                    )
+                    if observed_pairs != self._expected_freqtrade_catalog_pairs(
+                        session,
+                        account,
+                    ):
+                        _reject(
+                            "FREQTRADE_CATALOG_MISMATCH",
+                            "the LIVE Worker pair range does not match the complete "
+                            "official executable catalog",
+                        )
                     account.freqtrade_runtime_fingerprint = fingerprint
                     account.freqtrade_runtime_metadata = metadata
                 account.freqtrade_last_verified_at = now
@@ -1595,7 +1607,7 @@ class AccountService(ServiceComponent):
     @staticmethod
     def _freqtrade_runtime_probe_values(
         probe_result: dict[str, Any],
-    ) -> tuple[str, dict[str, Any]]:
+    ) -> tuple[str, dict[str, Any], tuple[str, ...]]:
         fingerprint = probe_result.get("runtime_fingerprint")
         if (
             not isinstance(fingerprint, str)
@@ -1614,6 +1626,12 @@ class AccountService(ServiceComponent):
                 "FREQTRADE_WORKER_RESPONSE_INVALID",
                 "Freqtrade runtime whitelist is invalid",
             )
+        normalized_pairs = sorted(set(whitelist))
+        if len(normalized_pairs) != len(whitelist):
+            _reject(
+                "FREQTRADE_WORKER_RESPONSE_INVALID",
+                "Freqtrade runtime whitelist contains duplicate pair identities",
+            )
         metadata = {
             key: probe_result.get(key)
             for key in (
@@ -1630,10 +1648,49 @@ class AccountService(ServiceComponent):
                 "network",
             )
         }
-        metadata["whitelist"] = sorted(whitelist)
-        metadata["active_pair_count"] = len(whitelist)
+        metadata["active_pair_count"] = len(normalized_pairs)
+        metadata["pair_catalog_digest"] = hashlib.sha256(
+            json.dumps(normalized_pairs, separators=(",", ":")).encode()
+        ).hexdigest()
+        metadata["scope_rule"] = probe_result.get("scope_rule")
+        metadata["hip3_pair_count"] = probe_result.get("hip3_pair_count")
         metadata["observed_fingerprint"] = fingerprint
-        return fingerprint, metadata
+        return fingerprint, metadata, tuple(normalized_pairs)
+
+    @staticmethod
+    def _expected_freqtrade_catalog_pairs(
+        session: Session,
+        account: models.ExchangeAccount,
+    ) -> tuple[str, ...]:
+        instruments = session.scalars(
+            select(models.Instrument)
+            .where(
+                models.Instrument.venue == account.venue,
+                models.Instrument.active.is_(True),
+            )
+            .order_by(models.Instrument.symbol)
+        ).all()
+        if not instruments:
+            _reject(
+                "FREQTRADE_CATALOG_EMPTY",
+                "the current official executable Instrument Catalog is empty",
+            )
+        try:
+            return tuple(
+                sorted(
+                    freqtrade.freqtrade_pair(
+                        account.venue,
+                        item.symbol,
+                        hip3_dexes=tuple(account.freqtrade_hip3_dexes or ()),
+                    )
+                    for item in instruments
+                )
+            )
+        except domain.DomainRejected as exc:
+            raise domain.DomainRejected(
+                "FREQTRADE_CATALOG_MISMATCH",
+                "the official executable catalog cannot be mapped to the exact Worker scope",
+            ) from exc
 
     def record_freqtrade_runtime_probe(
         self,
@@ -1652,13 +1709,16 @@ class AccountService(ServiceComponent):
             normalized_error = "FREQTRADE_WORKER_PROBE_FAILED"
         fingerprint: str | None = None
         metadata: dict[str, Any] | None = None
+        observed_pairs: tuple[str, ...] | None = None
         if normalized_error is None:
             if probe_result is None:
                 _reject(
                     "FREQTRADE_WORKER_RESPONSE_INVALID",
                     "Freqtrade runtime probe result is missing",
                 )
-            fingerprint, metadata = self._freqtrade_runtime_probe_values(probe_result)
+            fingerprint, metadata, observed_pairs = self._freqtrade_runtime_probe_values(
+                probe_result
+            )
         with self.database.session_factory.begin() as session:
             account = session.get(
                 models.ExchangeAccount,
@@ -1682,12 +1742,34 @@ class AccountService(ServiceComponent):
                     "the exact account-bound Freqtrade worker changed during runtime probing",
                 )
             result_error = normalized_error
+            catalog_matches = False
+            if result_error is None:
+                assert observed_pairs is not None
+                catalog_matches = observed_pairs == self._expected_freqtrade_catalog_pairs(
+                    session,
+                    account,
+                )
+                if not catalog_matches:
+                    result_error = "FREQTRADE_CATALOG_MISMATCH"
             if (
                 result_error is None
                 and account.freqtrade_runtime_fingerprint is not None
                 and account.freqtrade_runtime_fingerprint != fingerprint
             ):
-                result_error = "FREQTRADE_RUNTIME_FINGERPRINT_CHANGED"
+                if account.freqtrade_worker_status in {"VERIFIED", "STALE"} and (
+                    account.freqtrade_error_code
+                    in {
+                        None,
+                        "FREQTRADE_CATALOG_MISMATCH",
+                        "FREQTRADE_RUNTIME_FINGERPRINT_CHANGED",
+                    }
+                    and catalog_matches
+                ):
+                    account.freqtrade_runtime_fingerprint = fingerprint
+                    account.freqtrade_worker_status = "VERIFIED"
+                    account.freqtrade_error_code = None
+                else:
+                    result_error = "FREQTRADE_RUNTIME_FINGERPRINT_CHANGED"
             if (
                 result_error is None
                 and account.freqtrade_worker_status != "VERIFIED"
@@ -1707,7 +1789,10 @@ class AccountService(ServiceComponent):
                     account.freqtrade_runtime_fingerprint = fingerprint
                 account.freqtrade_last_verified_at = now
             else:
-                if result_error == "FREQTRADE_RUNTIME_FINGERPRINT_CHANGED":
+                if result_error in {
+                    "FREQTRADE_CATALOG_MISMATCH",
+                    "FREQTRADE_RUNTIME_FINGERPRINT_CHANGED",
+                }:
                     account.freqtrade_worker_status = "STALE"
                 account.freqtrade_error_code = result_error
             account.freqtrade_last_check_at = now

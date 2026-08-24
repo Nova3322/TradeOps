@@ -811,6 +811,7 @@ class CcxtProFactAdapter:
     def _catalog_instruments(self, markets: Mapping[str, Any]) -> tuple[JsonObject, ...]:
         """Project the complete official active linear-contract catalog without subscribing."""
 
+        settlement = "USDC" if self.scope.venue == "HYPERLIQUID" else "USDT"
         symbols = tuple(
             sorted(
                 str(symbol)
@@ -819,7 +820,10 @@ class CcxtProFactAdapter:
                 and isinstance(market, Mapping)
                 and market.get("active") is not False
                 and market.get("contract") is True
+                and market.get("swap") is True
                 and market.get("linear") is True
+                and market.get("quote") == settlement
+                and market.get("settle") == settlement
             )
         )
         return self._instruments(markets, symbols)

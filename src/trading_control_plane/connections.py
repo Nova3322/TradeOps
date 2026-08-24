@@ -71,6 +71,29 @@ def _latest_health(
     return max(matches, key=lambda item: str(item.get("checked_at") or ""))
 
 
+def _perptape_health(
+    source_health: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    exact_keys = {"PERPTAPE:BN", "PERPTAPE:HL"}
+    present = exact_keys.intersection(source_health)
+    if present and present != exact_keys:
+        checked_at = max(
+            (
+                source_health[key].get("checked_at")
+                for key in present
+                if source_health[key].get("checked_at") is not None
+            ),
+            default=None,
+            key=str,
+        )
+        return {
+            "status": "FAILED",
+            "error_code": "PERPTAPE_VENUE_HEALTH_INCOMPLETE",
+            "checked_at": checked_at,
+        }
+    return _latest_health(source_health, "PERPTAPE", prefer_scoped=True)
+
+
 def _fresh_exchange_health(
     health: Mapping[str, Any] | None,
     *,
@@ -208,7 +231,7 @@ def project_runtime_connections(
             credential_state=perptape_credentials,
             config_complete=True,
             health=_fresh_exchange_health(
-                _latest_health(source_health, "PERPTAPE"),
+                _perptape_health(source_health),
                 now=now,
                 stale_after_seconds=perptape_stale_after_seconds,
                 stale_error_code="PERPTAPE_HEALTH_STALE",

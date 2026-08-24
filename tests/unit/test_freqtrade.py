@@ -476,6 +476,7 @@ def test_worker_probe_verifies_bound_exchange_without_exposing_credentials() -> 
         "hip3_dexes": ["xyz"],
         "active_pair_count": 2,
         "hip3_pair_count": 1,
+        "scope_rule": "ALL_ACTIVE_CORE_AND_ACCOUNT_HIP3_PERPETUALS",
         "worker_command_available": True,
         "force_entry_enabled": True,
         "position_adjustment_enabled": True,

@@ -264,7 +264,10 @@ async function renderSystemStatus() {
   const opportunityHealthRequest = hasCapability('opportunity.view')
     ? api('/api/opportunities').catch(error => ({error}))
     : Promise.resolve(null);
-  const [health, control, campaignsResponse, exceptionsResponse, runtime, freqtrade, opportunityHealth] = await Promise.all([
+  const instrumentCatalogRequest = canViewVenues
+    ? api('/api/instruments').catch(error => ({error, data:[]}))
+    : Promise.resolve({data:[]});
+  const [health, control, campaignsResponse, exceptionsResponse, runtime, freqtrade, opportunityHealth, instrumentCatalogResponse] = await Promise.all([
     healthRequest,
     api('/api/risk-controls').catch(error => ({error})),
     canViewOperations ? api('/api/campaigns') : Promise.resolve({data:[], as_of:null, restricted:true}),
@@ -272,7 +275,12 @@ async function renderSystemStatus() {
     api('/api/runtime/status').catch(error => ({error})),
     api('/api/execution/freqtrade/status').catch(error => ({error})),
     opportunityHealthRequest,
+    instrumentCatalogRequest,
   ]);
+  const activeInstruments = Array.isArray(instrumentCatalogResponse?.data)
+    ? instrumentCatalogResponse.data
+    : [];
+  const activeInstrumentKeys = new Set(activeInstruments.map(item => `${item.venue}:${item.symbol}`));
   const campaigns = campaignsResponse.data.filter(item => item.status !== 'CLOSED' && item.environment === 'LIVE');
   const details = await Promise.all(campaigns.map(item => api(`/api/campaigns/${item.campaign_id}`)));
   const liveCampaignIds = new Set(campaigns.map(item => item.campaign_id));
@@ -381,17 +389,24 @@ async function renderSystemStatus() {
       : 'Perptape 尚未配置；人工提案仍可使用。';
   const accountBoundWorkers = Array.isArray(freqtrade?.account_bindings) ? freqtrade.account_bindings : [];
   const configuredWorkers = accountBoundWorkers.filter(worker => worker.configured);
-  const requiredPairsForWorker = worker => details
+  const catalogForWorker = worker => activeInstruments.filter(item => item.venue === worker.venue);
+  const requiredTasksForWorker = worker => [...new Map(details
     .filter(item => item.status !== 'CLOSED' && item.environment === worker.mode && item.account_id === worker.account_id && item.venue === worker.venue)
     .filter(item => item.intents.some(intent => ['READY','DISPATCHING','SENT','PARTIALLY_FILLED','UNKNOWN'].includes(intent.status)))
-    .map(item => worker.venue === 'BINANCE' && item.instrument?.symbol?.endsWith('USDT') ? `${item.instrument.symbol.slice(0, -4)}/USDT:USDT` : null)
-    .filter(Boolean);
+    .map(item => item.instrument?.symbol)
+    .filter(Boolean)
+    .map(symbol => [symbol, {
+      symbol,
+      allowed: activeInstrumentKeys.has(`${worker.venue}:${symbol}`),
+    }])).values()];
   const verifiedWorkers = configuredWorkers.filter(worker => {
-    const requiredPairs = requiredPairsForWorker(worker);
+    const requiredTasks = requiredTasksForWorker(worker);
+    const catalogCount = catalogForWorker(worker).length;
     return worker.status === 'VERIFIED'
       && worker.runtime?.fingerprint_verified === true
       && worker.runtime_health?.status === 'HEALTHY'
-      && requiredPairs.every(pair => (worker.runtime?.whitelist || []).includes(pair));
+      && (!canViewVenues || Number(worker.runtime?.active_pair_count || 0) === catalogCount)
+      && requiredTasks.every(task => task.allowed);
   });
   const executionWorkerHealthy = freqtrade?.execution_worker?.status === 'HEALTHY';
   const liveOrderSendEnabled = freqtrade?.live_order_send === 'ENABLED';
@@ -415,12 +430,19 @@ async function renderSystemStatus() {
         : '当前没有可由执行进程加载的精确账户 Freqtrade Worker。';
   const workerScopeRows = configuredWorkers.map(worker => {
     const runtimeState = worker.runtime || {};
-    const requiredPairs = requiredPairsForWorker(worker);
-    const missingPairs = requiredPairs.filter(pair => !(runtimeState.whitelist || []).includes(pair));
-    const conditionReady = worker.status === 'VERIFIED' && runtimeState.fingerprint_verified === true && worker.runtime_health?.status === 'HEALTHY' && !missingPairs.length;
-    return `<tr><td data-label="账户 / Venue"><b>${escapeHtml(worker.account_id)} · ${escapeHtml(fmtVenueLabel(worker.venue))}</b><br><span class="subtle">${escapeHtml(worker.name || '未命名 Worker')}</span></td><td data-label="运行条件"><span class="status-pill ${conditionReady ? 'status-APPROVED' : 'status-DENY'}">${conditionReady ? '当前条件通过' : '当前条件阻断'}</span><br><span class="subtle">${escapeHtml(worker.mode)} · ${runtimeState.dry_run === false ? 'LIVE' : '非 LIVE'} · ${escapeHtml(runtimeState.worker_state || 'UNKNOWN')} · 指纹${runtimeState.fingerprint_verified ? '已验证' : '未验证'}</span></td><td data-label="受控能力">Force Entry ${runtimeState.force_entry_enabled ? '已启用' : '未启用'}<br>Position Adjustment ${runtimeState.position_adjustment_enabled ? '已启用' : '未启用'}</td><td data-label="白名单 / 当前任务">${escapeHtml((runtimeState.whitelist || []).join('、') || '尚无已验证白名单')}${requiredPairs.length ? `<br><span class="subtle">当前任务：${escapeHtml(requiredPairs.join('、'))}${missingPairs.length ? `；缺少 ${escapeHtml(missingPairs.join('、'))}` : '；全部允许'}</span>` : '<br><span class="subtle">当前没有待执行任务交易对</span>'}</td><td data-label="最近探针">${fmtDate(worker.runtime_health?.checked_at)}${worker.runtime_health?.error_code ? `<br><code>${escapeHtml(worker.runtime_health.error_code)}</code>` : ''}</td></tr>`;
+    const catalog = catalogForWorker(worker);
+    const requiredTasks = requiredTasksForWorker(worker);
+    const blockedTasks = requiredTasks.filter(task => !task.allowed);
+    const catalogCountMatches = !canViewVenues || Number(runtimeState.active_pair_count || 0) === catalog.length;
+    const conditionReady = worker.status === 'VERIFIED' && runtimeState.fingerprint_verified === true && worker.runtime_health?.status === 'HEALTHY' && catalogCountMatches && !blockedTasks.length;
+    const taskSummary = requiredTasks.length
+      ? requiredTasks.map(task => `<span>当前任务：${escapeHtml(task.symbol)} · ${task.allowed ? '允许' : '阻断'}</span>`).join('<br>')
+      : '当前没有待执行任务交易对';
+    const catalogItems = catalog.map(item => `<code data-worker-catalog-pair>${escapeHtml(item.symbol)}</code>`).join('');
+    const catalogDetail = `<details class="worker-catalog-detail"><summary>查看完整合约目录</summary><label><span class="visually-hidden">搜索合约</span><input type="search" placeholder="搜索合约" data-worker-catalog-search></label><div class="worker-catalog-list" data-worker-catalog-list>${catalogItems}</div></details>`;
+    return `<tr><td data-label="账户 / Venue"><b>${escapeHtml(worker.account_id)} · ${escapeHtml(fmtVenueLabel(worker.venue))}</b><br><span class="subtle">${escapeHtml(worker.name || '未命名 Worker')}</span></td><td data-label="运行条件"><span class="status-pill ${conditionReady ? 'status-APPROVED' : 'status-DENY'}">${conditionReady ? '当前条件通过' : '当前条件阻断'}</span><br><span class="subtle">${escapeHtml(worker.mode)} · ${runtimeState.dry_run === false ? 'LIVE' : '非 LIVE'} · ${escapeHtml(runtimeState.worker_state || 'UNKNOWN')} · 指纹${runtimeState.fingerprint_verified ? '已验证' : '未验证'}</span></td><td data-label="受控能力">Force Entry ${runtimeState.force_entry_enabled ? '已启用' : '未启用'}<br>Position Adjustment ${runtimeState.position_adjustment_enabled ? '已启用' : '未启用'}</td><td data-label="动态范围 / 当前任务"><b>全部有效永续合约 · ${Number(runtimeState.active_pair_count || 0)} 个</b><br><span class="subtle">${taskSummary}</span>${catalogDetail}</td><td data-label="最近探针">${fmtDate(worker.runtime_health?.checked_at)}${worker.runtime_health?.error_code ? `<br><code>${escapeHtml(worker.runtime_health.error_code)}</code>` : ''}</td></tr>`;
   }).join('');
-  const workerScopePanel = configuredWorkers.length ? `<section><div class="section-heading"><div><p class="eyebrow">精确执行范围</p><h2>账户 Worker 的真实 LIVE 条件</h2></div><span class="status-pill">${verifiedWorkers.length} / ${configuredWorkers.length} 通过</span></div><div class="table-wrap"><table><thead><tr><th>账户 / Venue</th><th>运行条件</th><th>受控能力</th><th>白名单 / 当前任务</th><th>最近探针</th></tr></thead><tbody>${workerScopeRows}</tbody></table></div></section>` : '';
+  const workerScopePanel = configuredWorkers.length ? `<section><div class="section-heading"><div><p class="eyebrow">精确执行范围</p><h2>账户 Worker 的真实 LIVE 条件</h2></div><span class="status-pill">${verifiedWorkers.length} / ${configuredWorkers.length} 通过</span></div><div class="table-wrap"><table><thead><tr><th>账户 / Venue</th><th>运行条件</th><th>受控能力</th><th>动态范围 / 当前任务</th><th>最近探针</th></tr></thead><tbody>${workerScopeRows}</tbody></table></div></section>` : '';
   const tradingConnectionsReady = Boolean(connections.BINANCE?.available && connections.HYPERLIQUID?.available);
   const activeMonitoring = campaigns.length > 0;
   const overallTone = !health.ready || !controlAvailable ? 'danger' : exceptions.length || !entryOpen || !perptapeAvailable || !workersReady || !tradingConnectionsReady || !telegramHealthy ? 'attention' : activeMonitoring ? 'success' : 'neutral';
@@ -436,7 +458,7 @@ async function renderSystemStatus() {
     systemHealthCard({title:'核心服务', status:health.ready ? '服务可用' : '服务不可用', tone:health.ready ? 'success' : 'danger', copy:health.ready ? '业务数据库和交易服务运行正常。' : '核心服务检查失败；不能把缺失响应当成正常。', meta:'数据缺失时自动阻止交易'}),
     systemHealthCard({title:'开仓与加仓', status:entryStatus, tone:entryOpen ? (addOpen ? 'success' : 'attention') : 'danger', copy:entryCopy, meta:restoreConditions.ready ? '每笔新增风险仍会重新检查账户、交易所与授权' : `${restoreConditions.blockers?.length || blockedRiskChecks.length} 项实时条件待处理；查看风险控制了解精确原因`}),
     systemHealthCard({title:'自动执行进程', status:executionWorkerHealthy ? 'Execution Worker 健康' : 'Execution Worker 心跳异常', tone:executionWorkerHealthy ? 'success' : 'danger', copy:executionWorkerHealthy ? `最近心跳覆盖 ${Number(freqtrade?.execution_worker?.healthy_binding_count || 0)} 个精确账户绑定。` : '数据库中没有新鲜的 Execution Worker 账户心跳；不会把 API 进程环境变量当成独立进程状态。', meta:'来源：数据库运行心跳'}),
-    systemHealthCard({title:'Freqtrade Worker', status:workersReady ? '精确账户运行条件已验证' : '精确账户运行条件未通过', tone:workersReady ? 'success' : 'danger', copy:executionCopy, meta:'身份、LIVE/TESTNET 模式、白名单、Force Entry、仓位调整和运行指纹逐项核验'}),
+    systemHealthCard({title:'Freqtrade Worker', status:workersReady ? '精确账户运行条件已验证' : '精确账户运行条件未通过', tone:workersReady ? 'success' : 'danger', copy:executionCopy, meta:'身份、LIVE/TESTNET 模式、动态合约范围、Force Entry、仓位调整和运行指纹逐项核验'}),
     systemHealthCard({title:'生产订单 Gate', status:liveOrderSendEnabled ? 'LIVE_ORDER_SEND 已启用' : `LIVE_ORDER_SEND ${fmtStatus(freqtrade?.live_order_send || 'UNKNOWN')}`, tone:liveOrderSendEnabled ? 'attention' : 'danger', copy:liveOrderSendEnabled ? '数据库 Gate 允许已审核 Intent 进入逐笔执行检查；它不会绕过 RBAC、独立审核、风控、对账、租约或 Worker 探针。' : '数据库 Gate 当前不允许发送生产订单。', meta:`来源：${freqtrade?.gate_source === 'DATABASE' ? '数据库' : '未知'} · 更新 ${fmtDate(freqtrade?.live_order_send_updated_at)}`}),
     systemHealthCard({title:'Telegram 审核通知', status:telegramStatus, tone:telegramHealthy ? 'success' : 'attention', copy:telegramHealthy ? telegramHealthyCopy : telegramFailureCopy, meta:telegramHealthy ? `最近成功 ${fmtDate(telegramHealth.last_success_at)}` : '网页端审核队列保持可用；资金、订单、风险开关与权限操作不对 Telegram 机器人开放'}),
     systemHealthCard({title:'Perptape 机会源', status:perptapeStatus, tone:perptapeTone, copy:perptapeCopy, meta:`只读 · 最近数据 ${fmtDate(perptape.last_fetched_at)}${perptapeTransportIssue ? ` · ${perptapeTransportIssue}` : ''}`}),
@@ -505,7 +527,7 @@ async function renderSystemStatus() {
     : 'Freqtrade 执行底座已就绪，但交易所只读连接受限';
   const executionVerdictCopy = !workersReady
     ? `${executionWorkerHealthy ? 'Execution Worker 心跳正常，但至少一个精确账户 Worker 条件未通过' : 'Execution Worker 尚无新鲜数据库心跳'}；${!tradingConnectionsReady ? '至少一个交易所只读连接也受限' : '交易所只读连接正常'}。系统不会把页面可访问误报为可执行交易。`
-    : `Execution Worker、精确账户运行指纹和当前任务交易对白名单均已通过；LIVE_ORDER_SEND 数据库 Gate ${liveOrderSendEnabled ? '已启用' : '未启用'}，每笔订单仍需逐项通过审核、风控、对账和租约。`;
+    : `Execution Worker、精确账户运行指纹和当前任务动态合约范围均已通过；LIVE_ORDER_SEND 数据库 Gate ${liveOrderSendEnabled ? '已启用' : '未启用'}，每笔订单仍需逐项通过审核、风控、对账和租约。`;
   const riskVerdictTitle = policy.system_state === 'NORMAL'
     ? blockedRiskScopeLabels.length
       ? `核心服务可用，但 ${blockedRiskScopeLabels.join('、')} 的实时开仓条件受阻`
@@ -539,6 +561,13 @@ async function renderSystemStatus() {
     ${codes.size ? `<section><div class="section-heading"><div><p class="eyebrow">交易任务运行告警</p><h2>需要处理的问题类型</h2></div><a class="secondary" href="/campaigns/alerts" data-link>查看运行告警</a></div><div class="exception-code-list">${[...codes].sort().map(code => `<span>${escapeHtml(explainException(code).title)}</span>`).join('')}</div></section>` : ''}
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
+  document.querySelectorAll('[data-worker-catalog-search]').forEach(input => input.addEventListener('input', () => {
+    const query = input.value.trim().toLowerCase();
+    const list = input.closest('details')?.querySelector('[data-worker-catalog-list]');
+    list?.querySelectorAll('[data-worker-catalog-pair]').forEach(pair => {
+      pair.hidden = Boolean(query) && !pair.textContent.toLowerCase().includes(query);
+    });
+  }));
 }
 
 async function renderCampaignFacts(mode) {

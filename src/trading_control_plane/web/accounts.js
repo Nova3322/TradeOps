@@ -62,7 +62,9 @@ function exchangeAccountDetailConfiguration(item) {
   const workerVerify = permissions.can_manage_worker && executionWorker.supported
     ? `<form class="freqtrade-worker-verify-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-version="${item.version}"><button class="secondary" type="submit" aria-describedby="${workerHelpId}" ${workerConfigured && item.active ? '' : 'disabled'}>验证 Worker</button><small id="${workerHelpId}">${escapeHtml(workerVerifyReason)}</small><div class="form-error" role="alert"></div></form>`
     : '';
-  const hip3Field = item.venue === 'HYPERLIQUID' ? `<label>HIP-3 DEX 白名单<input name="hip3_dexes" value="${escapeHtml((executionWorker.hip3_dexes || []).join(','))}" placeholder="例如 xyz（逗号分隔）"></label>` : '';
+  const hip3Field = item.venue === 'HYPERLIQUID'
+    ? `<input name="hip3_dexes" type="hidden" value="${escapeHtml((executionWorker.hip3_dexes || []).join(','))}"><div class="account-worker-scope"><span>动态合约范围</span><b>全部有效 Core 与账户全部 HIP-3 永续合约</b><small>系统按官方目录自动发现；下架、暂停或执行参数不完整的合约继续阻断。</small></div>`
+    : '';
   const workerEndpoint = executionWorker.endpoint || executionWorker.default_endpoint || '';
   const workerEndpointControl = workerEndpoint
     ? `<input name="base_url" type="hidden" value="${escapeHtml(workerEndpoint)}"><details class="worker-endpoint-override"><summary><span><b>Worker 服务地址</b><small>${executionWorker.endpoint ? '当前绑定地址' : '已按部署配置自动选择'} · 不是工作空间或账户 URL</small></span><strong>修改</strong></summary><label>自定义 Worker 服务地址<input data-worker-endpoint-override type="url" maxlength="2048" value="${escapeHtml(workerEndpoint)}" placeholder="https://worker.example:8080" required></label></details>`
@@ -310,17 +312,16 @@ async function renderVenueAccountDetail(requestedAccountId) {
     : (currentLanguage === 'en' ? 'Probe time is unavailable for this identity' : '当前身份无法读取探针时间');
   const lastSync = latestVenueObservation(facts);
   const snapshotMode = !connected && Boolean(lastSync);
-  const hip3Dexes = Array.isArray(status.hip3_dexes) ? status.hip3_dexes : [];
   const venueDetail = currentLanguage === 'en'
     ? venue === 'BINANCE'
       ? ({STANDARD:'Standard account',PORTFOLIO_MARGIN:'Unified account',MAIN_ACCOUNT:'Main account',SUBACCOUNT:'Subaccount'}[status.account_mode] || 'Unknown account mode')
       : venue === 'HYPERLIQUID'
-        ? `Core markets${status.hip3_available ? ` + HIP-3${hip3Dexes.length ? ` (${hip3Dexes.join(', ')})` : ''}` : ''}`
+        ? `All active Core${status.hip3_available ? ' and all account HIP-3 perpetual markets' : ' perpetual markets'}`
         : venue === 'OKX' ? 'USDT linear SWAP scope' : 'Unified USDT linear perpetual scope'
     : venue === 'BINANCE'
       ? (accountModeLabels[status.account_mode] || '账户模式未知')
       : venue === 'HYPERLIQUID'
-        ? `核心市场${status.hip3_available ? ` + HIP-3${hip3Dexes.length ? `（${hip3Dexes.join('、')}）` : ''}` : ''}`
+        ? `全部有效 Core${status.hip3_available ? ' 与账户全部 HIP-3 永续合约' : ' 永续合约'}`
         : venue === 'OKX' ? 'USDT 线性永续范围' : '统一账户 USDT 线性永续范围';
   const executionWorker = account?.execution_worker || null;
   const executionDetail = executionWorker?.live_ready

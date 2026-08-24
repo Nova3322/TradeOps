@@ -418,6 +418,13 @@ class FreqtradeWorkerClient:
             "hip3_dexes": list(self.spec.hip3_dexes),
             "active_pair_count": len(whitelist),
             "hip3_pair_count": len(hip3_pairs),
+            "scope_rule": (
+                "ALL_ACTIVE_USDM_USDT_PERPETUALS"
+                if self.spec.venue == "BINANCE"
+                else "ALL_ACTIVE_CORE_AND_ACCOUNT_HIP3_PERPETUALS"
+                if self.spec.venue == "HYPERLIQUID"
+                else "EXACT_ACCOUNT_CATALOG"
+            ),
             "worker_command_available": True,
             "force_entry_enabled": True,
             "position_adjustment_enabled": True,

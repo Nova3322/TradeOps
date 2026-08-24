@@ -66,6 +66,7 @@ class FakeCcxtProExchange:
                 "id": "BTCUSDT",
                 "active": True,
                 "contract": True,
+                "swap": True,
                 "linear": True,
                 "contractSize": 0.001,
                 "precision": {"amount": 1, "price": 0.1},

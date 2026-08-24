@@ -203,7 +203,7 @@ def test_compact_density_contract_covers_shell_content_and_mobile() -> None:
     assert ".api-access-page { max-width: none; }" in api_access
     for href in (
         "/assets/styles-base.css?v=22",
-        "/assets/styles-components.css?v=30",
+        "/assets/styles-components.css?v=31",
         "/assets/styles-api-access.css?v=4",
         "/assets/styles-shell.css?v=15",
     ):

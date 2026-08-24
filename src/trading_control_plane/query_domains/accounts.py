@@ -489,7 +489,7 @@ class AccountQueries(QueryComponent):
                     if item.venue in {"OKX", "BYBIT"}
                     else "USD_M_PERPETUALS"
                     if item.venue == "BINANCE"
-                    else "CORE_AND_CONFIGURED_HIP3"
+                    else "CORE_AND_ALL_ACCOUNT_HIP3"
                 ),
                 "connection_verification_connector": "IMPLEMENTED",
                 "connection_verification_source": "DATABASE_ENVELOPE",
