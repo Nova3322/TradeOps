@@ -187,6 +187,10 @@ class _ProposalsRoutes:
                         "PROPOSAL_DEFAULT_NOT_CONFIGURED",
                         "an administrator must configure one-click proposal defaults",
                     )
+                expected_account_id = self.service().resolve_proposal_default_account(
+                    identity.user_id,
+                    candidate.venue,
+                )
                 expected_quantity = (
                     Decimal(str(default_config["notional"])) / candidate.reference_price
                 ).quantize(Decimal("0.000000000000000001"), rounding=ROUND_DOWN)
@@ -207,7 +211,7 @@ class _ProposalsRoutes:
                         payload.environment is not None
                         and payload.environment != default_config["environment"]
                     )
-                    or payload.account_id != default_config["account_id"]
+                    or payload.account_id != expected_account_id
                     or payload.risk_tier.value != default_config["risk_tier"]
                     or payload.quantity != expected_quantity
                     or payload.initial_quantity is not None
@@ -349,6 +353,10 @@ class _ProposalsRoutes:
                     "PROPOSAL_DEFAULT_NOT_CONFIGURED",
                     "an administrator must configure one-click proposal defaults",
                 )
+            account_id = self.service().resolve_proposal_default_account(
+                identity.user_id,
+                candidate.venue,
+            )
             quantity = (Decimal(str(config["notional"])) / candidate.reference_price).quantize(
                 Decimal("0.000000000000000001"), rounding=ROUND_DOWN
             )
@@ -365,7 +373,7 @@ class _ProposalsRoutes:
                 candidate_id,
                 SystemProposalRequest(
                     environment=config["environment"],
-                    account_id=config["account_id"],
+                    account_id=account_id,
                     risk_tier=config["risk_tier"],
                     quantity=quantity,
                     initial_quantity=None,

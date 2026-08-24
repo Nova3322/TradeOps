@@ -15,6 +15,10 @@ const sharedSource = readFileSync(
   new URL('../src/trading_control_plane/web/shared.js', import.meta.url),
   'utf8',
 );
+const signalsSource = readFileSync(
+  new URL('../src/trading_control_plane/web/signals.js', import.meta.url),
+  'utf8',
+);
 const routerSource = readFileSync(
   new URL('../src/trading_control_plane/web/router.js', import.meta.url),
   'utf8',
@@ -38,7 +42,19 @@ test('production account cards expose the exact-account detail workflow', () => 
   assert.match(indexSource, /execution\.js\?v=201/);
   assert.match(indexSource, /shared\.js\?v=21/);
   assert.match(indexSource, /accounts\.js\?v=186/);
-  assert.match(serviceWorkerSource, /trading-shell-v241/);
+  assert.match(serviceWorkerSource, /trading-shell-v242/);
+});
+
+test('proposal defaults select immutable production account IDs instead of editable labels', () => {
+  const editorSource = signalsSource.slice(
+    signalsSource.indexOf('function proposalDefaultEditor'),
+    signalsSource.indexOf('function bindProposalDefaultForm'),
+  );
+  assert.match(signalsSource, /api\('\/api\/exchange-accounts'\)/);
+  assert.match(editorSource, /<select name="account_id" required/);
+  assert.match(editorSource, /item\.label} · \$\{fmtVenueLabel\(item\.venue\)} · \$\{item\.account_id}/);
+  assert.doesNotMatch(editorSource, /<input name="account_id"/);
+  assert.match(indexSource, /signals\.js\?v=194/);
 });
 
 test('account history uses three independently filtered and paginated record lists', () => {

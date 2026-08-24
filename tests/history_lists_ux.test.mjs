@@ -175,5 +175,5 @@ test("recent notification deliveries support bounded history filters and paginat
     "recordPaginationMarkup(deliveries.length, '通知投递记录分页')",
     "data-notification-row",
   ]) assert.equal(reporting.includes(marker), true, marker);
-  assert.equal(serviceWorker.includes("trading-shell-v241"), true);
+  assert.equal(serviceWorker.includes("trading-shell-v242"), true);
 });
