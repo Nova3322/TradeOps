@@ -501,6 +501,89 @@ class WorkspaceQueries(QueryComponent):
             )
             return None if user is None else user.user_id
 
+    def telegram_notification_runtime_status(self, user_id: UUID) -> dict[str, Any]:
+        """Project durable Telegram route health without decrypting channel credentials."""
+
+        _workspace_id, team_id = self.active_scope_ids(user_id)
+        with self.database.session_factory() as session:
+            team = session.get(models.Team, team_id)
+            environment = None if team is None else team.execution_mode
+            routes = [
+                route
+                for route in session.scalars(
+                    select(models.NotificationRoute).where(
+                        models.NotificationRoute.team_id == team_id,
+                        models.NotificationRoute.channel == "TELEGRAM",
+                        models.NotificationRoute.enabled.is_(True),
+                        models.NotificationRoute.deleted_at.is_(None),
+                    )
+                ).all()
+                if route.environment == environment
+                and "PROPOSAL_REVIEW_REQUIRED" in route.event_types
+            ]
+            route_ids = [route.notification_route_id for route in routes]
+            latest = None
+            if route_ids:
+                latest = session.scalar(
+                    select(models.NotificationDelivery)
+                    .where(
+                        models.NotificationDelivery.team_id == team_id,
+                        models.NotificationDelivery.channel == "TELEGRAM",
+                        models.NotificationDelivery.notification_route_id.in_(route_ids),
+                    )
+                    .order_by(
+                        models.NotificationDelivery.created_at.desc(),
+                        models.NotificationDelivery.notification_delivery_id.desc(),
+                    )
+                    .limit(1)
+                )
+            last_success_at = None
+            if route_ids:
+                last_success_at = session.scalar(
+                    select(func.max(models.NotificationDelivery.sent_at)).where(
+                        models.NotificationDelivery.team_id == team_id,
+                        models.NotificationDelivery.channel == "TELEGRAM",
+                        models.NotificationDelivery.notification_route_id.in_(route_ids),
+                        models.NotificationDelivery.status == "SENT",
+                    )
+                )
+            interactive_review_ready = any(
+                route.recipient_user_id is not None
+                and session.scalar(
+                    select(models.User.telegram_chat_id).where(
+                        models.User.user_id == route.recipient_user_id,
+                        models.User.active.is_(True),
+                        models.User.principal_type == domain.PrincipalType.HUMAN.value,
+                    )
+                )
+                is not None
+                for route in routes
+            )
+
+        enabled = bool(routes)
+        failure_statuses = {"RETRY_WAIT", "DEAD_LETTER", "OUTCOME_UNKNOWN"}
+        state = (
+            "DISABLED"
+            if not enabled
+            else "DEGRADED"
+            if latest is not None and latest.status in failure_statuses
+            else "HEALTHY"
+            if last_success_at is not None
+            else "WAITING"
+        )
+        return {
+            "state": state,
+            "route_count": len(routes),
+            "last_success_at": iso_datetime(last_success_at),
+            "last_error_code": (
+                latest.last_error_code
+                if latest is not None and latest.status in failure_statuses
+                else None
+            ),
+            "latest_delivery_status": None if latest is None else latest.status,
+            "interactive_review_ready": interactive_review_ready,
+        }
+
     def notification_center(
         self,
         user_id: UUID,
