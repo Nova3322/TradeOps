@@ -97,7 +97,11 @@ def freqtrade_pair(venue: str, symbol: str, *, hip3_dexes: tuple[str, ...] = ())
             "FREQTRADE_INSTRUMENT_UNSUPPORTED",
             "Hyperliquid Freqtrade routing requires a Core or configured HIP-3 symbol",
         )
-    return f"{symbol}/USDC:USDC"
+    # CCXT exposes Hyperliquid Core pair identities in uppercase even when
+    # the native catalog uses the lowercase ``k`` prefix (for example
+    # ``kPEPE``).  Keep the native symbol in TradeOps, but route the exact
+    # Freqtrade identity using CCXT's canonical form.
+    return f"{symbol.upper()}/USDC:USDC"
 
 
 def validate_worker_url(value: str) -> str:
