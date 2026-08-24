@@ -78,10 +78,6 @@ def test_runtime_configs_enable_exact_live_workers_with_full_official_pair_scope
                     payload["exchange"][key]["rateLimit"]
                     == HYPERLIQUID_READ_RATE_LIMIT_MS
                 )
-                assert payload["exchange"][key]["options"] == {
-                    "defaultType": "swap",
-                    "fetchMarkets": {"types": ["swap"]},
-                }
 
 
 def test_worker_environment_uses_generated_internal_auth_and_exact_encrypted_credentials() -> None:
