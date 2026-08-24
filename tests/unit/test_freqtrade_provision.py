@@ -109,8 +109,8 @@ def test_official_hip3_directory_discovers_every_named_dex(
         status_code = 200
 
         @staticmethod
-        def json() -> list[dict[str, object]]:
-            return [{"name": None}, {"name": "xyz"}, {"name": "flx"}]
+        def json() -> list[dict[str, object] | None]:
+            return [None, {"name": "xyz"}, {"name": "flx"}]
 
     monkeypatch.setattr(
         "trading_control_plane.freqtrade_provision.requests.post",
@@ -127,8 +127,8 @@ def test_official_hip3_directory_fails_closed_on_ambiguous_entries(
         status_code = 200
 
         @staticmethod
-        def json() -> list[dict[str, object]]:
-            return [{"name": None}, {"name": "xyz"}, {"unexpected": "flx"}]
+        def json() -> list[dict[str, object] | None]:
+            return [None, {"name": "xyz"}, {"unexpected": "flx"}]
 
     monkeypatch.setattr(
         "trading_control_plane.freqtrade_provision.requests.post",
