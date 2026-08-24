@@ -183,6 +183,7 @@ class FactAdapterScope:
 
 
 ExchangeFactory = Callable[[FactAdapterScope, Mapping[str, str], Mapping[str, Any]], Any]
+BinanceSpotExchangeFactory = Callable[[FactAdapterScope, Mapping[str, str]], Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,6 +431,30 @@ def _default_exchange_factory(
     return exchange
 
 
+def _default_binance_spot_exchange_factory(
+    scope: FactAdapterScope,
+    credentials: Mapping[str, str],
+) -> Any:
+    import ccxt.pro as ccxtpro
+
+    exchange = ccxtpro.binance(
+        {
+            "apiKey": credentials.get("api_key", ""),
+            "secret": credentials.get("api_secret", ""),
+            "enableRateLimit": True,
+            "newUpdates": True,
+            "options": {
+                "defaultType": "spot",
+                "adjustForTimeDifference": True,
+                "fetchCurrencies": False,
+            },
+        }
+    )
+    if scope.environment == "TESTNET":
+        exchange.set_sandbox_mode(True)
+    return exchange
+
+
 class CcxtProFactAdapter:
     """One exact account-scoped CCXT/CCXT Pro fact connection.
 
@@ -444,6 +469,7 @@ class CcxtProFactAdapter:
         *,
         credentials: Mapping[str, str],
         exchange_factory: ExchangeFactory = _default_exchange_factory,
+        binance_spot_exchange_factory: BinanceSpotExchangeFactory | None = None,
         binance_request_state: BinanceRequestState | None = None,
         history_window: timedelta = timedelta(hours=24),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -489,6 +515,18 @@ class CcxtProFactAdapter:
             }
         self.scope = scope
         self._exchange = exchange_factory(scope, normalized, options)
+        spot_factory = binance_spot_exchange_factory
+        if (
+            scope.venue == "BINANCE"
+            and spot_factory is None
+            and exchange_factory is _default_exchange_factory
+        ):
+            spot_factory = _default_binance_spot_exchange_factory
+        self._binance_spot_exchange = (
+            None
+            if scope.venue != "BINANCE" or spot_factory is None
+            else spot_factory(scope, normalized)
+        )
         self._history_window = history_window
         self._clock = clock
         self._binance_request_state = binance_request_state
@@ -573,7 +611,7 @@ class CcxtProFactAdapter:
             )
         return status, code, message
 
-    def _record_external_failure(self, exc: Exception) -> Exception:
+    def _record_external_failure(self, exc: Exception, *, exchange: Any | None = None) -> Exception:
         failed_at = _utc(self._clock())
         self._metrics.last_failure_at = failed_at.isoformat()
         raw_status = getattr(exc, "status", getattr(exc, "status_code", None))
@@ -582,7 +620,11 @@ class CcxtProFactAdapter:
             payload = self._binance_error_payload(exc)
             if payload is not None:
                 status, error_code, error_message = payload
-                headers = getattr(self._exchange, "last_response_headers", {})
+                headers = getattr(
+                    self._exchange if exchange is None else exchange,
+                    "last_response_headers",
+                    {},
+                )
                 diagnostic = classify_binance_rate_limit(
                     http_status=status,
                     binance_error_code=error_code,
@@ -625,10 +667,12 @@ class CcxtProFactAdapter:
             diagnostic,
         )
 
-    def _record_binance_success(self) -> None:
+    def _record_binance_success(self, *, exchange: Any | None = None) -> None:
         if self.scope.venue != "BINANCE" or self._binance_request_state is None:
             return
-        headers = getattr(self._exchange, "last_response_headers", {})
+        headers = getattr(
+            self._exchange if exchange is None else exchange, "last_response_headers", {}
+        )
         self._binance_request_state.record_success(
             headers if isinstance(headers, Mapping) else {},
             observed_at=_utc(self._clock()),
@@ -640,6 +684,11 @@ class CcxtProFactAdapter:
             cast(EventKind, kind)
             for kind, capability in _WATCH_CAPABILITIES.items()
             if self._capability(capability)
+            and not (
+                kind == "BALANCE"
+                and self.scope.venue == "BINANCE"
+                and self._binance_spot_exchange is not None
+            )
         )
 
     async def _rest(self, capability: str, *args: object) -> Any:
@@ -679,6 +728,33 @@ class CcxtProFactAdapter:
             "fetchFundingHistory",
         }:
             self._record_binance_success()
+        return value
+
+    async def _fetch_binance_spot_balance(self) -> Any:
+        exchange = self._binance_spot_exchange
+        if exchange is None:
+            raise DomainRejected(
+                "FACT_ADAPTER_CAPABILITY_CONTRACT_INVALID",
+                "Binance spot balance client is unavailable",
+            )
+        method = getattr(exchange, "fetch_balance", None)
+        if method is None:
+            raise DomainRejected(
+                "FACT_ADAPTER_CAPABILITY_CONTRACT_INVALID",
+                "Binance spot balance client has no fetch_balance contract",
+            )
+        self._metrics.rest_requests["fetchSpotBalance"] = (
+            self._metrics.rest_requests.get("fetchSpotBalance", 0) + 1
+        )
+        self._ensure_binance_request_allowed()
+        try:
+            value = await cast(Callable[[], Awaitable[Any]], method)()
+        except Exception as exc:
+            recorded = self._record_external_failure(exc, exchange=exchange)
+            if recorded is exc:
+                raise
+            raise recorded from exc
+        self._record_binance_success(exchange=exchange)
         return value
 
     async def _load_markets(self) -> Mapping[str, Any]:
@@ -743,6 +819,9 @@ class CcxtProFactAdapter:
         self.validate_capabilities()
         balance = await self._rest("fetchBalance")
         self._balances(balance, _utc(self._clock()))
+        if self._binance_spot_exchange is not None:
+            spot_balance = await self._fetch_binance_spot_balance()
+            self._balances(spot_balance, _utc(self._clock()))
 
     def _market_id(self, markets: Mapping[str, Any], symbol: str) -> str:
         market = markets.get(symbol)
@@ -1003,6 +1082,49 @@ class CcxtProFactAdapter:
             if any(source.get(currency) is not None for source in (free, used, total))
         )
 
+    @classmethod
+    def _binance_balances(
+        cls,
+        futures_raw: object,
+        spot_raw: object,
+        observed_at: datetime,
+    ) -> tuple[JsonObject, ...]:
+        futures = {row["currency"]: row for row in cls._balances(futures_raw, observed_at)}
+        spot = {row["currency"]: row for row in cls._balances(spot_raw, observed_at)}
+
+        def amount(row: Mapping[str, Any] | None, field: str) -> Decimal:
+            if row is None or row.get(field) is None:
+                return Decimal(0)
+            value = _decimal(row[field])
+            if value is None or value < 0:
+                raise DomainRejected(
+                    "FACT_ADAPTER_RESPONSE_INCOMPLETE",
+                    "Binance wallet balance is invalid",
+                )
+            return value
+
+        rows: list[JsonObject] = []
+        for currency in sorted(set(futures) | set(spot)):
+            futures_row = futures.get(currency)
+            spot_row = spot.get(currency)
+            futures_total = amount(futures_row, "total")
+            spot_total = amount(spot_row, "total")
+            rows.append(
+                {
+                    "currency": str(currency),
+                    # Equity covers both independently held Binance wallets.
+                    # Execution availability remains the exact USD-M value;
+                    # spot funds are never treated as immediately usable margin.
+                    "free": format(amount(futures_row, "free"), "f"),
+                    "used": format(amount(futures_row, "used"), "f"),
+                    "total": format(futures_total + spot_total, "f"),
+                    "futures_total": format(futures_total, "f"),
+                    "spot_total": format(spot_total, "f"),
+                    "observed_at": observed_at.isoformat(),
+                }
+            )
+        return tuple(rows)
+
     def _marks(
         self,
         raw: object,
@@ -1128,8 +1250,18 @@ class CcxtProFactAdapter:
             history_window = timedelta(days=7)
         since = int((now - history_window).timestamp() * 1_000)
         preflight_balance = await self._rest("fetchBalance") if binance_cooldown_probe else None
+        preflight_spot_balance = (
+            await self._fetch_binance_spot_balance()
+            if binance_cooldown_probe and self._binance_spot_exchange is not None
+            else None
+        )
         balance_task = (
             None if binance_cooldown_probe else asyncio.create_task(self._rest("fetchBalance"))
+        )
+        spot_balance_task = (
+            None
+            if binance_cooldown_probe or self._binance_spot_exchange is None
+            else asyncio.create_task(self._fetch_binance_spot_balance())
         )
         # Account facts deliberately use the account-wide unified calls.  Passing
         # the Freqtrade pair allowlist here would hide manual/non-Freqtrade
@@ -1149,15 +1281,26 @@ class CcxtProFactAdapter:
         try:
             if balance_task is None:
                 balance = preflight_balance
+                spot_balance = preflight_spot_balance
                 positions, orders = await asyncio.gather(positions_task, orders_task)
+            elif spot_balance_task is not None:
+                balance, spot_balance, positions, orders = await asyncio.gather(
+                    balance_task,
+                    spot_balance_task,
+                    positions_task,
+                    orders_task,
+                )
             else:
+                spot_balance = None
                 balance, positions, orders = await asyncio.gather(
                     balance_task, positions_task, orders_task
                 )
             optional = {name: await task for name, task in optional_tasks.items()}
         except Exception as exc:
             required_tasks = tuple(
-                task for task in (balance_task, positions_task, orders_task) if task is not None
+                task
+                for task in (balance_task, spot_balance_task, positions_task, orders_task)
+                if task is not None
             )
             for task in (*required_tasks, *optional_tasks.values()):
                 task.cancel()
@@ -1269,6 +1412,11 @@ class CcxtProFactAdapter:
         fills_raw = optional["fills"][0]
         funding_history = optional["funding_history"][0]
         account_status = optional["status"][0]
+        balance_rows = (
+            self._balances(balance, now)
+            if spot_balance is None
+            else self._binance_balances(balance, spot_balance, now)
+        )
         return ExchangeFactSnapshot(
             scope=self.scope,
             snapshot_version=self._snapshot_version,
@@ -1278,7 +1426,7 @@ class CcxtProFactAdapter:
             positions=position_rows,
             orders=order_rows,
             fills=self._fills(fills_raw, markets, now),
-            balances=self._balances(balance, now),
+            balances=balance_rows,
             instruments=self._instruments(markets, tracked_symbols),
             marks=self._marks(
                 tickers,
@@ -1367,9 +1515,15 @@ class CcxtProFactAdapter:
         if self._closed:
             return
         self._closed = True
-        close = getattr(self._exchange, "close", None)
-        if close is not None:
-            await cast(Callable[[], Awaitable[Any]], close)()
+        closes = []
+        for exchange in (self._exchange, self._binance_spot_exchange):
+            if exchange is None:
+                continue
+            close = getattr(exchange, "close", None)
+            if close is not None:
+                closes.append(cast(Callable[[], Awaitable[Any]], close)())
+        if closes:
+            await asyncio.gather(*closes)
 
 
 class FactAdapterConnectionProbe:

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from trading_control_plane import notilt
 from trading_control_plane.adapters.facts import ExchangeFactSnapshot
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.freqtrade_contracts import freqtrade_pair
@@ -389,4 +390,51 @@ def normalize_fact_adapter_catalog(
     return tuple(results)
 
 
-__all__ = ["normalize_fact_adapter_catalog", "normalize_fact_adapter_snapshot"]
+def normalize_fact_adapter_account_equities(
+    snapshot: ExchangeFactSnapshot,
+) -> tuple[VenueEquity, ...] | None:
+    """Return Binance's complete stablecoin wallet facts independently of contract coverage."""
+
+    if snapshot.scope.venue != "BINANCE":
+        return None
+    if snapshot.data_status != "CURRENT":
+        raise DomainRejected(
+            "FACT_ADAPTER_SNAPSHOT_NOT_CURRENT",
+            "stale or unknown adapter facts cannot overwrite current persisted facts",
+        )
+    results: list[VenueEquity] = []
+    seen: set[str] = set()
+    for row in snapshot.balances:
+        currency = str(row.get("currency") or "").upper()
+        if currency not in notilt.USD_STABLE_ASSETS:
+            continue
+        if currency in seen:
+            raise DomainRejected(
+                "FACT_ADAPTER_SNAPSHOT_INVALID",
+                "normalized Binance balances contain duplicate currencies",
+            )
+        equity = _decimal(row.get("total"), "balance.total")
+        available = _decimal(row.get("free"), "balance.free")
+        assert equity is not None and available is not None
+        if equity < 0 or available < 0:
+            raise DomainRejected(
+                "FACT_ADAPTER_SNAPSHOT_INVALID",
+                "normalized Binance balances cannot be negative",
+            )
+        seen.add(currency)
+        results.append(
+            VenueEquity(
+                equity=equity,
+                available_balance=available,
+                currency=currency,
+                observed_at=snapshot.observed_at,
+            )
+        )
+    return tuple(sorted(results, key=lambda item: item.currency))
+
+
+__all__ = [
+    "normalize_fact_adapter_account_equities",
+    "normalize_fact_adapter_catalog",
+    "normalize_fact_adapter_snapshot",
+]

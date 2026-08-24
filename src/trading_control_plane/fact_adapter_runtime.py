@@ -27,6 +27,7 @@ from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, ExecutionEnvironment
 from trading_control_plane.fact_adapter_api import create_fact_adapter_app
 from trading_control_plane.fact_adapter_ingestion import (
+    normalize_fact_adapter_account_equities,
     normalize_fact_adapter_catalog,
     normalize_fact_adapter_snapshot,
 )
@@ -475,6 +476,7 @@ def _persist_runtime_snapshot(
             venue=binding.venue,
             environment=ExecutionEnvironment(binding.environment),
             runtime_binding=binding,
+            account_equities=normalize_fact_adapter_account_equities(snapshot),
             now=now,
         )
         if snapshot.reason == "PERIODIC_RECONCILIATION":

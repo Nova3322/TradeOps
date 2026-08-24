@@ -25,6 +25,7 @@ from trading_control_plane.config import Settings
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.fact_adapter_api import create_fact_adapter_app
 from trading_control_plane.fact_adapter_ingestion import (
+    normalize_fact_adapter_account_equities,
     normalize_fact_adapter_catalog,
     normalize_fact_adapter_snapshot,
 )
@@ -191,6 +192,25 @@ class FakeCcxtRestOnlyExchange(FakeCcxtProExchange):
             "watchTickers",
         ):
             self.has[capability] = False
+
+
+class FakeBinanceSpotExchange:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.closed = False
+        self.last_response_headers: Mapping[str, str] = {}
+
+    async def fetch_balance(self) -> Mapping[str, Any]:
+        if self.fail:
+            raise OSError("fixture Binance spot balance failure")
+        return {
+            "free": {"USDC": 2, "BTC": 0.1},
+            "used": {"USDC": 0, "BTC": 0},
+            "total": {"USDC": 2, "BTC": 0.1},
+        }
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class DDoSProtection(Exception):
@@ -518,6 +538,70 @@ def test_ccxt_pro_fact_contract_normalizes_all_supported_venues(venue: str) -> N
     assert incomplete_history[0].fills == ()
     assert incomplete_history[0].funding == ()
     assert incomplete_history[0].history_error_code == "FACT_ADAPTER_HISTORY_INCOMPLETE"
+
+
+def test_binance_snapshot_combines_spot_equity_without_inflating_futures_availability() -> None:
+    class BinanceFuturesExchange(FakeCcxtProExchange):
+        async def fetch_balance(self) -> Mapping[str, Any]:
+            return {
+                "free": {"USDT": 90, "USDC": 7},
+                "used": {"USDT": 10, "USDC": 1},
+                "total": {"USDT": 100, "USDC": 8},
+            }
+
+    async def scenario() -> None:
+        futures = BinanceFuturesExchange()
+        spot = FakeBinanceSpotExchange()
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: futures,
+            binance_spot_exchange_factory=lambda *_args: spot,
+            clock=lambda: _NOW,
+        )
+
+        snapshot = await adapter.snapshot(reason="INITIAL")
+        balances = {row["currency"]: row for row in snapshot.balances}
+        assert balances["USDT"]["total"] == "100"
+        assert balances["USDT"]["free"] == "90"
+        assert balances["USDC"]["total"] == "10"
+        assert balances["USDC"]["free"] == "7"
+        assert balances["USDC"]["futures_total"] == "8"
+        assert balances["USDC"]["spot_total"] == "2"
+        assert balances["BTC"]["total"] == "0.1"
+        assert "BALANCE" not in adapter.watch_channels
+        assert snapshot.metrics.rest_requests["fetchSpotBalance"] == 1
+
+        account_equities = normalize_fact_adapter_account_equities(snapshot)
+        assert account_equities is not None
+        assert {
+            item.currency: (item.equity, item.available_balance) for item in account_equities
+        } == {
+            "USDC": (Decimal(10), Decimal(7)),
+            "USDT": (Decimal(100), Decimal(90)),
+        }
+
+        await adapter.close()
+        assert futures.closed is True
+        assert spot.closed is True
+
+    asyncio.run(scenario())
+
+
+def test_binance_spot_balance_failure_blocks_complete_account_snapshot() -> None:
+    async def scenario() -> None:
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: FakeCcxtProExchange(),
+            binance_spot_exchange_factory=lambda *_args: FakeBinanceSpotExchange(fail=True),
+            clock=lambda: _NOW,
+        )
+        with pytest.raises(DomainRejected, match="FACT_ADAPTER_SNAPSHOT_UNAVAILABLE"):
+            await adapter.snapshot(reason="INITIAL")
+        await adapter.close()
+
+    asyncio.run(scenario())
 
 
 def test_fact_adapter_rejects_trading_signing_material() -> None:
