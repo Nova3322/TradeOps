@@ -153,6 +153,14 @@ def _runtime_config(template: dict[str, Any], definition: WorkerDefinition, acco
                 )
             ccxt["enableRateLimit"] = True
             ccxt["rateLimit"] = HYPERLIQUID_READ_RATE_LIMIT_MS
+            options = ccxt.setdefault("options", {})
+            if not isinstance(options, dict):
+                rejections.reject(
+                    "FREQTRADE_PROVISION_TEMPLATE_INVALID",
+                    "Freqtrade production template has invalid CCXT options",
+                )
+            options["defaultType"] = "swap"
+            options["fetchMarkets"] = {"types": ["swap"]}
     api_server.update(
         {
             "enabled": True,
