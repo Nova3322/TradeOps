@@ -228,6 +228,26 @@ class FreqtradeWorkerClient:
                 "Freqtrade RPC WebSocket could not be consumed within its bounded connection",
             ) from exc
 
+    async def verify_rpc_connection(self) -> None:
+        """Open and authenticate the RPC channel without waiting for or creating an event."""
+
+        url = self.rpc_websocket_url()
+        try:
+            async with self._websocket_connector(url, self.timeout_seconds) as websocket:
+                await websocket.send(
+                    json.dumps(
+                        {"type": "subscribe", "data": ["status", "warning"]},
+                        separators=(",", ":"),
+                    )
+                )
+        except DomainRejected:
+            raise
+        except Exception as exc:
+            raise DomainRejected(
+                "FREQTRADE_RPC_UNAVAILABLE",
+                "Freqtrade RPC WebSocket authentication could not be confirmed",
+            ) from exc
+
     def _request(
         self,
         path: str,

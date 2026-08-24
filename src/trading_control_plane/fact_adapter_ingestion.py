@@ -7,6 +7,7 @@ from typing import Any
 
 from trading_control_plane.adapters.facts import ExchangeFactSnapshot
 from trading_control_plane.domain import DomainRejected
+from trading_control_plane.freqtrade_contracts import freqtrade_pair
 from trading_control_plane.venue_read_only import (
     VenueEquity,
     VenueFill,
@@ -303,4 +304,89 @@ def normalize_fact_adapter_snapshot(
     return tuple(results)
 
 
-__all__ = ["normalize_fact_adapter_snapshot"]
+def normalize_fact_adapter_catalog(
+    snapshot: ExchangeFactSnapshot,
+    *,
+    hip3_dexes: tuple[str, ...] = (),
+) -> tuple[VenueInstrument, ...]:
+    """Normalize the complete official market catalog independently of ticker subscriptions."""
+
+    if snapshot.data_status != "CURRENT":
+        raise DomainRejected(
+            "FACT_ADAPTER_SNAPSHOT_NOT_CURRENT",
+            "stale or unknown adapter facts cannot overwrite the Instrument Catalog",
+        )
+    results: list[VenueInstrument] = []
+    seen: set[str] = set()
+    for row in snapshot.catalog_instruments:
+        native = _native_symbol(row)
+        if native in seen:
+            raise DomainRejected(
+                "FACT_ADAPTER_CATALOG_INVALID",
+                "the official market catalog contains duplicate executable identities",
+            )
+        if (
+            row.get("active") is not True
+            or row.get("contract") is not True
+            or row.get("linear") is not True
+        ):
+            continue
+        try:
+            freqtrade_pair(snapshot.scope.venue, native, hip3_dexes=hip3_dexes)
+        except DomainRejected:
+            continue
+        settle = row.get("settle") or row.get("quote")
+        quote = row.get("quote") or settle
+        if not isinstance(settle, str) or not settle or not isinstance(quote, str) or not quote:
+            continue
+        try:
+            tick_size = _decimal(
+                row.get("price_precision"),
+                "catalog.price_precision",
+                allow_none=True,
+            )
+            lot_size = _decimal(
+                row.get("amount_precision"),
+                "catalog.amount_precision",
+                allow_none=True,
+            )
+            minimum_notional = _decimal(
+                row.get("minimum_notional"),
+                "catalog.minimum_notional",
+                allow_none=True,
+            )
+            contract_multiplier = _decimal(
+                row.get("contract_size"),
+                "catalog.contract_size",
+                allow_none=True,
+            )
+        except DomainRejected:
+            continue
+        if (
+            tick_size is None
+            or lot_size is None
+            or minimum_notional is None
+            or contract_multiplier is None
+            or tick_size <= 0
+            or lot_size <= 0
+            or minimum_notional <= 0
+            or contract_multiplier <= 0
+        ):
+            continue
+        seen.add(native)
+        results.append(
+            VenueInstrument(
+                symbol=native,
+                tick_size=tick_size,
+                lot_size=lot_size,
+                minimum_notional=minimum_notional,
+                quote_currency=quote,
+                collateral_currency=settle,
+                active=True,
+                contract_multiplier=contract_multiplier,
+            )
+        )
+    return tuple(results)
+
+
+__all__ = ["normalize_fact_adapter_catalog", "normalize_fact_adapter_snapshot"]

@@ -316,7 +316,11 @@ async function renderSystemStatus() {
   const notilt = runtime?.data?.external_boundaries?.notilt || {enabled:false,gateway_available:false,configured_chains:[]};
   const telegram = runtime?.data?.external_boundaries?.telegram || {enabled:false,network_configured:false,polling:{state:'DISABLED'}};
   const telegramPolling = telegram.polling || {state:'DISABLED',last_error_code:null,last_success_at:null};
-  const telegramHealthy = telegram.enabled && telegram.network_configured && telegramPolling.state === 'HEALTHY';
+  const telegramDelivery = telegram.delivery || null;
+  const telegramHealth = telegram.mode === 'DURABLE_NOTIFICATION_ROUTE' && telegramDelivery
+    ? telegramDelivery
+    : telegramPolling;
+  const telegramHealthy = telegram.enabled && telegram.network_configured && telegramHealth.state === 'HEALTHY';
   const telegramFailureCopy = ({
     TELEGRAM_POLLING_CONFLICT:'另一个 Bot 实例正在使用同一长轮询；只保留一个生产轮询进程后重试。',
     TELEGRAM_BOT_API_CONFLICT:'Telegram 机器人接口报告会话冲突；检查是否存在另一轮询或 webhook 实例。',
@@ -325,14 +329,21 @@ async function renderSystemStatus() {
     TELEGRAM_NETWORK_UNAVAILABLE:'当前无法连接 Telegram 机器人接口；网页端审核队列仍可使用。',
     TELEGRAM_RESPONSE_INVALID:'Telegram 机器人接口返回了无法采信的响应；机器人动作保持关闭。',
     TELEGRAM_BOT_API_REJECTED:'Telegram 机器人接口拒绝轮询请求；由系统管理员检查机器人运行实例。',
-  })[telegramPolling.last_error_code] || '机器人尚未完成一次成功轮询；网页端审核队列仍是权威入口。';
+  })[telegramHealth.last_error_code] || (telegram.mode === 'DURABLE_NOTIFICATION_ROUTE'
+    ? '通知路由尚未完成一次成功投递；网页端审核队列仍是权威入口。'
+    : '机器人尚未完成一次成功轮询；网页端审核队列仍是权威入口。');
   const telegramStatus = telegramHealthy
     ? '通知可用'
-    : telegramPolling.state === 'DEGRADED'
+    : telegramHealth.state === 'DEGRADED'
       ? '通知受阻'
       : telegram.enabled
-        ? '等待首次轮询'
+        ? telegram.mode === 'DURABLE_NOTIFICATION_ROUTE' ? '等待首次投递' : '等待首次轮询'
         : '尚未启用';
+  const telegramHealthyCopy = telegram.mode === 'DURABLE_NOTIFICATION_ROUTE'
+    ? telegramDelivery.interactive_review_ready
+      ? 'Telegram 私聊通知最近一次投递成功；批准和拒绝仍需二次确认并写入统一审计。'
+      : 'Telegram 通知最近一次投递成功；审核动作仅在绑定审核人身份后提供。'
+    : 'Telegram 私聊机器人最近一次长轮询成功；批准和拒绝仍需二次确认并写入统一审计。';
   const connections = runtime?.data?.connections || {};
   const perptapeAvailable = Boolean(connections.PERPTAPE?.available);
   const notiltConfigured = Boolean(connections.NOTILT?.available);
@@ -427,7 +438,7 @@ async function renderSystemStatus() {
     systemHealthCard({title:'自动执行进程', status:executionWorkerHealthy ? 'Execution Worker 健康' : 'Execution Worker 心跳异常', tone:executionWorkerHealthy ? 'success' : 'danger', copy:executionWorkerHealthy ? `最近心跳覆盖 ${Number(freqtrade?.execution_worker?.healthy_binding_count || 0)} 个精确账户绑定。` : '数据库中没有新鲜的 Execution Worker 账户心跳；不会把 API 进程环境变量当成独立进程状态。', meta:'来源：数据库运行心跳'}),
     systemHealthCard({title:'Freqtrade Worker', status:workersReady ? '精确账户运行条件已验证' : '精确账户运行条件未通过', tone:workersReady ? 'success' : 'danger', copy:executionCopy, meta:'身份、LIVE/TESTNET 模式、白名单、Force Entry、仓位调整和运行指纹逐项核验'}),
     systemHealthCard({title:'生产订单 Gate', status:liveOrderSendEnabled ? 'LIVE_ORDER_SEND 已启用' : `LIVE_ORDER_SEND ${fmtStatus(freqtrade?.live_order_send || 'UNKNOWN')}`, tone:liveOrderSendEnabled ? 'attention' : 'danger', copy:liveOrderSendEnabled ? '数据库 Gate 允许已审核 Intent 进入逐笔执行检查；它不会绕过 RBAC、独立审核、风控、对账、租约或 Worker 探针。' : '数据库 Gate 当前不允许发送生产订单。', meta:`来源：${freqtrade?.gate_source === 'DATABASE' ? '数据库' : '未知'} · 更新 ${fmtDate(freqtrade?.live_order_send_updated_at)}`}),
-    systemHealthCard({title:'Telegram 审核通知', status:telegramStatus, tone:telegramHealthy ? 'success' : 'attention', copy:telegramHealthy ? 'Telegram 私聊机器人最近一次长轮询成功；批准和拒绝仍需二次确认并写入统一审计。' : telegramFailureCopy, meta:telegramHealthy ? `最近成功 ${fmtDate(telegramPolling.last_success_at)}` : '网页端审核队列保持可用；资金、订单、风险开关与权限操作不对 Telegram 机器人开放'}),
+    systemHealthCard({title:'Telegram 审核通知', status:telegramStatus, tone:telegramHealthy ? 'success' : 'attention', copy:telegramHealthy ? telegramHealthyCopy : telegramFailureCopy, meta:telegramHealthy ? `最近成功 ${fmtDate(telegramHealth.last_success_at)}` : '网页端审核队列保持可用；资金、订单、风险开关与权限操作不对 Telegram 机器人开放'}),
     systemHealthCard({title:'Perptape 机会源', status:perptapeStatus, tone:perptapeTone, copy:perptapeCopy, meta:`只读 · 最近数据 ${fmtDate(perptape.last_fetched_at)}${perptapeTransportIssue ? ` · ${perptapeTransportIssue}` : ''}`}),
   ].join('');
   const monitoringIssueCount = protectionIssues.length + exposureIssues.length + reconciliationIssues.length + unknownIntents + dispatchingIntents;

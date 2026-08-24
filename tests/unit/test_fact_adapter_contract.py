@@ -24,7 +24,10 @@ from trading_control_plane.binance_errors import BinanceApiRejected, BinanceRequ
 from trading_control_plane.config import Settings
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.fact_adapter_api import create_fact_adapter_app
-from trading_control_plane.fact_adapter_ingestion import normalize_fact_adapter_snapshot
+from trading_control_plane.fact_adapter_ingestion import (
+    normalize_fact_adapter_catalog,
+    normalize_fact_adapter_snapshot,
+)
 from trading_control_plane.fact_adapter_runtime import (
     FactAdapterRuntime,
     _bootstrap_symbol_provider,
@@ -201,9 +204,7 @@ class FakeCcxtBinanceBannedExchange(FakeCcxtRestOnlyExchange):
 
     def _banned(self) -> None:
         self.private_calls += 1
-        raise DDoSProtection(
-            'binanceusdm 418 {"code":-1003,"msg":"IP banned until 1787104923000"}'
-        )
+        raise DDoSProtection('binanceusdm 418 {"code":-1003,"msg":"IP banned until 1787104923000"}')
 
     async def fetch_balance(self) -> Mapping[str, Any]:
         self._banned()
@@ -364,6 +365,17 @@ class FakeCcxtAccountWideExchange(FakeCcxtProExchange):
             }
             for symbol in symbols
         }
+
+
+class FakeCcxtFullCatalogExchange(FakeCcxtProExchange):
+    async def load_markets(self) -> Mapping[str, Any]:
+        markets = dict(await super().load_markets())
+        markets["ETH/USDT:USDT"] = {
+            **markets["BTC/USDT:USDT"],
+            "id": "ETHUSDT",
+        }
+        self.markets = markets
+        return markets
 
 
 class FakeCcxtBinanceSymbolTradesExchange(FakeCcxtAccountWideExchange):
@@ -625,9 +637,7 @@ def test_binance_418_enters_shared_cooldown_and_suppresses_all_followup_reads() 
         )
         periodic_registry = FactAdapterRegistry()
         await periodic_registry.register(periodic_adapter)
-        await periodic_registry.publish_snapshot(
-            await periodic_adapter.snapshot(reason="INITIAL")
-        )
+        await periodic_registry.publish_snapshot(await periodic_adapter.snapshot(reason="INITIAL"))
         periodic_adapter._binance_request_state = request_state
         periodic_supervisor = FactStreamSupervisor(
             periodic_registry,
@@ -639,9 +649,7 @@ def test_binance_418_enters_shared_cooldown_and_suppresses_all_followup_reads() 
             stale_after=timedelta(days=1),
         )
         assert periodic.data_status == "UNKNOWN"
-        assert periodic.unknown_fields == (
-            "FACT_ADAPTER_BINANCE_RATE_LIMITED_COOLDOWN",
-        )
+        assert periodic.unknown_fields == ("FACT_ADAPTER_BINANCE_RATE_LIMITED_COOLDOWN",)
         assert periodic.metrics.next_retry_at == diagnostic.next_retry_at.isoformat()
         assert periodic_exchange.load_calls == 1
         await periodic_registry.close()
@@ -1057,6 +1065,29 @@ def test_fact_snapshot_drops_delisted_catalog_subscription() -> None:
     assert adapter._tracked_symbols == {"BTC/USDT:USDT"}
 
 
+def test_official_catalog_covers_unsubscribed_active_contracts() -> None:
+    exchange = FakeCcxtFullCatalogExchange()
+    adapter = CcxtProFactAdapter(
+        _scope(),
+        credentials=_credentials("BINANCE"),
+        exchange_factory=lambda *_args: exchange,
+        clock=lambda: _NOW,
+    )
+
+    snapshot = asyncio.run(adapter.snapshot(reason="INITIAL"))
+
+    assert {row["native_symbol"] for row in snapshot.instruments} == {"BTCUSDT"}
+    assert {row["native_symbol"] for row in snapshot.catalog_instruments} == {
+        "BTCUSDT",
+        "ETHUSDT",
+    }
+    assert {item.symbol for item in normalize_fact_adapter_catalog(snapshot)} == {
+        "BTCUSDT",
+        "ETHUSDT",
+    }
+    assert adapter._tracked_symbols == {"BTC/USDT:USDT"}
+
+
 def test_registry_deduplicates_adapter_owned_events() -> None:
     async def scenario() -> None:
         adapter = CcxtProFactAdapter(
@@ -1262,6 +1293,9 @@ def test_periodic_runtime_snapshot_persists_then_computes_scope_reconciliation()
     events: list[tuple[str, object]] = []
 
     class ServiceStub:
+        def synchronize_active_venue_instruments(self, *args: object, **kwargs: object):
+            events.append(("catalog", (args, kwargs)))
+
         def ingest_normalized_read_only_account_snapshot(self, *args: object, **kwargs: object):
             events.append(("ingest", (args, kwargs)))
 
@@ -1278,8 +1312,8 @@ def test_periodic_runtime_snapshot_persists_then_computes_scope_reconciliation()
         replace(initial, reason="PERIODIC_RECONCILIATION"),
         now=_NOW,
     )
-    assert [event[0] for event in events] == ["ingest", "reconcile"]
-    assert events[1][1] == (
+    assert [event[0] for event in events] == ["catalog", "ingest", "reconcile"]
+    assert events[2][1] == (
         "LIVE:account-a:BINANCE",
         binding.service_principal_id,
         _NOW,
@@ -1428,9 +1462,7 @@ def test_failed_periodic_reconciliation_keeps_stream_state_unknown_without_recon
 
         failed = await registry.latest(adapter.scope.key, stale_after=timedelta(days=1))
         assert failed.data_status == "UNKNOWN"
-        assert failed.unknown_fields == (
-            "FACT_ADAPTER_PERIODIC_RECONCILIATION_UNAVAILABLE",
-        )
+        assert failed.unknown_fields == ("FACT_ADAPTER_PERIODIC_RECONCILIATION_UNAVAILABLE",)
         assert failed.metrics.snapshot_failed == 1
         assert failed.metrics.websocket_reconnects == 0
         assert failed.metrics.next_retry_at is not None

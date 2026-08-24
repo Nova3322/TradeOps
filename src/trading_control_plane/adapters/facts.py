@@ -251,6 +251,7 @@ class ExchangeFactSnapshot:
     account_status: JsonObject | None
     unknown_fields: tuple[str, ...]
     metrics: FactAdapterMetrics
+    catalog_instruments: tuple[JsonObject, ...] = ()
 
     def to_dict(self) -> JsonObject:
         return {
@@ -545,9 +546,7 @@ class CcxtProFactAdapter:
         code = _integer_status(payload.get("code"))
         message_value = payload.get("msg")
         message = (
-            str(message_value)[:500]
-            if isinstance(message_value, str) and message_value
-            else None
+            str(message_value)[:500] if isinstance(message_value, str) and message_value else None
         )
         if status not in {418, 429}:
             response_status = re.search(r"(?:^|\s)(418|429)(?=\s|\{)", raw)
@@ -803,6 +802,22 @@ class CcxtProFactAdapter:
                 }
             )
         return tuple(rows)
+
+    def _catalog_instruments(self, markets: Mapping[str, Any]) -> tuple[JsonObject, ...]:
+        """Project the complete official active linear-contract catalog without subscribing."""
+
+        symbols = tuple(
+            sorted(
+                str(symbol)
+                for symbol, market in markets.items()
+                if isinstance(symbol, str)
+                and isinstance(market, Mapping)
+                and market.get("active") is not False
+                and market.get("contract") is True
+                and market.get("linear") is True
+            )
+        )
+        return self._instruments(markets, symbols)
 
     def _positions(
         self,
@@ -1103,13 +1118,9 @@ class CcxtProFactAdapter:
             # brief sync outage cannot leave otherwise valid fills unreconciled.
             history_window = timedelta(days=7)
         since = int((now - history_window).timestamp() * 1_000)
-        preflight_balance = (
-            await self._rest("fetchBalance") if binance_cooldown_probe else None
-        )
+        preflight_balance = await self._rest("fetchBalance") if binance_cooldown_probe else None
         balance_task = (
-            None
-            if binance_cooldown_probe
-            else asyncio.create_task(self._rest("fetchBalance"))
+            None if binance_cooldown_probe else asyncio.create_task(self._rest("fetchBalance"))
         )
         # Account facts deliberately use the account-wide unified calls.  Passing
         # the Freqtrade pair allowlist here would hide manual/non-Freqtrade
@@ -1137,9 +1148,7 @@ class CcxtProFactAdapter:
             optional = {name: await task for name, task in optional_tasks.items()}
         except Exception as exc:
             required_tasks = tuple(
-                task
-                for task in (balance_task, positions_task, orders_task)
-                if task is not None
+                task for task in (balance_task, positions_task, orders_task) if task is not None
             )
             for task in (*required_tasks, *optional_tasks.values()):
                 task.cancel()
@@ -1279,6 +1288,7 @@ class CcxtProFactAdapter:
             account_status=(dict(account_status) if isinstance(account_status, Mapping) else None),
             unknown_fields=tuple(sorted(set(unknown))),
             metrics=self._metrics.freeze(),
+            catalog_instruments=self._catalog_instruments(markets),
         )
 
     async def watch(self, kind: EventKind) -> JsonObject:

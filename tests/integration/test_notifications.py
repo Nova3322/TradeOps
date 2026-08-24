@@ -222,11 +222,14 @@ def test_notification_route_only_queues_and_sends_checked_event_types(
     assert dispatch_report["results"] == {"SENT": 1}
     assert [call[0] for call in sender.calls] == ["TELEGRAM"]
     with database.session_factory() as session:
-        assert session.scalar(
-            select(func.count())
-            .select_from(NotificationDelivery)
-            .where(NotificationDelivery.notification_route_id == route_id)
-        ) == 1
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(NotificationDelivery)
+                .where(NotificationDelivery.notification_route_id == route_id)
+            )
+            == 1
+        )
 
 
 def test_notification_outbox_encrypts_routes_retries_known_failures_and_fences_versions(
@@ -556,6 +559,95 @@ def test_notification_api_masks_configuration_and_test_send_has_no_business_auth
     asyncio.run(scenario())
 
 
+def test_runtime_status_uses_durable_telegram_route_delivery_health(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("notification-runtime-admin", now=now)
+    route_id = configure_telegram_review_route(service, admin, now=now)
+    for name, environment, event_type in (
+        ("Unsubscribed Telegram route", "LIVE", "RISK_DECISION_RECORDED"),
+        ("Wrong environment review route", "TESTNET", "PROPOSAL_REVIEW_REQUIRED"),
+    ):
+        service.configure_notification_route(
+            actor_id=admin,
+            notification_route_id=None,
+            environment=environment,
+            name=name,
+            channel="TELEGRAM",
+            event_types=[event_type],
+            enabled=True,
+            configuration={
+                "bot_token": "1234567890:abcdefghijklmnopqrstuvwxyz",
+                "chat_id": "-100123456789",
+            },
+            expected_version=0,
+            idempotency_key=name.lower().replace(" ", "-"),
+            now=now,
+        )
+    app = create_app(
+        Settings(
+            environment="test",
+            database_url=str(database.engine.url),
+            allow_mock_identity=True,
+            session_signing_secret=secrets.token_urlsafe(32),
+            credential_encryption_key=encryption_key(),
+            public_base_url="http://test",
+            _env_file=None,
+        ),
+        database,
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            login = await client.post(
+                "/api/auth/mock/login",
+                json={"username": "notification-runtime-admin"},
+            )
+            assert login.status_code == 200, login.text
+            waiting = await client.get("/api/runtime/status")
+            assert waiting.status_code == 200, waiting.text
+            telegram = waiting.json()["data"]["external_boundaries"]["telegram"]
+            assert telegram["mode"] == "DURABLE_NOTIFICATION_ROUTE"
+            assert telegram["enabled"] is True
+            assert telegram["network_configured"] is True
+            assert telegram["delivery"] == {
+                "state": "WAITING",
+                "route_count": 1,
+                "last_success_at": None,
+                "last_error_code": None,
+                "latest_delivery_status": None,
+                "interactive_review_ready": False,
+            }
+
+            queued = service.enqueue_test_notification(
+                actor_id=admin,
+                notification_route_id=route_id,
+                idempotency_key="notification-runtime-test",
+                now=now + timedelta(seconds=1),
+            )
+            delivery_id = UUID(queued["notification_delivery_ids"][0])  # type: ignore[index]
+            dispatcher = NotificationDispatcher(
+                database,
+                credential_encryption_key=encryption_key(),
+                sender=RecordingSender(),
+            )
+            assert dispatcher.dispatch_one(delivery_id, now=now + timedelta(seconds=2)) == "SENT"
+
+            healthy = await client.get("/api/runtime/status")
+            delivery = healthy.json()["data"]["external_boundaries"]["telegram"]["delivery"]
+            assert delivery["state"] == "HEALTHY"
+            assert delivery["latest_delivery_status"] == "SENT"
+            assert delivery["last_success_at"] is not None
+            assert delivery["last_error_code"] is None
+
+    asyncio.run(scenario())
+
+
 def test_proposal_review_route_is_authoritative_deduplicated_and_retryable(
     database: Database,
 ) -> None:
@@ -563,9 +655,7 @@ def test_proposal_review_route_is_authoritative_deduplicated_and_retryable(
     service = TradingService(database, credential_encryption_key=encryption_key())
     admin = service.bootstrap_admin("notification-proposal-admin", now=now)
     reviewer = service.create_user("notification-proposal-reviewer", admin, now=now)
-    second_reviewer = service.create_user(
-        "notification-proposal-second-reviewer", admin, now=now
-    )
+    second_reviewer = service.create_user("notification-proposal-second-reviewer", admin, now=now)
     service.assign_role(reviewer, Role.REVIEWER, admin, "acct-1", "BINANCE", now=now)
     service.assign_role(second_reviewer, Role.REVIEWER, admin, "acct-1", "BINANCE", now=now)
     service.bind_telegram_private_chat(

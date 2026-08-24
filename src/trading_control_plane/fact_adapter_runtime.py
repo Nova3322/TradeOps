@@ -26,7 +26,10 @@ from trading_control_plane.config import Settings, get_settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, ExecutionEnvironment
 from trading_control_plane.fact_adapter_api import create_fact_adapter_app
-from trading_control_plane.fact_adapter_ingestion import normalize_fact_adapter_snapshot
+from trading_control_plane.fact_adapter_ingestion import (
+    normalize_fact_adapter_catalog,
+    normalize_fact_adapter_snapshot,
+)
 from trading_control_plane.freqtrade import (
     FreqtradeRpcMessage,
     FreqtradeTrade,
@@ -170,11 +173,7 @@ class FactAdapterRuntime:
         for key in tuple(self._running):
             running = self._running[key]
             current_binding = desired.get(key)
-            version = (
-                None
-                if current_binding is None
-                else self._connection_version(current_binding)
-            )
+            version = None if current_binding is None else self._connection_version(current_binding)
             if version != running.version or running.task.done():
                 running.supervisor.stop()
                 await self.registry.unregister(key)
@@ -432,6 +431,36 @@ def _persist_runtime_snapshot(
     now: datetime,
 ) -> None:
     if snapshot.data_status == "CURRENT":
+        try:
+            catalog = (
+                ()
+                if snapshot.reason == "WEBSOCKET_INCREMENT"
+                else normalize_fact_adapter_catalog(
+                    snapshot,
+                    hip3_dexes=binding.hip3_dexes,
+                )
+            )
+            if catalog:
+                service.synchronize_active_venue_instruments(
+                    actor_id=binding.service_principal_id,
+                    account_id=binding.account_id,
+                    venue=binding.venue,
+                    instruments=catalog,
+                    hip3_dexes=binding.hip3_dexes,
+                    runtime_binding=binding,
+                    now=now,
+                )
+        except DomainRejected as exc:
+            logger.warning(
+                "Official instrument catalog synchronization deferred",
+                extra={
+                    "event": "fact_adapter_catalog_sync_deferred",
+                    "component": "fact-adapter",
+                    "venue": binding.venue,
+                    "account_id": binding.account_id,
+                    "error_code": exc.code,
+                },
+            )
         service.ingest_normalized_read_only_account_snapshot(
             binding.account_id,
             binding.service_principal_id,

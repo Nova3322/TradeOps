@@ -858,9 +858,7 @@ class _ExecutionRoutes:
                 database_binding_counts=database_binding_counts,
                 database_perptape_configured=database_perptape_configured,
                 now=now,
-                fact_stale_after_seconds=(
-                    self.resolved_settings.fact_adapter_stale_after_seconds
-                ),
+                fact_stale_after_seconds=(self.resolved_settings.fact_adapter_stale_after_seconds),
                 perptape_stale_after_seconds=max(
                     self.resolved_settings.runtime_sync_interval_seconds * 2
                     + int(self.resolved_settings.perptape_timeout_seconds),
@@ -893,6 +891,8 @@ class _ExecutionRoutes:
                     "consecutive_failures": 0,
                 }
             )
+            durable_telegram = self.queries().telegram_notification_runtime_status(identity.user_id)
+            durable_telegram_enabled = durable_telegram["route_count"] > 0
             snapshot.update(
                 {
                     "application_version": __version__,
@@ -920,9 +920,7 @@ class _ExecutionRoutes:
                                 for venue in ("BINANCE", "HYPERLIQUID", "OKX", "BYBIT")
                             ),
                             "configured": bool(database_binding_counts),
-                            "process_local_enabled": (
-                                self.resolved_settings.fact_adapter_enabled
-                            ),
+                            "process_local_enabled": (self.resolved_settings.fact_adapter_enabled),
                             "database_binding_counts": database_binding_counts,
                             "reconciliation_seconds": (
                                 self.resolved_settings.fact_adapter_reconciliation_seconds
@@ -969,14 +967,22 @@ class _ExecutionRoutes:
                         },
                         "telegram": {
                             "mode": (
-                                "BOT_API_LONG_POLLING"
+                                "DURABLE_NOTIFICATION_ROUTE"
+                                if durable_telegram_enabled
+                                else "BOT_API_LONG_POLLING"
                                 if isinstance(self.resolved_telegram, TelegramBotGateway)
                                 else "MOCK_ONLY"
                             ),
-                            "enabled": self.resolved_settings.telegram_enabled,
-                            "network_configured": bool(self.resolved_settings.telegram_bot_token),
+                            "enabled": (
+                                durable_telegram_enabled or self.resolved_settings.telegram_enabled
+                            ),
+                            "network_configured": (
+                                durable_telegram_enabled
+                                or bool(self.resolved_settings.telegram_bot_token)
+                            ),
                             "private_chat_only": True,
                             "polling": telegram_polling,
+                            "delivery": durable_telegram,
                         },
                     },
                 }
@@ -1012,9 +1018,7 @@ class _ExecutionRoutes:
                     account_id=item["account_id"],
                     venue=item["venue"],
                 )
-                checked_at = (
-                    None if process_health is None else process_health.get("checked_at")
-                )
+                checked_at = None if process_health is None else process_health.get("checked_at")
                 try:
                     checked = (
                         None
@@ -1052,14 +1056,10 @@ class _ExecutionRoutes:
                                 else "DEGRADED"
                             ),
                             "checked_at": (
-                                None
-                                if worker_health is None
-                                else worker_health.get("checked_at")
+                                None if worker_health is None else worker_health.get("checked_at")
                             ),
                             "error_code": (
-                                None
-                                if worker_health is None
-                                else worker_health.get("error_code")
+                                None if worker_health is None else worker_health.get("error_code")
                             ),
                         },
                         **item["execution_worker"],
