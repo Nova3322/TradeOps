@@ -10,7 +10,10 @@ from pandas import DataFrame
 class ControlPlaneOnlyStrategy(IStrategy):
     """Never creates autonomous signals; approved control-plane intents are the only input."""
 
-    timeframe = "5m"
+    # The control plane is the only signal source.  Hourly candles keep
+    # Freqtrade's lifecycle engine active without polling the complete
+    # executable catalog every five minutes.
+    timeframe = "1h"
     can_short = True
     minimal_roi: ClassVar[dict[str, float]] = {"0": 100.0}
     stoploss = -0.99
