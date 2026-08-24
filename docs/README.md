@@ -61,6 +61,7 @@ product claim.
 ## Reference
 
 - [Local configuration template](../.env.example)
+- [Unified production configuration](PRODUCTION_CONFIGURATION.md)
 - [Publication boundary](PUBLICATION_BOUNDARY.md)
 - [Release process](RELEASING.md)
 - [Competitive positioning](COMPETITIVE_POSITIONING.md)

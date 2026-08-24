@@ -22,6 +22,7 @@ dependencies = [
   "hyperliquid-python-sdk>=0.24,<0.25",
   "prometheus-client>=0.23,<1",
   "psycopg[binary]>=3.2,<4",
+  "pyyaml>=6.0.2,<7",
   "pydantic-settings>=2.12,<3",
   "pyfolio-reloaded==0.9.9",
   "quantstats==0.0.81",
@@ -46,6 +47,7 @@ trading-fact-adapter = "trading_control_plane.fact_adapter_runtime:main"
 trading-execution-worker = "trading_control_plane.execution_runtime:main"
 trading-capital-worker = "trading_control_plane.capital_runtime:main"
 trading-freqtrade-provision = "trading_control_plane.freqtrade_provision:main"
+tradeops-config = "trading_control_plane.production_config:main"
 
 [dependency-groups]
 dev = [
