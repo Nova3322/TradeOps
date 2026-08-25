@@ -584,67 +584,83 @@ class RuntimeSyncWorker:
                 )
             ).quantize(AMOUNT_QUANTUM, rounding=ROUND_DOWN)
             timeframes = [item.timeframe for item in candidates]
-            proposal_id = self.service.create_proposal(
-                actor_id=actor_id,
-                source=ProposalSource.SYSTEM,
-                risk_tier=RiskTier(str(config["risk_tier"])),
-                account_id=account_id,
-                venue=primary.venue,
-                instrument_id=instrument_id,
-                direction=primary.direction,
-                quantity=quantity,
-                max_risk=max_risk,
-                expires_at=now + timedelta(minutes=expires_in_minutes),
-                idempotency_key=f"perptape-resonance:{source_candidate_id}",
-                strategy_id="perptape-resonance",
-                strategy_version=(
-                    f"{feed.contract_version}:policy-v{config['version']}:min-{minimum_timeframes}"
-                ),
-                environment=ExecutionEnvironment.LIVE,
-                source_candidate_id=source_candidate_id,
-                source_link=primary.detail_url,
-                source_observed_at=max(item.observed_at for item in candidates),
-                source_readiness="READY",
-                details={
-                    "candidate": primary.to_dict(),
-                    "resonance_candidates": [item.to_dict() for item in candidates],
-                    "resonance_timeframes": timeframes,
-                    "resonance_threshold": minimum_timeframes,
-                    "default_config_id": config["config_id"],
-                    "default_config_version": config["version"],
-                    "configuration_mode": "AUTO_POLICY",
-                    "signal_source_version": (
-                        None if runtime_binding is None else runtime_binding.source_version
+            try:
+                proposal_id = self.service.create_proposal(
+                    actor_id=actor_id,
+                    source=ProposalSource.SYSTEM,
+                    risk_tier=RiskTier(str(config["risk_tier"])),
+                    account_id=account_id,
+                    venue=primary.venue,
+                    instrument_id=instrument_id,
+                    direction=primary.direction,
+                    quantity=quantity,
+                    max_risk=max_risk,
+                    expires_at=now + timedelta(minutes=expires_in_minutes),
+                    idempotency_key=f"perptape-resonance:{source_candidate_id}",
+                    strategy_id="perptape-resonance",
+                    strategy_version=(
+                        f"{feed.contract_version}:policy-v{config['version']}:"
+                        f"min-{minimum_timeframes}"
                     ),
-                    "trigger_price": str(primary.reference_price),
-                    "invalidation_price": str(invalidation_price),
-                    "initial_quantity": str(quantity),
-                    "allow_auto_add": False,
-                    "requested_adds": 0,
-                    "add_trigger_price": None,
-                    "rationale": (
-                        "创建提案时，Perptape 中同一精确合约、同一方向在 "  # noqa: RUF001
-                        f"{'、'.join(timeframes)} 同时突破。{config['rationale']} "
-                        "来源与参数已冻结，仅创建待审核提案；不会自动授权或下单。"  # noqa: RUF001
-                    ),
-                },
-                idempotency_payload={
-                    "source_candidate_id": source_candidate_id,
-                    "signal_identity": signal_identity,
-                },
-                deduplicate_active_system_scope=True,
-                perptape_runtime_binding=runtime_binding,
-                now=now,
-            )
-            detail = self.queries.proposal_detail(actor_id, proposal_id, now=now)
-            if detail["status"] == ProposalStatus.DRAFT.value:
-                self.service.submit_proposal(
-                    proposal_id,
-                    actor_id,
+                    environment=ExecutionEnvironment.LIVE,
+                    source_candidate_id=source_candidate_id,
+                    source_link=primary.detail_url,
+                    source_observed_at=max(item.observed_at for item in candidates),
+                    source_readiness="READY",
+                    details={
+                        "candidate": primary.to_dict(),
+                        "resonance_candidates": [item.to_dict() for item in candidates],
+                        "resonance_timeframes": timeframes,
+                        "resonance_threshold": minimum_timeframes,
+                        "default_config_id": config["config_id"],
+                        "default_config_version": config["version"],
+                        "configuration_mode": "AUTO_POLICY",
+                        "signal_source_version": (
+                            None
+                            if runtime_binding is None
+                            else runtime_binding.source_version
+                        ),
+                        "trigger_price": str(primary.reference_price),
+                        "invalidation_price": str(invalidation_price),
+                        "initial_quantity": str(quantity),
+                        "allow_auto_add": False,
+                        "requested_adds": 0,
+                        "add_trigger_price": None,
+                        "rationale": (
+                            "创建提案时，Perptape 中同一精确合约、同一方向在 "  # noqa: RUF001
+                            f"{'、'.join(timeframes)} 同时突破。{config['rationale']} "
+                            "来源与参数已冻结，仅创建待审核提案；不会自动授权或下单。"  # noqa: RUF001
+                        ),
+                    },
+                    idempotency_payload={
+                        "source_candidate_id": source_candidate_id,
+                        "signal_identity": signal_identity,
+                    },
+                    deduplicate_active_system_scope=True,
                     perptape_runtime_binding=runtime_binding,
                     now=now,
                 )
-                created += 1
+                detail = self.queries.proposal_detail(actor_id, proposal_id, now=now)
+                if detail["status"] == ProposalStatus.DRAFT.value:
+                    self.service.submit_proposal(
+                        proposal_id,
+                        actor_id,
+                        perptape_runtime_binding=runtime_binding,
+                        now=now,
+                    )
+                    created += 1
+            except DomainRejected as exc:
+                logger.info(
+                    "Perptape resonance proposal skipped by proposal safety checks",
+                    extra={
+                        "event": "perptape_resonance_proposal_skipped",
+                        "component": "perptape",
+                        "venue": primary.venue,
+                        "source_candidate_id": source_candidate_id,
+                        "error_code": exc.code,
+                    },
+                )
+                continue
         return created
 
     def _record_notilt(self, actor_id: UUID, chain_id: int, now: datetime) -> int:
