@@ -206,6 +206,7 @@ def test_compact_density_contract_covers_shell_content_and_mobile() -> None:
         "/assets/styles-components.css?v=31",
         "/assets/styles-api-access.css?v=4",
         "/assets/styles-shell.css?v=15",
+        "/assets/risk.js?v=176",
     ):
         assert href in index
 
