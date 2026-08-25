@@ -100,7 +100,17 @@ class FakeCcxtProExchange:
             }
         ]
 
-    async def fetch_open_orders(self) -> list[Mapping[str, Any]]:
+    async def fetch_open_orders(
+        self,
+        symbol: str | None = None,
+        since: int | None = None,
+        limit: int | None = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> list[Mapping[str, Any]]:
+        assert symbol is None and since is None and limit is None
+        if params == {"trigger": True}:
+            return []
+        assert params is None
         return [
             {
                 "id": "external-order",
@@ -235,7 +245,13 @@ class FakeCcxtBinanceBannedExchange(FakeCcxtRestOnlyExchange):
         self._banned()
         raise AssertionError("unreachable")
 
-    async def fetch_open_orders(self) -> list[Mapping[str, Any]]:
+    async def fetch_open_orders(
+        self,
+        symbol: str | None = None,
+        since: int | None = None,
+        limit: int | None = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> list[Mapping[str, Any]]:
         self._banned()
         raise AssertionError("unreachable")
 
@@ -260,9 +276,15 @@ class FakeCcxtCooldownProbeExchange(FakeCcxtRestOnlyExchange):
         self.position_calls += 1
         return await super().fetch_positions()
 
-    async def fetch_open_orders(self) -> list[Mapping[str, Any]]:
+    async def fetch_open_orders(
+        self,
+        symbol: str | None = None,
+        since: int | None = None,
+        limit: int | None = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> list[Mapping[str, Any]]:
         self.order_calls += 1
-        return await super().fetch_open_orders()
+        return await super().fetch_open_orders(symbol, since, limit, params)
 
 
 class FakeCcxtReconnectingExchange(FakeCcxtRestOnlyExchange):
@@ -540,6 +562,76 @@ def test_ccxt_pro_fact_contract_normalizes_all_supported_venues(venue: str) -> N
     assert incomplete_history[0].history_error_code == "FACT_ADAPTER_HISTORY_INCOMPLETE"
 
 
+def test_binance_snapshot_includes_conditional_algo_protection_orders() -> None:
+    class BinanceConditionalOrderExchange(FakeCcxtProExchange):
+        async def fetch_open_orders(
+            self,
+            symbol: str | None = None,
+            since: int | None = None,
+            limit: int | None = None,
+            params: Mapping[str, Any] | None = None,
+        ) -> list[Mapping[str, Any]]:
+            if params != {"trigger": True}:
+                return await super().fetch_open_orders(symbol, since, limit, params)
+            return [
+                {
+                    "id": "conditional-stop",
+                    "symbol": "BTC/USDT:USDT",
+                    "amount": 2,
+                    "filled": 0,
+                    "side": "buy",
+                    "type": "stop_market",
+                    "status": "open",
+                    "triggerPrice": 62_000,
+                    "reduceOnly": True,
+                    "timestamp": int(_NOW.timestamp() * 1_000),
+                }
+            ]
+
+    adapter = CcxtProFactAdapter(
+        _scope(),
+        credentials=_credentials("BINANCE"),
+        exchange_factory=lambda *_args: BinanceConditionalOrderExchange(),
+        clock=lambda: _NOW,
+    )
+
+    snapshot = asyncio.run(adapter.snapshot(reason="INITIAL"))
+    normalized = normalize_fact_adapter_snapshot(snapshot)[0]
+
+    assert {order.order_id for order in normalized.orders} == {
+        "external-order",
+        "conditional-stop",
+    }
+    assert normalized.protection is not None
+    assert normalized.protection.order_id == "conditional-stop"
+    assert normalized.protection.quantity == Decimal(2)
+    assert normalized.protection.trigger_price == Decimal(62_000)
+
+
+def test_binance_conditional_order_failure_blocks_complete_snapshot() -> None:
+    class BinanceConditionalReadFailureExchange(FakeCcxtProExchange):
+        async def fetch_open_orders(
+            self,
+            symbol: str | None = None,
+            since: int | None = None,
+            limit: int | None = None,
+            params: Mapping[str, Any] | None = None,
+        ) -> list[Mapping[str, Any]]:
+            if params == {"trigger": True}:
+                raise OSError("fixture conditional order read failure")
+            return await super().fetch_open_orders(symbol, since, limit, params)
+
+    adapter = CcxtProFactAdapter(
+        _scope(),
+        credentials=_credentials("BINANCE"),
+        exchange_factory=lambda *_args: BinanceConditionalReadFailureExchange(),
+        clock=lambda: _NOW,
+    )
+
+    with pytest.raises(DomainRejected, match="FACT_ADAPTER_SNAPSHOT_UNAVAILABLE"):
+        asyncio.run(adapter.snapshot(reason="INITIAL"))
+
+
 def test_binance_snapshot_combines_spot_equity_without_inflating_futures_availability() -> None:
     class BinanceFuturesExchange(FakeCcxtProExchange):
         async def fetch_balance(self) -> Mapping[str, Any]:
@@ -770,7 +862,7 @@ def test_binance_418_enters_shared_cooldown_and_suppresses_all_followup_reads() 
         assert recovery_exchange.load_calls == 1
         assert recovery_exchange.balance_calls == 1
         assert recovery_exchange.position_calls == 1
-        assert recovery_exchange.order_calls == 1
+        assert recovery_exchange.order_calls == 2
         assert request_state.current_diagnostic() is None
         await recovery_adapter.close()
 
