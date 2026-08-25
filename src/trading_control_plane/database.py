@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-REQUIRED_SCHEMA_REVISION = "20260822_0050"
+REQUIRED_SCHEMA_REVISION = "20260825_0051"
 
 
 class Base(DeclarativeBase):

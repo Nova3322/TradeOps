@@ -55,6 +55,7 @@ def register_risk_routes(context: ApiRouteContext) -> None:
             max_consecutive_losses=payload.max_consecutive_losses,
             loss_cooldown=timedelta(seconds=payload.loss_cooldown_seconds),
             max_fact_age=timedelta(seconds=payload.max_fact_age_seconds),
+            position_policy=payload.position_policy_mapping(),
             expected_revision=payload.expected_revision,
             reason=payload.reason,
             idempotency_key=payload.idempotency_key,

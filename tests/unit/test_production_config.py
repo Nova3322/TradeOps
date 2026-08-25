@@ -9,6 +9,7 @@ from trading_control_plane.production_config import (
     ConfigurationCheck,
     ProductionConfiguration,
     ProductionConfigurator,
+    _position_policy_matches,
     _reject_secret_keys,
     _report,
 )
@@ -151,6 +152,46 @@ def test_production_configuration_requires_exact_complete_fail_closed_scope() ->
     ]
     with pytest.raises(ValueError, match="LIVE capital automation policies"):
         ProductionConfiguration.model_validate(invalid)
+
+
+def test_production_configuration_accepts_complete_position_policy_only() -> None:
+    configured = deepcopy(configuration_payload())
+    configured["risk"].update(  # type: ignore[union-attr]
+        {
+            "maximum_position_notional": "2500",
+            "auto_add_spacing_bps": 250,
+            "auto_add_bollinger_midline_periods": 20,
+            "low_maximum_adds": 1,
+            "medium_maximum_adds": 2,
+            "high_maximum_adds": 3,
+            "low_maximum_loss_fraction": "0.005",
+            "medium_maximum_loss_fraction": "0.010",
+            "high_maximum_loss_fraction": "0.015",
+        }
+    )
+    parsed = ProductionConfiguration.model_validate(configured)
+    assert parsed.risk.position_policy_mapping() == {
+        "maximum_position_notional": "2500",
+        "add_spacing_bps": 250,
+        "bollinger_midline_periods": 20,
+        "low_maximum_adds": 1,
+        "medium_maximum_adds": 2,
+        "high_maximum_adds": 3,
+        "low_maximum_loss_fraction": "0.005",
+        "medium_maximum_loss_fraction": "0.010",
+        "high_maximum_loss_fraction": "0.015",
+    }
+
+    incomplete = deepcopy(configured)
+    del incomplete["risk"]["auto_add_spacing_bps"]  # type: ignore[index]
+    with pytest.raises(ValueError, match="configured together"):
+        ProductionConfiguration.model_validate(incomplete)
+
+    assert _position_policy_matches(parsed.risk.position_policy_mapping(), None)
+    assert _position_policy_matches(
+        parsed.risk.position_policy_mapping(),
+        parsed.risk.position_policy_mapping(),
+    )
 
 
 def test_production_configuration_rejects_secret_fields_and_unbound_review_routes() -> None:

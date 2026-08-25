@@ -19,6 +19,10 @@ from trading_control_plane import domain, models
 from trading_control_plane.config import Settings, get_settings
 from trading_control_plane.credentials import CredentialCipher
 from trading_control_plane.database import Database
+from trading_control_plane.position_policy import (
+    PositionPolicySettings,
+    position_policy_is_complete,
+)
 from trading_control_plane.safe_spending import SafeSpendingGateway
 from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import TelegramBotClient
@@ -84,6 +88,17 @@ class RiskConfiguration(_StrictModel):
     max_consecutive_losses: int = Field(gt=0)
     loss_cooldown_seconds: int = Field(gt=0)
     max_fact_age_seconds: int = Field(gt=0)
+    maximum_position_notional: Decimal | None = Field(default=None, gt=0)
+    auto_add_spacing_bps: int | None = Field(default=None, ge=1, le=10_000)
+    auto_add_bollinger_midline_periods: int | None = Field(default=None, ge=2, le=1_000)
+    low_maximum_adds: int = Field(default=1, ge=0, le=1)
+    medium_maximum_adds: int = Field(default=2, ge=0, le=2)
+    high_maximum_adds: int = Field(default=3, ge=0, le=3)
+    low_maximum_loss_fraction: Decimal = Field(default=Decimal("0.005"), gt=0, le=0.005)
+    medium_maximum_loss_fraction: Decimal = Field(
+        default=Decimal("0.010"), gt=0, le=0.010
+    )
+    high_maximum_loss_fraction: Decimal = Field(default=Decimal("0.015"), gt=0, le=0.015)
 
     @model_validator(mode="after")
     def validate_limits(self) -> RiskConfiguration:
@@ -91,7 +106,35 @@ class RiskConfiguration(_StrictModel):
             raise ValueError("max_account_risk cannot exceed max_total_risk")
         if self.max_single_loss > self.max_account_risk:
             raise ValueError("max_single_loss cannot exceed max_account_risk")
+        position_values = (
+            self.maximum_position_notional,
+            self.auto_add_spacing_bps,
+            self.auto_add_bollinger_midline_periods,
+        )
+        if any(item is not None for item in position_values) and any(
+            item is None for item in position_values
+        ):
+            raise ValueError("position policy fields must be configured together")
+        if self.maximum_position_notional is not None:
+            PositionPolicySettings.from_mapping(self.position_policy_mapping() or {})
         return self
+
+    def position_policy_mapping(self) -> dict[str, str | int] | None:
+        if self.maximum_position_notional is None:
+            return None
+        assert self.auto_add_spacing_bps is not None
+        assert self.auto_add_bollinger_midline_periods is not None
+        return {
+            "maximum_position_notional": str(self.maximum_position_notional),
+            "add_spacing_bps": self.auto_add_spacing_bps,
+            "bollinger_midline_periods": self.auto_add_bollinger_midline_periods,
+            "low_maximum_adds": self.low_maximum_adds,
+            "medium_maximum_adds": self.medium_maximum_adds,
+            "high_maximum_adds": self.high_maximum_adds,
+            "low_maximum_loss_fraction": str(self.low_maximum_loss_fraction),
+            "medium_maximum_loss_fraction": str(self.medium_maximum_loss_fraction),
+            "high_maximum_loss_fraction": str(self.high_maximum_loss_fraction),
+        }
 
 
 class ProposalConfiguration(_StrictModel):
@@ -328,6 +371,18 @@ def load_production_configuration(path: str | Path) -> ProductionConfiguration:
 
 def _same_decimal(left: Decimal | None, right: Decimal) -> bool:
     return left is not None and left == right
+
+
+def _position_policy_matches(
+    current: dict[str, Any] | None,
+    expected: dict[str, str | int] | None,
+) -> bool:
+    if expected is None:
+        return True
+    if not position_policy_is_complete(current):
+        return False
+    assert current is not None
+    return PositionPolicySettings.from_mapping(current).to_mapping() == expected
 
 
 def _scope_key(environment: str, account_id: str, venue: str) -> str:
@@ -616,6 +671,7 @@ class ProductionConfigurator:
                 )
             )
             expected_risk = config.risk
+            expected_position_policy = expected_risk.position_policy_mapping()
             risk_matches = (
                 policy is not None
                 and policy.version == expected_risk.version
@@ -626,6 +682,9 @@ class ProductionConfigurator:
                 and policy.max_consecutive_losses == expected_risk.max_consecutive_losses
                 and policy.loss_cooldown_seconds == expected_risk.loss_cooldown_seconds
                 and policy.max_fact_age_seconds == expected_risk.max_fact_age_seconds
+                and _position_policy_matches(
+                    policy.position_policy, expected_position_policy
+                )
             )
             self._check(
                 checks,
@@ -1022,6 +1081,7 @@ class ProductionConfigurator:
                 )
             )
         expected_risk = config.risk
+        expected_position_policy = expected_risk.position_policy_mapping()
         risk_matches = (
             policy is not None
             and policy.version == expected_risk.version
@@ -1032,6 +1092,7 @@ class ProductionConfigurator:
             and policy.max_consecutive_losses == expected_risk.max_consecutive_losses
             and policy.loss_cooldown_seconds == expected_risk.loss_cooldown_seconds
             and policy.max_fact_age_seconds == expected_risk.max_fact_age_seconds
+            and _position_policy_matches(policy.position_policy, expected_position_policy)
         )
         if not risk_matches:
             if policy is not None and policy.version == expected_risk.version:
@@ -1048,6 +1109,7 @@ class ProductionConfigurator:
                 max_consecutive_losses=expected_risk.max_consecutive_losses,
                 loss_cooldown=timedelta(seconds=expected_risk.loss_cooldown_seconds),
                 max_fact_age=timedelta(seconds=expected_risk.max_fact_age_seconds),
+                position_policy=expected_position_policy,
                 expected_revision=0 if policy is None else policy.revision,
                 reason="production.yaml",
                 idempotency_key=self._key("risk", 0 if policy is None else policy.revision),

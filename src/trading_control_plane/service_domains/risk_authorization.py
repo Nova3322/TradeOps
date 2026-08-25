@@ -9,6 +9,10 @@ from sqlalchemy import select
 
 from trading_control_plane import domain, models, rejections
 from trading_control_plane import execution_scope as scope_rules
+from trading_control_plane.position_policy import (
+    PositionPolicySettings,
+    position_policy_is_complete,
+)
 from trading_control_plane.service_component import ServiceComponent
 from trading_control_plane.service_domains.risk_policy import active_risk_policy
 
@@ -203,7 +207,15 @@ class AuthorizationRiskService(ServiceComponent):
                     "PROPOSAL_ADD_CONTRACT_INVALID",
                     "frozen proposal AddUnit request is invalid",
                 )
-            tier_limit = MAX_ADD_UNITS[domain.RiskTier(proposal.risk_tier)]
+            tier = domain.RiskTier(proposal.risk_tier)
+            tier_limit = MAX_ADD_UNITS[tier]
+            if position_policy_is_complete(policy.position_policy):
+                configured = PositionPolicySettings.from_mapping(policy.position_policy)
+                tier_limit = {
+                    domain.RiskTier.LOW: configured.low_maximum_adds,
+                    domain.RiskTier.MEDIUM: configured.medium_maximum_adds,
+                    domain.RiskTier.HIGH: configured.high_maximum_adds,
+                }[tier]
             proposal_limit = min(requested_adds, tier_limit)
             if (
                 allowed_adds < 0
@@ -542,6 +554,11 @@ class AuthorizationRiskService(ServiceComponent):
             policy = active_risk_policy(session, team.team_id)
             if policy.system_state != domain.SystemRiskState.NORMAL.value:
                 rejections.reject("RISK_RESTORE_BLOCKED", "risk policy must be NORMAL")
+            if not position_policy_is_complete(policy.position_policy):
+                rejections.reject(
+                    "AUTO_ADD_POLICY_UNCONFIGURED",
+                    "position and profitable-pyramid limits must be configured first",
+                )
             gate = session.get(models.CapabilityGate, "AUTO_ADD", with_for_update=True)
             if gate is None:
                 rejections.reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")

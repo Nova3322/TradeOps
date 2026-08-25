@@ -15,10 +15,54 @@ from trading_control_plane.api_schemas import (
     ManualProposalRequest,
     NotificationRouteWriteRequest,
     ProposalDefaultConfigRequest,
+    RiskPolicyConfigureRequest,
     SystemProposalRequest,
     TeamMemberInviteRequest,
     TransferProposalRequest,
 )
+
+
+def test_risk_policy_configuration_freezes_position_and_auto_add_limits() -> None:
+    request = RiskPolicyConfigureRequest.model_validate(
+        {
+            "version": "risk-v2",
+            "max_total_risk": "100",
+            "max_account_risk": "50",
+            "max_single_loss": "10",
+            "max_consecutive_losses": 3,
+            "loss_cooldown_seconds": 3600,
+            "max_fact_age_seconds": 300,
+            "maximum_position_notional": "2500",
+            "auto_add_spacing_bps": 250,
+            "auto_add_bollinger_midline_periods": 20,
+            "low_maximum_adds": 1,
+            "medium_maximum_adds": 2,
+            "high_maximum_adds": 3,
+            "low_maximum_loss_fraction": "0.005",
+            "medium_maximum_loss_fraction": "0.010",
+            "high_maximum_loss_fraction": "0.015",
+            "expected_revision": 1,
+            "reason": "reviewed position policy",
+            "idempotency_key": "risk-v2",
+        }
+    )
+
+    assert request.position_policy_mapping() == {
+        "maximum_position_notional": "2500",
+        "add_spacing_bps": 250,
+        "bollinger_midline_periods": 20,
+        "low_maximum_adds": 1,
+        "medium_maximum_adds": 2,
+        "high_maximum_adds": 3,
+        "low_maximum_loss_fraction": "0.005",
+        "medium_maximum_loss_fraction": "0.010",
+        "high_maximum_loss_fraction": "0.015",
+    }
+
+    invalid = request.model_dump(mode="json")
+    invalid["medium_maximum_adds"] = 3
+    with pytest.raises(ValidationError):
+        RiskPolicyConfigureRequest.model_validate(invalid)
 
 
 def test_direct_wallet_submission_accepts_automatic_public_evidence() -> None:
