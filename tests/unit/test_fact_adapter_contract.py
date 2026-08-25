@@ -1422,6 +1422,68 @@ def test_runtime_reuses_one_connection_and_rotates_on_credential_version() -> No
     asyncio.run(scenario())
 
 
+def test_runtime_rotates_when_an_active_proposal_requires_an_exact_symbol() -> None:
+    async def scenario() -> None:
+        binding = PreparedRuntimeAccountBinding(
+            exchange_account_id=UUID("00000000-0000-0000-0000-000000000001"),
+            workspace_id=UUID("00000000-0000-0000-0000-000000000002"),
+            team_id=UUID("00000000-0000-0000-0000-000000000003"),
+            service_principal_id=UUID("00000000-0000-0000-0000-000000000004"),
+            service_principal_username="runtime-sync",
+            account_id="account-a",
+            venue="BINANCE",
+            environment="LIVE",
+            account_version=1,
+            credential_version=1,
+            credentials={"api_key": "key-a", "api_secret": "secret-a"},
+        )
+        required_symbols = ["RAYSOLUSDT"]
+        scopes: list[FactAdapterScope] = []
+        exchanges: list[FakeCcxtRestOnlyExchange] = []
+
+        def factory(
+            scope: FactAdapterScope,
+            _credentials: Mapping[str, str],
+            _options: Mapping[str, Any],
+        ) -> FakeCcxtRestOnlyExchange:
+            scopes.append(scope)
+            exchange = FakeCcxtRestOnlyExchange()
+            exchanges.append(exchange)
+            return exchange
+
+        settings = Settings(
+            environment="test",
+            database_url="postgresql+psycopg://user:pass@localhost/trading",
+            runtime_sync_enabled=True,
+            credential_encryption_key=base64.urlsafe_b64encode(b"a" * 32).decode(),
+            fact_adapter_enabled=True,
+            fact_adapter_bearer_token=_TOKEN,
+            _env_file=None,  # type: ignore[call-arg]
+        )
+        runtime = FactAdapterRuntime(
+            settings=settings,
+            registry=FactAdapterRegistry(),
+            binding_provider=lambda: (binding,),
+            symbol_provider=lambda _venue: ("BTCUSDT",),
+            required_symbol_provider=lambda _binding: tuple(required_symbols),
+            exchange_factory=factory,
+        )
+        await runtime.reconcile_once()
+        assert scopes[0].symbols == ("BTC/USDT:USDT", "RAYSOL/USDT:USDT")
+
+        await runtime.reconcile_once()
+        assert len(exchanges) == 1
+
+        required_symbols[:] = ["ETHUSDT"]
+        await runtime.reconcile_once()
+        assert exchanges[0].closed is True
+        assert len(exchanges) == 2
+        assert scopes[1].symbols == ("BTC/USDT:USDT", "ETH/USDT:USDT")
+        await runtime.close()
+
+    asyncio.run(scenario())
+
+
 def test_periodic_runtime_snapshot_persists_then_computes_scope_reconciliation() -> None:
     binding = PreparedRuntimeAccountBinding(
         exchange_account_id=UUID("00000000-0000-0000-0000-000000000001"),

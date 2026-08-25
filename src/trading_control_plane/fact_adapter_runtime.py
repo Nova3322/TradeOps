@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 BindingProvider = Callable[[], Sequence[PreparedRuntimeAccountBinding]]
 SymbolProvider = Callable[[str], Sequence[str]]
+RequiredSymbolProvider = Callable[[PreparedRuntimeAccountBinding], Sequence[str]]
 ExchangeFactory = Callable[[FactAdapterScope, Mapping[str, str], Mapping[str, Any]], Any]
 SnapshotConsumer = Callable[[PreparedRuntimeAccountBinding, ExchangeFactSnapshot], None]
 FreqtradeBindingProvider = Callable[[], Sequence[PreparedFreqtradeWorkerBinding]]
@@ -61,7 +62,7 @@ FreqtradeClientFactory = Callable[[PreparedFreqtradeWorkerBinding], FreqtradeWor
 
 @dataclass(slots=True)
 class _RunningAdapter:
-    version: tuple[int, str, tuple[str, ...]]
+    version: tuple[int, str, tuple[str, ...], tuple[str, ...]]
     supervisor: FactStreamSupervisor
     task: asyncio.Task[None]
 
@@ -76,6 +77,7 @@ class FactAdapterRuntime:
         registry: FactAdapterRegistry,
         binding_provider: BindingProvider,
         symbol_provider: SymbolProvider,
+        required_symbol_provider: RequiredSymbolProvider | None = None,
         exchange_factory: ExchangeFactory | None = None,
         snapshot_consumer: SnapshotConsumer | None = None,
         binance_request_state: BinanceRequestState | None = None,
@@ -84,6 +86,7 @@ class FactAdapterRuntime:
         self.registry = registry
         self.binding_provider = binding_provider
         self.symbol_provider = symbol_provider
+        self.required_symbol_provider = required_symbol_provider
         self.exchange_factory = exchange_factory
         self.snapshot_consumer = snapshot_consumer
         self.binance_request_state = binance_request_state
@@ -93,7 +96,10 @@ class FactAdapterRuntime:
 
     def _scope(self, binding: PreparedRuntimeAccountBinding) -> FactAdapterScope:
         pairs: list[str] = []
-        for symbol in self.symbol_provider(binding.venue):
+        symbols = list(self.symbol_provider(binding.venue))
+        if self.required_symbol_provider is not None:
+            symbols.extend(self.required_symbol_provider(binding))
+        for symbol in symbols:
             try:
                 pair = freqtrade_pair(
                     binding.venue,
@@ -123,15 +129,20 @@ class FactAdapterRuntime:
     @staticmethod
     def _connection_version(
         binding: PreparedRuntimeAccountBinding,
-    ) -> tuple[int, str, tuple[str, ...]]:
+        scope: FactAdapterScope,
+    ) -> tuple[int, str, tuple[str, ...], tuple[str, ...]]:
         return (
             binding.credential_version,
             str(binding.service_principal_id),
             binding.hip3_dexes,
+            scope.symbols,
         )
 
-    async def _start_binding(self, binding: PreparedRuntimeAccountBinding) -> str:
-        scope = self._scope(binding)
+    async def _start_binding(
+        self,
+        binding: PreparedRuntimeAccountBinding,
+        scope: FactAdapterScope,
+    ) -> str:
         kwargs: dict[str, Any] = {
             "credentials": binding.credentials,
             "binance_request_state": self.binance_request_state,
@@ -161,7 +172,7 @@ class FactAdapterRuntime:
         )
         await self.registry.attach_task(scope.key, task)
         self._running[scope.key] = _RunningAdapter(
-            version=self._connection_version(binding),
+            version=self._connection_version(binding, scope),
             supervisor=supervisor,
             task=task,
         )
@@ -169,26 +180,30 @@ class FactAdapterRuntime:
 
     async def reconcile_once(self) -> None:
         bindings = tuple(await asyncio.to_thread(self.binding_provider))
-        desired: dict[str, PreparedRuntimeAccountBinding] = {}
+        desired: dict[str, tuple[PreparedRuntimeAccountBinding, FactAdapterScope]] = {}
         for binding in bindings:
-            scope = self._scope(binding)
+            scope = await asyncio.to_thread(self._scope, binding)
             if scope.key in desired:
                 raise DomainRejected(
                     "FACT_ADAPTER_SCOPE_CONFLICT",
                     "database bindings contain a duplicate exact account scope",
                 )
-            desired[scope.key] = binding
+            desired[scope.key] = (binding, scope)
         for key in tuple(self._running):
             running = self._running[key]
-            current_binding = desired.get(key)
-            version = None if current_binding is None else self._connection_version(current_binding)
+            current = desired.get(key)
+            version = (
+                None
+                if current is None
+                else self._connection_version(current[0], current[1])
+            )
             if version != running.version or running.task.done():
                 running.supervisor.stop()
                 await self.registry.unregister(key)
                 self._running.pop(key, None)
-        for key, binding in desired.items():
+        for key, (binding, scope) in desired.items():
             if key not in self._running:
-                await self._start_binding(binding)
+                await self._start_binding(binding, scope)
 
     async def _reconcile_forever(self) -> None:
         while not self._stop.is_set():
@@ -555,6 +570,7 @@ def create_runtime_app(
         registry=registry,
         binding_provider=service.runtime_account_bindings,
         symbol_provider=_bootstrap_symbol_provider(resolved_settings),
+        required_symbol_provider=service.runtime_required_fact_symbols,
         exchange_factory=exchange_factory,
         snapshot_consumer=persist_snapshot,
         binance_request_state=DatabaseBinanceRequestState(resolved_database),

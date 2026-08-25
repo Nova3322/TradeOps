@@ -496,6 +496,8 @@ async function walletProvider(expectedAddress) {
     }
   }
   if (candidates.length > 1) {
+    const activeProvider = candidates.find(candidate => candidate.provider === window.ethereum);
+    if (activeProvider) return activeProvider.provider;
     throw capitalWalletError(
       'WALLET_PROVIDER_SELECTION_REQUIRED',
       '检测到多个钱包，但没有钱包连接到本次要求的账户。请在目标钱包中连接当前站点后重试。',
