@@ -33,7 +33,10 @@ The root schema version is `1`. The file contains:
 - `accounts`: exact Binance/Hyperliquid account IDs, environment, eligibility,
   fact/reconciliation freshness and required Freqtrade mode/fingerprint; the
   Hyperliquid entry also fixes the account HIP-3 DEX scope;
-- `risk`: the versioned risk-policy identity and numeric limits;
+- `risk`: the versioned risk-policy identity, single/account/portfolio loss
+  limits, consecutive-loss cooldown, maximum position notional, profitable-add
+  spacing, Bollinger midline reference periods, per-tier add counts, and
+  per-tier total campaign-loss limits;
 - `proposals`: exact default account ID, notional, maximum risk, risk tier,
   invalidation, expiry and automatic-proposal settings;
 - `perptape`: exact signal-source ID, enabled state and feed freshness;
@@ -50,6 +53,13 @@ The current service rejects LIVE capital automation policies. Use an explicit
 empty list and keep `AUTO_OPERATING_REFILL` and `AUTO_PROFIT_SWEEP` disabled.
 This preserves the existing fail-closed semantics instead of claiming that an
 unsupported automatic transfer policy is ready.
+
+The position/add fields in `risk` are optional as a group for an existing
+deployment whose `AUTO_ADD` Gate remains disabled. If any one is supplied, the
+complete group is required. The service accepts only limits at or below the
+supported LOW/MEDIUM/HIGH safety ceilings (1/2/3 adds and 0.5%/1.0%/1.5% total
+campaign loss). Enabling `AUTO_ADD` remains a separate reviewed action and is
+blocked until this versioned position policy is complete.
 
 ## Secret boundary
 

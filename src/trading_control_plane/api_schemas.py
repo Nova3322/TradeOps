@@ -1135,9 +1135,56 @@ class RiskPolicyConfigureRequest(BaseModel):
     max_consecutive_losses: int = Field(gt=0)
     loss_cooldown_seconds: int = Field(gt=0)
     max_fact_age_seconds: int = Field(gt=0)
+    maximum_position_notional: Decimal | None = Field(default=None, gt=0)
+    auto_add_spacing_bps: int | None = Field(default=None, ge=1, le=10_000)
+    auto_add_bollinger_midline_periods: int | None = Field(default=None, ge=2, le=1_000)
+    low_maximum_adds: int = Field(default=1, ge=0, le=1)
+    medium_maximum_adds: int = Field(default=2, ge=0, le=2)
+    high_maximum_adds: int = Field(default=3, ge=0, le=3)
+    low_maximum_loss_fraction: Decimal = Field(default=Decimal("0.005"), gt=0, le=0.005)
+    medium_maximum_loss_fraction: Decimal = Field(
+        default=Decimal("0.010"), gt=0, le=0.010
+    )
+    high_maximum_loss_fraction: Decimal = Field(default=Decimal("0.015"), gt=0, le=0.015)
     expected_revision: int = Field(ge=0)
     reason: str = Field(min_length=10, max_length=2_000)
     idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_position_policy(self) -> RiskPolicyConfigureRequest:
+        configured = (
+            self.maximum_position_notional,
+            self.auto_add_spacing_bps,
+            self.auto_add_bollinger_midline_periods,
+        )
+        if any(item is not None for item in configured) and any(
+            item is None for item in configured
+        ):
+            raise ValueError("position policy fields must be configured together")
+        if not (
+            self.low_maximum_loss_fraction
+            <= self.medium_maximum_loss_fraction
+            <= self.high_maximum_loss_fraction
+        ):
+            raise ValueError("risk-tier maximum loss fractions must be ordered")
+        return self
+
+    def position_policy_mapping(self) -> dict[str, str | int] | None:
+        if self.maximum_position_notional is None:
+            return None
+        assert self.auto_add_spacing_bps is not None
+        assert self.auto_add_bollinger_midline_periods is not None
+        return {
+            "maximum_position_notional": str(self.maximum_position_notional),
+            "add_spacing_bps": self.auto_add_spacing_bps,
+            "bollinger_midline_periods": self.auto_add_bollinger_midline_periods,
+            "low_maximum_adds": self.low_maximum_adds,
+            "medium_maximum_adds": self.medium_maximum_adds,
+            "high_maximum_adds": self.high_maximum_adds,
+            "low_maximum_loss_fraction": str(self.low_maximum_loss_fraction),
+            "medium_maximum_loss_fraction": str(self.medium_maximum_loss_fraction),
+            "high_maximum_loss_fraction": str(self.high_maximum_loss_fraction),
+        }
 
 
 class RiskControlChangeCreateRequest(BaseModel):

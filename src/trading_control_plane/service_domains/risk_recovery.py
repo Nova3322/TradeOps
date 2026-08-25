@@ -10,6 +10,10 @@ from sqlalchemy.orm import Session
 
 from trading_control_plane import authorization_policy, domain, models, rejections
 from trading_control_plane import execution_scope as scope_rules
+from trading_control_plane.position_policy import (
+    PositionPolicySettings,
+    position_policy_is_complete,
+)
 from trading_control_plane.service_component import ServiceComponent
 from trading_control_plane.service_domains.risk_policy import active_risk_policy
 
@@ -688,6 +692,10 @@ class RecoveryRiskService(ServiceComponent):
                     ),
                     "max_consecutive_losses": policy.max_consecutive_losses,
                     "loss_cooldown_seconds": policy.loss_cooldown_seconds,
+                    "position_policy": policy.position_policy,
+                    "position_policy_configured": position_policy_is_complete(
+                        policy.position_policy
+                    ),
                     "limits_configured": all(
                         value is not None
                         for value in (
@@ -941,6 +949,15 @@ class RecoveryRiskService(ServiceComponent):
                     "max_consecutive_losses",
                     "loss_cooldown_seconds",
                     "max_fact_age_seconds",
+                    "maximum_position_notional",
+                    "auto_add_spacing_bps",
+                    "auto_add_bollinger_midline_periods",
+                    "low_maximum_adds",
+                    "medium_maximum_adds",
+                    "high_maximum_adds",
+                    "low_maximum_loss_fraction",
+                    "medium_maximum_loss_fraction",
+                    "high_maximum_loss_fraction",
                 }
                 if set(requested_policy) != required_policy_fields:
                     rejections.reject(
@@ -1313,6 +1330,7 @@ class RecoveryRiskService(ServiceComponent):
                     max_consecutive_losses=policy.max_consecutive_losses,
                     loss_cooldown_seconds=policy.loss_cooldown_seconds,
                     max_fact_age_seconds=policy.max_fact_age_seconds,
+                    position_policy=policy.position_policy,
                     reason=request.reason,
                     active=True,
                     updated_by=str(actor_id),
@@ -1332,6 +1350,35 @@ class RecoveryRiskService(ServiceComponent):
                 cooldown = int(requested.get("loss_cooldown_seconds", 0))
                 max_age = int(requested.get("max_fact_age_seconds", 0))
                 version = str(requested.get("version", ""))
+                requested_position_policy = {
+                    "maximum_position_notional": str(
+                        requested.get("maximum_position_notional", "")
+                    ),
+                    "add_spacing_bps": requested.get("auto_add_spacing_bps", 0),
+                    "bollinger_midline_periods": requested.get(
+                        "auto_add_bollinger_midline_periods", 0
+                    ),
+                    "low_maximum_adds": requested.get("low_maximum_adds", 0),
+                    "medium_maximum_adds": requested.get("medium_maximum_adds", 0),
+                    "high_maximum_adds": requested.get("high_maximum_adds", 0),
+                    "low_maximum_loss_fraction": str(
+                        requested.get("low_maximum_loss_fraction", "")
+                    ),
+                    "medium_maximum_loss_fraction": str(
+                        requested.get("medium_maximum_loss_fraction", "")
+                    ),
+                    "high_maximum_loss_fraction": str(
+                        requested.get("high_maximum_loss_fraction", "")
+                    ),
+                }
+                try:
+                    requested_position_policy = PositionPolicySettings.from_mapping(
+                        requested_position_policy
+                    ).to_mapping()
+                except ValueError:
+                    rejections.reject(
+                        "RISK_POLICY_INVALID", "reviewed position policy is invalid"
+                    )
                 if (
                     not version
                     or len(version) > 120
@@ -1364,6 +1411,7 @@ class RecoveryRiskService(ServiceComponent):
                     max_consecutive_losses=consecutive,
                     loss_cooldown_seconds=cooldown,
                     max_fact_age_seconds=max_age,
+                    position_policy=requested_position_policy,
                     reason=request.reason,
                     active=True,
                     updated_by=str(actor_id),
@@ -1384,6 +1432,11 @@ class RecoveryRiskService(ServiceComponent):
             elif request.change_type == "ENABLE_AUTO_ADD":
                 if policy.system_state != domain.SystemRiskState.NORMAL.value:
                     rejections.reject("RISK_RESTORE_BLOCKED", "risk policy must be NORMAL")
+                if not position_policy_is_complete(policy.position_policy):
+                    rejections.reject(
+                        "AUTO_ADD_POLICY_UNCONFIGURED",
+                        "position and profitable-pyramid limits must be configured first",
+                    )
                 gate.status = domain.CapabilityStatus.ENABLED.value
                 gate.reason = request.reason
                 gate.operator_id = str(actor_id)
@@ -1521,6 +1574,7 @@ class RecoveryRiskService(ServiceComponent):
                 max_consecutive_losses=policy.max_consecutive_losses,
                 loss_cooldown_seconds=policy.loss_cooldown_seconds,
                 max_fact_age_seconds=policy.max_fact_age_seconds,
+                position_policy=policy.position_policy,
                 reason=reason,
                 active=True,
                 updated_by=str(actor_id),

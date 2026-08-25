@@ -10,6 +10,11 @@ from sqlalchemy.orm import Session
 
 from trading_control_plane import domain, metrics, models, notilt, rejections
 from trading_control_plane import execution_scope as scope_rules
+from trading_control_plane.position_policy import (
+    PositionPolicySettings,
+    ProfitPyramidPolicy,
+    position_policy_is_complete,
+)
 from trading_control_plane.service_component import ServiceComponent
 from trading_control_plane.service_domains.notifications import enqueue_notification_event
 from trading_control_plane.service_transactions import TransactionService
@@ -347,6 +352,7 @@ def server_risk_context(
             "max_consecutive_losses": policy.max_consecutive_losses,
             "loss_cooldown_seconds": policy.loss_cooldown_seconds,
             "max_fact_age_seconds": policy.max_fact_age_seconds,
+            "position_policy": policy.position_policy,
         },
         "position": None
         if position is None
@@ -492,6 +498,34 @@ def decide_risk_in_session(
         current_risk=current_risk,
         now=now,
     )
+    if position_policy_is_complete(policy.position_policy):
+        position_settings = PositionPolicySettings.from_mapping(policy.position_policy)
+        resolved_notional_raw = (
+            details.get("resolved_notional") if isinstance(details, dict) else None
+        )
+        try:
+            resolved_notional = Decimal(str(resolved_notional_raw))
+            managed_capital = Decimal(str(facts["managed_capital"]["total_usd"]))
+        except (ArithmeticError, KeyError, TypeError, ValueError):
+            rejections.reject(
+                "POSITION_POLICY_FACTS_INVALID",
+                "position and campaign-loss limits require current managed capital facts",
+            )
+        tier_policy = ProfitPyramidPolicy.for_risk_tier(
+            domain.RiskTier(proposal.risk_tier), position_settings
+        )
+        if resolved_notional > position_settings.maximum_position_notional:
+            rejections.reject(
+                "MAXIMUM_POSITION_NOTIONAL_EXCEEDED",
+                "proposal exceeds the versioned maximum position notional",
+            )
+        if resolved_proposal_risk > (
+            managed_capital * tier_policy.maximum_campaign_loss_fraction
+        ):
+            rejections.reject(
+                "CAMPAIGN_MAXIMUM_LOSS_EXCEEDED",
+                "proposal exceeds the risk-tier campaign loss fraction",
+            )
     outcome = domain.evaluate_risk(
         risk_policy_input(
             policy,
@@ -699,7 +733,17 @@ class PolicyRiskService(ServiceComponent):
         loss_cooldown: timedelta,
         max_fact_age: timedelta,
         now: datetime,
+        position_policy: dict[str, Any] | None = None,
     ) -> UUID:
+        if position_policy is not None:
+            try:
+                position_policy = PositionPolicySettings.from_mapping(
+                    position_policy
+                ).to_mapping()
+            except ValueError:
+                rejections.reject(
+                    "RISK_POLICY_INVALID", "position policy is incomplete or invalid"
+                )
         with self.database.session_factory.begin() as session:
             team = self.transactions.require_role(session, actor_id, "risk_policy.manage")
             if (
@@ -749,6 +793,7 @@ class PolicyRiskService(ServiceComponent):
                 max_consecutive_losses=max_consecutive_losses,
                 loss_cooldown_seconds=int(loss_cooldown.total_seconds()),
                 max_fact_age_seconds=int(max_fact_age.total_seconds()),
+                position_policy={} if position_policy is None else position_policy,
                 reason=system_state.value,
                 active=True,
                 updated_by=str(actor_id),
@@ -784,6 +829,7 @@ class PolicyRiskService(ServiceComponent):
         reason: str,
         idempotency_key: str,
         now: datetime,
+        position_policy: dict[str, Any] | None = None,
     ) -> UUID:
         operation = "risk_policy.configure"
         values = (max_total_risk, max_account_risk, max_single_loss)
@@ -799,6 +845,15 @@ class PolicyRiskService(ServiceComponent):
             or max_fact_age <= timedelta(0)
         ):
             rejections.reject("RISK_POLICY_INVALID", "all risk limits must be explicitly valid")
+        if position_policy is not None:
+            try:
+                position_policy = PositionPolicySettings.from_mapping(
+                    position_policy
+                ).to_mapping()
+            except ValueError:
+                rejections.reject(
+                    "RISK_POLICY_INVALID", "position policy is incomplete or invalid"
+                )
         payload = {
             "version": version,
             "max_total_risk": str(max_total_risk),
@@ -809,6 +864,7 @@ class PolicyRiskService(ServiceComponent):
             "max_fact_age_seconds": int(max_fact_age.total_seconds()),
             "expected_revision": expected_revision,
             "reason": reason,
+            "position_policy": position_policy,
         }
         with self.database.session_factory.begin() as session:
             team = self.transactions.require_role(session, actor_id, "risk_policy.manage")
@@ -841,6 +897,11 @@ class PolicyRiskService(ServiceComponent):
                 )
             if current is not None:
                 current.active = False
+            effective_position_policy = (
+                current.position_policy
+                if position_policy is None and current is not None
+                else ({} if position_policy is None else position_policy)
+            )
             policy = models.RiskPolicy(
                 team_id=team.team_id,
                 version=version,
@@ -854,6 +915,7 @@ class PolicyRiskService(ServiceComponent):
                 max_consecutive_losses=max_consecutive_losses,
                 loss_cooldown_seconds=int(loss_cooldown.total_seconds()),
                 max_fact_age_seconds=int(max_fact_age.total_seconds()),
+                position_policy=effective_position_policy,
                 reason=reason,
                 active=True,
                 updated_by=str(actor_id),

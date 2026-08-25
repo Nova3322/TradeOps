@@ -825,3 +825,66 @@ def test_operator_risk_changes_require_independent_review_before_execution(
     assert final["policy"]["system_state"] == SystemRiskState.REDUCE_ONLY.value
     executed = next(item for item in final["requests"] if item["request_id"] == str(request_id))
     assert executed["status"] == RiskPolicyChangeStatus.EXECUTED.value
+
+
+def test_position_policy_is_versioned_and_required_before_auto_add_enable(
+    database: Database,
+    service: TradingService,
+) -> None:
+    ids = seed(service)
+
+    with pytest.raises(DomainRejected, match="AUTO_ADD_POLICY_UNCONFIGURED"):
+        service.enable_global_auto_add(
+            ids["admin"],
+            "enable-before-position-policy",
+            reason="must fail before profitable pyramid limits are configured",
+            now=NOW + timedelta(minutes=1),
+        )
+
+    with database.session_factory() as session:
+        current = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+        assert current is not None
+        current_revision = current.revision
+
+    service.configure_risk_policy(
+        actor_id=ids["admin"],
+        version="risk-with-position-policy-v2",
+        max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("50"),
+        max_single_loss=Decimal("10"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
+        max_fact_age=timedelta(minutes=30),
+        position_policy={
+            "maximum_position_notional": "2500",
+            "add_spacing_bps": 250,
+            "bollinger_midline_periods": 20,
+            "low_maximum_adds": 1,
+            "medium_maximum_adds": 2,
+            "high_maximum_adds": 3,
+            "low_maximum_loss_fraction": "0.005",
+            "medium_maximum_loss_fraction": "0.010",
+            "high_maximum_loss_fraction": "0.015",
+        },
+        expected_revision=current_revision,
+        reason="reviewed position and profitable pyramid limits",
+        idempotency_key="configure-position-policy-v2",
+        now=NOW + timedelta(minutes=2),
+    )
+
+    status = service.risk_control_status(
+        ids["admin"], SCOPE, now=NOW + timedelta(minutes=3)
+    )
+    assert status["policy"]["position_policy_configured"] is True
+    assert status["policy"]["position_policy"]["maximum_position_notional"] == "2500"
+
+    service.enable_global_auto_add(
+        ids["admin"],
+        "enable-after-position-policy",
+        reason="position and profitable pyramid limits are reviewed",
+        now=NOW + timedelta(minutes=4),
+    )
+    with database.session_factory() as session:
+        gate = session.get(CapabilityGate, "AUTO_ADD")
+        assert gate is not None
+        assert gate.status == CapabilityStatus.ENABLED.value

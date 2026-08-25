@@ -1765,6 +1765,9 @@ class RiskPolicy(Base):
     max_consecutive_losses: Mapped[int | None] = mapped_column(Integer, nullable=True)
     loss_cooldown_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_fact_age_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    position_policy: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     updated_by: Mapped[str] = mapped_column(String(255), nullable=False)

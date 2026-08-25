@@ -9,6 +9,7 @@ const appShell = read("../src/trading_control_plane/web/app-shell.js");
 const proposals = read("../src/trading_control_plane/web/proposals.js");
 const workspace = read("../src/trading_control_plane/web/workspace.js");
 const reporting = read("../src/trading_control_plane/web/reporting.js");
+const risk = read("../src/trading_control_plane/web/risk.js");
 const i18n = read("../src/trading_control_plane/web/i18n.js");
 
 test("the sidebar readiness label is driven by GET /health/ready and never starts as connected", async () => {
@@ -91,4 +92,27 @@ test("manual proposal intent fields use one aligned responsive grid", () => {
   assert.match(intent, /class="proposal-direction-field"/);
   assert.match(intent, /class="proposal-trigger-field"/);
   assert.doesNotMatch(intent, /class="instrument-field"|class="instrument-picker"/);
+});
+
+test("risk policy editor submits versioned position and profitable-pyramid limits", () => {
+  for (const name of [
+    "maximum_position_notional",
+    "auto_add_spacing_bps",
+    "auto_add_bollinger_midline_periods",
+    "low_maximum_adds",
+    "medium_maximum_adds",
+    "high_maximum_adds",
+    "low_maximum_loss_fraction",
+    "medium_maximum_loss_fraction",
+    "high_maximum_loss_fraction",
+  ]) {
+    assert.match(risk, new RegExp(`name="${name}"`));
+    assert.match(risk, new RegExp(`${name}:`));
+  }
+  assert.match(risk, /data-risk-policy-workflow="\$\{allowed \? 'DIRECT' : 'REVIEWED'\}"/);
+  assert.match(risk, /单账户最大风险/);
+  assert.match(risk, /最大单笔亏损/);
+  assert.match(risk, /最大连续亏损次数/);
+  assert.match(risk, /亏损冷却期（秒）/);
+  assert.match(i18n, /'布林中轨参考周期':'Bollinger midline reference periods'/);
 });
