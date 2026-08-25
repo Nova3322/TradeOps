@@ -810,6 +810,29 @@ class CcxtProFactAdapter:
             )
             return None, capability
 
+    async def _fetch_open_orders(self) -> object:
+        standard = await self._rest("fetchOpenOrders")
+        if self.scope.venue != "BINANCE":
+            return standard
+        conditional = await self._rest(
+            "fetchOpenOrders",
+            None,
+            None,
+            None,
+            {"trigger": True},
+        )
+        if (
+            not isinstance(standard, Sequence)
+            or isinstance(standard, (str, bytes))
+            or not isinstance(conditional, Sequence)
+            or isinstance(conditional, (str, bytes))
+        ):
+            raise DomainRejected(
+                "FACT_ADAPTER_RESPONSE_INVALID",
+                "Binance open-orders response is invalid",
+            )
+        return [*standard, *conditional]
+
     async def verify_connection(self) -> None:
         """Verify credentials with one account read, without building a fact snapshot."""
 
@@ -1267,7 +1290,7 @@ class CcxtProFactAdapter:
         # the Freqtrade pair allowlist here would hide manual/non-Freqtrade
         # positions and orders from reconciliation.
         positions_task = asyncio.create_task(self._rest("fetchPositions"))
-        orders_task = asyncio.create_task(self._rest("fetchOpenOrders"))
+        orders_task = asyncio.create_task(self._fetch_open_orders())
         optional_tasks = {
             "funding_history": asyncio.create_task(
                 self._optional_rest("fetchFundingHistory", None, since, 1_000)
