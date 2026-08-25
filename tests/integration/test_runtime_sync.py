@@ -1750,6 +1750,109 @@ def test_three_timeframe_resonance_creates_one_pending_system_proposal(
     assert new_detail["frozen_payload"]["details"]["default_config_version"] == 2
 
 
+def test_perptape_feed_persists_when_automatic_proposal_fails_safety_checks(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    queries = TradingQueries(database)
+    admin = service.bootstrap_admin("resonance-risk-admin", now=NOW)
+    add_exchange_account_fixture(database, admin, "acct-risk", "BINANCE")
+    perptape_actor = service.create_service_principal(
+        "perptape-risk", admin, now=NOW
+    )
+    service.assign_role(
+        perptape_actor,
+        Role.PROPOSER,
+        admin,
+        now=NOW,
+    )
+    service.register_instrument(
+        actor_id=admin,
+        venue="BINANCE",
+        symbol="BTCUSDT",
+        tick_size=Decimal("0.1"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        contract_multiplier=Decimal("1"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        protection_supported=True,
+        now=NOW,
+    )
+    service.set_proposal_default_config(
+        admin,
+        "resonance-risk-policy",
+        account_id="acct-risk",
+        risk_tier=RiskTier.MEDIUM,
+        notional=Decimal("100"),
+        max_risk=Decimal("2"),
+        invalidation_bps=1_000,
+        expires_in_minutes=480,
+        rationale="proposal safety rejection must not invalidate the feed",
+        auto_proposal_enabled=True,
+        auto_proposal_min_timeframes=3,
+        now=NOW,
+    )
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="fixture-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(0),
+        fetcher=lambda _url, _headers, _timeout: {},
+    )
+    candidates = tuple(
+        client.parse_stream_alert(
+            {
+                "ex": "BN",
+                "s": "BTCUSDT",
+                "cs": "BTCUSDT",
+                "dir": "HH",
+                "p": 100_000,
+                "th": 99_000,
+                "tf": timeframe,
+                "t": int(NOW.timestamp() * 1_000),
+                "u": int(NOW.timestamp() * 1_000),
+                "kr": {"status": "ready"},
+            },
+            event_time=NOW,
+        )
+        for timeframe in ("1h", "4h", "1d")
+    )
+    feed = PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=NOW,
+        fetched_at=NOW,
+        next_allowed_at=NOW,
+        candidates=candidates,
+        source_exchange="BN",
+    )
+    worker = RuntimeSyncWorker(
+        settings=Settings(
+            database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+            perptape_api_key="fixture-key",
+            runtime_sync_enabled=True,
+            _env_file=None,
+        ),
+        database=database,
+        perptape=client,
+        notilt=NoTiltReader(),  # type: ignore[arg-type]
+        notilt_valuator=NoTiltUsdValuator(),
+        clock=lambda: NOW,
+    )
+
+    worker._record_perptape_snapshot(
+        perptape_actor,
+        feed,
+        now=NOW,
+        base_snapshot=None,
+        feed_key="BREAKOUTS:BN",
+    )
+
+    persisted = queries.perptape_feeds(perptape_actor, include_legacy=False)
+    assert len(persisted["BN"].candidates) == 3
+    assert queries.list_proposals(admin, now=NOW) == []
+
+
 def test_websocket_alert_updates_the_existing_authoritative_perptape_feed(
     database: Database,
 ) -> None:
