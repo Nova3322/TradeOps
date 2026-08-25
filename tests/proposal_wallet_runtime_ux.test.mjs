@@ -8,11 +8,11 @@ const webSource = name => fs.readFileSync(
   "utf8",
 );
 
-function capitalContext(providers) {
+function capitalContext(providers, activeProvider = null) {
   const context = vm.createContext({
     console,
     window: {
-      ethereum: {providers},
+      ethereum: activeProvider || {providers},
       addEventListener() {},
       dispatchEvent() {},
     },
@@ -59,6 +59,34 @@ test("capital wallet selection still fails closed when no provider exposes the r
     vm.runInContext("walletProvider(requiredAddress)", context),
     error => error?.code === "WALLET_PROVIDER_SELECTION_REQUIRED",
   );
+});
+
+test("capital wallet requests the browser active provider before rejecting an unexposed account", async () => {
+  const required = "0x3333333333333333333333333333333333333333";
+  const methods = [];
+  const activeProvider = {
+    providers: [],
+    request: async ({method}) => {
+      methods.push(method);
+      if (method === "eth_accounts") return [];
+      if (method === "eth_requestAccounts") return [required];
+      if (method === "eth_chainId") return "0xa4b1";
+      throw new Error(`unexpected ${method}`);
+    },
+  };
+  const unrelated = account => ({
+    request: async ({method}) => method === "eth_accounts" ? [account] : "0xa4b1",
+  });
+  activeProvider.providers = [
+    unrelated("0x1111111111111111111111111111111111111111"),
+    unrelated("0x2222222222222222222222222222222222222222"),
+  ];
+  const context = capitalContext(activeProvider.providers, activeProvider);
+  context.requiredAddress = required;
+  const result = await vm.runInContext("connectedArbitrumWallet(requiredAddress)", context);
+  assert.equal(result.provider, activeProvider);
+  assert.equal(result.account, required);
+  assert.deepEqual(methods, ["eth_accounts", "eth_requestAccounts", "eth_chainId"]);
 });
 
 test("manual proposal validation errors explain the exact safe correction", () => {

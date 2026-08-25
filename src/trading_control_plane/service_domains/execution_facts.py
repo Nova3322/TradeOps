@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from trading_control_plane import (
@@ -107,6 +107,40 @@ def record_account_equity_observation(
 
 
 class FactIngestionExecutionService(ServiceComponent):
+    def runtime_required_fact_symbols(
+        self,
+        binding: PreparedRuntimeAccountBinding,
+    ) -> tuple[str, ...]:
+        """Return only active proposal symbols that need exact flat-position proof."""
+
+        with self.database.session_factory() as session:
+            return tuple(
+                session.scalars(
+                    select(models.Instrument.symbol)
+                    .join(
+                        models.Proposal,
+                        models.Proposal.instrument_id == models.Instrument.instrument_id,
+                    )
+                    .where(
+                        models.Proposal.team_id == binding.team_id,
+                        models.Proposal.environment == binding.environment,
+                        models.Proposal.account_id == binding.account_id,
+                        models.Proposal.venue == binding.venue,
+                        models.Proposal.status.in_(
+                            (
+                                domain.ProposalStatus.PENDING_REVIEW.value,
+                                domain.ProposalStatus.APPROVED.value,
+                            )
+                        ),
+                        models.Proposal.expires_at > func.now(),
+                        models.Instrument.venue == binding.venue,
+                        models.Instrument.active,
+                    )
+                    .distinct()
+                    .order_by(models.Instrument.symbol)
+                ).all()
+            )
+
     @staticmethod
     def _record_fact_adapter_health(
         session: Session,

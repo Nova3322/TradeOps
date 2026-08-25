@@ -192,6 +192,7 @@ def _execution_contract(database: Database, *, enable_live_gate: bool = True) ->
         now=now,
     )
     proposal = fixture.approved_proposal(key="exchange-safety", direction=Direction.LONG)
+    assert service.runtime_required_fact_symbols(runtime_binding) == ("XRPUSDT",)
     opening = fixture.opening_order(proposal=proposal, key="exchange-safety")
     scope = f"LIVE:{fixture.account_id}:BINANCE"
     owner_id = "exchange-safety-sender"
