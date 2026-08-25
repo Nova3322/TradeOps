@@ -443,6 +443,19 @@ function capitalWalletProviders() {
   return providers;
 }
 
+function capitalWalletAccounts(accounts) {
+  return (Array.isArray(accounts) ? accounts : [])
+    .map(account => String(account || ''))
+    .filter(account => /^0x[0-9a-fA-F]{40}$/.test(account));
+}
+
+function capitalWalletAccount(accounts, expectedAddress = '') {
+  const connected = capitalWalletAccounts(accounts);
+  if (!expectedAddress) return connected[0] || '';
+  const expected = String(expectedAddress).toLowerCase();
+  return connected.find(account => account.toLowerCase() === expected) || '';
+}
+
 function isWalletCancellation(error) {
   const message = String(error?.message || '').toLowerCase();
   return Number(error?.code) === 4001 || error?.code === 'ACTION_REJECTED'
@@ -476,7 +489,7 @@ async function walletProvider(expectedAddress) {
     for (const candidate of candidates) {
       try {
         const accounts = await candidate.provider.request({method:'eth_accounts'});
-        if (String(accounts?.[0] || '').toLowerCase() === String(expectedAddress).toLowerCase()) {
+        if (capitalWalletAccount(accounts, expectedAddress)) {
           return candidate.provider;
         }
       } catch (_error) { /* The interactive request below remains authoritative. */ }
@@ -500,13 +513,11 @@ async function connectedArbitrumWallet(expectedAddress) {
     if (isWalletCancellation(error)) throw error;
     throw normalizeCapitalWalletError(error);
   }
-  const account = String(accounts?.[0] || '');
-  if (!/^0x[0-9a-fA-F]{40}$/.test(account)) {
-    throw capitalWalletError('WALLET_ACCOUNT_INVALID', '钱包没有返回有效的账户地址。');
-  }
-  if (expectedAddress && account.toLowerCase() !== String(expectedAddress).toLowerCase()) {
+  const account = capitalWalletAccount(accounts, expectedAddress);
+  if (!account && expectedAddress && capitalWalletAccounts(accounts).length) {
     throw capitalWalletError('WALLET_ACCOUNT_MISMATCH', `请在钱包中切换到本次操作要求的账户 ${expectedAddress}。`);
   }
+  if (!account) throw capitalWalletError('WALLET_ACCOUNT_INVALID', '钱包没有返回有效的账户地址。');
   let currentChain;
   try {
     currentChain = await provider.request({method:'eth_chainId'});
