@@ -2582,6 +2582,9 @@ class FactStreamSupervisor:
                         "account_id": self.adapter.scope.account_id,
                         "attempt": self._reconnect_attempts,
                         "error_type": type(exc).__name__,
+                        "error_code": (
+                            exc.code if isinstance(exc, DomainRejected) else None
+                        ),
                     },
                 )
                 if self._reconnect_attempts > self.max_reconnect_attempts:

@@ -80,6 +80,7 @@ def test_runtime_configs_enable_exact_live_workers_with_full_official_pair_scope
         assert payload["timeframe"] == CONTROL_PLANE_TIMEFRAME
         assert payload["exchange"]["pair_whitelist"] == [definition.pair_pattern]
         assert payload["exchange"]["pair_blacklist"] == []
+        assert payload["exchange"]["enable_ws"] is False
         assert payload["api_server"]["enable_openapi"] is False
         assert payload["telegram"]["enabled"] is False
         if venue == "HYPERLIQUID":
