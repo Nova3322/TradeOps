@@ -818,7 +818,13 @@ class DirectCapitalReceiptService(ServiceComponent):
                 rejections.reject(
                     "VERSION_CONFLICT", "direct capital operation changed; refresh first"
                 )
-            if item.expires_at <= now:
+            irreversible_submission_recorded = any(
+                existing.get("code") == "TREASURY_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET"
+                for existing in item.stages
+            )
+            if item.expires_at <= now and (
+                item.status != "AWAITING_RECEIPT" or not irreversible_submission_recorded
+            ):
                 rejections.reject(
                     "CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired"
                 )
@@ -965,7 +971,22 @@ class DirectCapitalReceiptService(ServiceComponent):
                 rejections.reject(
                     "VERSION_CONFLICT", "direct capital operation changed; refresh first"
                 )
-            if item.expires_at <= now:
+            irreversible_submission_codes = {
+                domain.DirectCapitalPath.VAULT_TO_HYPERLIQUID.value: {
+                    "HYPERLIQUID_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET"
+                },
+                domain.DirectCapitalPath.HYPERLIQUID_TO_VAULT.value: {
+                    "HYPERLIQUID_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET",
+                    "HYPERLIQUID_CLASS_TRANSFER_SUBMITTED_BY_HUMAN_WALLET",
+                },
+            }.get(item.path, set())
+            irreversible_submission_recorded = any(
+                existing.get("code") in irreversible_submission_codes
+                for existing in item.stages
+            )
+            if item.expires_at <= now and (
+                item.status != "AWAITING_RECEIPT" or not irreversible_submission_recorded
+            ):
                 rejections.reject(
                     "CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired"
                 )

@@ -275,6 +275,18 @@ class DirectCapitalSubmissionService(ServiceComponent):
                 rejections.reject(
                     "CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired"
                 )
+            if outcome not in {"SUBMITTED", "CANCELLED"}:
+                rejections.reject(
+                    "CAPITAL_WALLET_OUTCOME_INVALID",
+                    "wallet outcome must be SUBMITTED or CANCELLED",
+                )
+            if outcome == "SUBMITTED":
+                gate = session.get(models.CapabilityGate, "CAPITAL_TRANSFER")
+                if gate is None or gate.status != domain.CapabilityStatus.ENABLED.value:
+                    rejections.reject(
+                        "CAPITAL_TRANSFER_GATE_DISABLED",
+                        "CAPITAL_TRANSFER must remain enabled for wallet submission",
+                    )
             allowed_stages = {
                 domain.DirectCapitalPath.VAULT_TO_BINANCE.value: {
                     "TREASURY_WITHDRAWAL",
@@ -296,6 +308,16 @@ class DirectCapitalSubmissionService(ServiceComponent):
                 rejections.reject(
                     "CAPITAL_WALLET_STAGE_INVALID",
                     "wallet result does not match the frozen capital path",
+                )
+            submission_code = f"{stage}_SUBMITTED_BY_HUMAN_WALLET"
+            if outcome == "SUBMITTED" and any(
+                existing.get("code") == submission_code
+                for existing in item.stages
+                if isinstance(existing, dict)
+            ):
+                rejections.reject(
+                    "CAPITAL_WALLET_SUBMISSION_ALREADY_RECORDED",
+                    "this irreversible wallet submission is already recorded",
                 )
             if stage == "TREASURY_WITHDRAWAL":
                 treasury_preview_codes = {
@@ -347,9 +369,33 @@ class DirectCapitalSubmissionService(ServiceComponent):
                     "prepare a current unsigned wallet request before recording a wallet result",
                 )
             if outcome == "SUBMITTED" and stage.startswith("HYPERLIQUID_"):
+                expected_kind = {
+                    "HYPERLIQUID_DEPOSIT": (
+                        "HYPERLIQUID_ARBITRUM_DEPOSIT_UNSIGNED_TRANSACTION"
+                    ),
+                    "HYPERLIQUID_WITHDRAWAL": (
+                        "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
+                    ),
+                    "HYPERLIQUID_CLASS_TRANSFER": (
+                        "HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST"
+                    ),
+                }.get(stage)
+                artifact = preview["artifact"]
+                if not isinstance(artifact, dict) or artifact.get("kind") != expected_kind:
+                    rejections.reject(
+                        "HYPERLIQUID_CAPITAL_PREFLIGHT_REQUIRED",
+                        "wallet submission does not match the latest frozen Hyperliquid plan",
+                    )
+                if stage in {"HYPERLIQUID_WITHDRAWAL", "HYPERLIQUID_CLASS_TRANSFER"} and (
+                    nonce is None or artifact.get("nonce") != nonce
+                ):
+                    rejections.reject(
+                        "HYPERLIQUID_WALLET_NONCE_MISMATCH",
+                        "wallet submission nonce does not match the latest frozen plan",
+                    )
                 try:
                     preview_expires_at = datetime.fromisoformat(
-                        str(preview["artifact"]["expiresAt"])
+                        str(artifact["expiresAt"])
                     )
                 except (KeyError, TypeError, ValueError) as exc:
                     raise domain.DomainRejected(

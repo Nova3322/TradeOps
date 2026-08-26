@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from conftest import add_exchange_account_fixture
@@ -27,6 +28,7 @@ from trading_control_plane.database import Database
 from trading_control_plane.domain import (
     CapabilityStatus,
     DirectCapitalPath,
+    DomainRejected,
     ExecutionEnvironment,
     Role,
 )
@@ -350,12 +352,12 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
     now = datetime.now(UTC)
     admin = service.bootstrap_admin("hl-capital-admin", now=now)
     _add_live_accounts(database, admin)
-    state: dict[str, object] = {}
     withdrawal_hash = "0x" + "ab" * 32
     withdrawal_arbitrum_hash = "0x" + "cd" * 32
     main = "0x2222222222222222222222222222222222222222"
     agent = "0x6666666666666666666666666666666666666666"
     safe = "0x7777777777777777777777777777777777777777"
+    state: dict[str, object] = {"main": main}
 
     def info_fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
         if payload["type"] == "usdcRouting":
@@ -378,7 +380,7 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
             }
         if payload["type"] == "userRole":
             assert payload["user"] == agent
-            return {"role": "agent", "data": {"user": main}}
+            return {"role": "agent", "data": {"user": state["main"]}}
         assert payload["type"] == "userNonFundingLedgerUpdates"
         return [
             {
@@ -479,6 +481,38 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
             )
             assert created.status_code == 200, created.text
             operation_id = created.json()["operation_id"]
+            blocked_preview = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/hyperliquid-preview",
+                json={
+                    "expected_version": 1,
+                    "final_confirmed": True,
+                    "idempotency_key": "hl-capital-preview-gate-blocked",
+                },
+            )
+            assert blocked_preview.status_code == 422, blocked_preview.text
+            assert blocked_preview.json()["error"]["code"] == "CAPITAL_TRANSFER_GATE_DISABLED"
+            service.set_capability_gate(
+                "CAPITAL_TRANSFER",
+                CapabilityStatus.ENABLED,
+                "integration fixture explicit capital handoff authorization",
+                admin,
+                now=now,
+            )
+            state["main"] = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            rotated_main_preview = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/hyperliquid-preview",
+                json={
+                    "expected_version": 1,
+                    "final_confirmed": True,
+                    "idempotency_key": "hl-capital-preview-rotated-main",
+                },
+            )
+            assert rotated_main_preview.status_code == 422, rotated_main_preview.text
+            assert rotated_main_preview.json()["error"]["code"] in {
+                "HYPERLIQUID_AGENT_SCOPE_MISMATCH",
+                "HYPERLIQUID_MAIN_ACCOUNT_CHANGED",
+            }
+            state["main"] = main
             preview = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/hyperliquid-preview",
                 json={
@@ -490,15 +524,197 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
             assert preview.status_code == 200, preview.text
             artifact = preview.json()["artifact"]
             state["nonce"] = artifact["nonce"]
-            assert preview.json()["automatic_fallback"] is True
+            assert preview.json()["automatic_fallback"] is False
             assert preview.json()["agent_wallet"]["authorized"] is True
             assert artifact["destination"] == safe
+            assert artifact["account"] == main
+            assert artifact["apiBaseUrl"] == "https://api.hyperliquid.xyz"
+            assert artifact["exchangeEndpoint"] == "https://api.hyperliquid.xyz/exchange"
             assert artifact["kind"] == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
             assert artifact["expectedFee"] == "0.2"
             assert artifact["minReceived"] == "99.8"
             assert artifact["signing"] is False and artifact["broadcast"] is False
-            assert preview.json()["data"]["real_transfer_gate"] == "DISABLED"
+            assert preview.json()["data"]["real_transfer_gate"] == "ENABLED"
 
+            forged_artifacts = {
+                "legacy-kind": {**artifact, "kind": "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST"},
+                "wrong-fee": {**artifact, "expectedFee": "1", "minReceived": "99"},
+                "wrong-destination": {**artifact, "destination": main},
+                "wrong-account": {
+                    **artifact,
+                    "account": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                },
+                "wrong-api": {
+                    **artifact,
+                    "apiBaseUrl": "https://example.invalid",
+                    "exchangeEndpoint": "https://example.invalid/exchange",
+                },
+            }
+            wrong_signature_chain = copy.deepcopy(artifact)
+            wrong_signature_chain["action"]["signatureChainId"] = "0x66eee"
+            wrong_signature_chain["typedData"]["message"]["signatureChainId"] = "0x66eee"
+            wrong_signature_chain["exchangeRequestTemplate"]["action"][
+                "signatureChainId"
+            ] = "0x66eee"
+            forged_artifacts["wrong-signature-chain"] = wrong_signature_chain
+            wrong_domain = copy.deepcopy(artifact)
+            wrong_domain["action"]["destinationChainId"] = 0
+            wrong_domain["typedData"]["message"]["destinationChainId"] = 0
+            wrong_domain["exchangeRequestTemplate"]["action"]["destinationChainId"] = 0
+            forged_artifacts["wrong-destination-domain"] = wrong_domain
+            for label, forged in forged_artifacts.items():
+                with pytest.raises(DomainRejected) as rejected:
+                    service.record_direct_capital_hyperliquid_preview(
+                        UUID(operation_id),
+                        admin,
+                        expected_version=2,
+                        final_confirmed=True,
+                        artifact=forged,
+                        idempotency_key=f"hl-capital-forged-{label}",
+                        now=now,
+                    )
+                assert rejected.value.code in {
+                    "HYPERLIQUID_CAPITAL_DIRECTION_INVALID",
+                    "HYPERLIQUID_CCTP_PLAN_REQUIRED",
+                }
+
+            frozen_owned = main
+            with database.session_factory.begin() as session:
+                original = session.get(DirectCapitalOperation, UUID(operation_id))
+                assert original is not None
+                notilt_operation = DirectCapitalOperation(
+                    team_id=original.team_id,
+                    environment="LIVE",
+                    treasury_provider="NOTILT_VAULT",
+                    path=DirectCapitalPath.HYPERLIQUID_TO_VAULT.value,
+                    status="BLOCKED",
+                    receipt_status="NOT_SUBMITTED",
+                    account_id=original.account_id,
+                    venue="HYPERLIQUID",
+                    vault_id="frozen-notilt-vault",
+                    asset="USDC",
+                    network="ARBITRUM",
+                    amount=Decimal("100"),
+                    max_fee=Decimal("1"),
+                    min_received=Decimal("99"),
+                    source_reference=frozen_owned,
+                    destination_reference="0x1111111111111111111111111111111111111111",
+                    stages=[],
+                    blockers=[],
+                    execute_after=None,
+                    expires_at=now + timedelta(minutes=30),
+                    final_confirmed_at=now,
+                    actor_id=admin,
+                    correlation_id=uuid4(),
+                    idempotency_key="hl-capital-notilt-frozen-operation",
+                    version=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(notilt_operation)
+                session.flush()
+                notilt_operation_id = notilt_operation.operation_id
+            notilt_artifact = copy.deepcopy(artifact)
+            notilt_artifact["destination"] = frozen_owned
+            notilt_artifact["action"]["destinationRecipient"] = frozen_owned
+            notilt_artifact["typedData"]["message"]["destinationRecipient"] = frozen_owned
+            notilt_artifact["exchangeRequestTemplate"]["action"][
+                "destinationRecipient"
+            ] = frozen_owned
+            service.record_direct_capital_hyperliquid_preview(
+                notilt_operation_id,
+                admin,
+                expected_version=1,
+                final_confirmed=True,
+                artifact=notilt_artifact,
+                idempotency_key="hl-capital-notilt-frozen-preview",
+                now=now,
+            )
+            rotated_notilt_artifact = copy.deepcopy(notilt_artifact)
+            rotated_notilt_target = "0x4444444444444444444444444444444444444444"
+            rotated_notilt_artifact["destination"] = rotated_notilt_target
+            rotated_notilt_artifact["action"]["destinationRecipient"] = rotated_notilt_target
+            rotated_notilt_artifact["typedData"]["message"][
+                "destinationRecipient"
+            ] = rotated_notilt_target
+            rotated_notilt_artifact["exchangeRequestTemplate"]["action"][
+                "destinationRecipient"
+            ] = rotated_notilt_target
+            with pytest.raises(DomainRejected) as rotated_destination:
+                service.record_direct_capital_hyperliquid_preview(
+                    notilt_operation_id,
+                    admin,
+                    expected_version=2,
+                    final_confirmed=True,
+                    artifact=rotated_notilt_artifact,
+                    idempotency_key="hl-capital-notilt-rotated-preview",
+                    now=now,
+                )
+            assert rotated_destination.value.code == "HYPERLIQUID_CCTP_PLAN_REQUIRED"
+
+            with pytest.raises(DomainRejected) as invalid_outcome:
+                service.record_direct_capital_wallet_submission(
+                    UUID(operation_id),
+                    admin,
+                    expected_version=2,
+                    stage="HYPERLIQUID_WITHDRAWAL",
+                    outcome="SENT",
+                    transaction_hash=None,
+                    action_hash=withdrawal_hash,
+                    nonce=artifact["nonce"],
+                    final_confirmed=True,
+                    idempotency_key="hl-capital-wallet-invalid-outcome",
+                    now=now,
+                )
+            assert invalid_outcome.value.code == "CAPITAL_WALLET_OUTCOME_INVALID"
+
+            with pytest.raises(DomainRejected) as wrong_nonce:
+                service.record_direct_capital_wallet_submission(
+                    UUID(operation_id),
+                    admin,
+                    expected_version=2,
+                    stage="HYPERLIQUID_WITHDRAWAL",
+                    outcome="SUBMITTED",
+                    transaction_hash=None,
+                    action_hash=withdrawal_hash,
+                    nonce=int(artifact["nonce"]) + 1,
+                    final_confirmed=True,
+                    idempotency_key="hl-capital-wallet-wrong-nonce",
+                    now=now,
+                )
+            assert wrong_nonce.value.code == "HYPERLIQUID_WALLET_NONCE_MISMATCH"
+
+            service.set_capability_gate(
+                "CAPITAL_TRANSFER",
+                CapabilityStatus.DISABLED,
+                "integration fixture closes gate after wallet handoff",
+                admin,
+                now=now,
+            )
+            gate_blocked_submission = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/wallet-submission",
+                json={
+                    "expected_version": 2,
+                    "stage": "HYPERLIQUID_WITHDRAWAL",
+                    "outcome": "SUBMITTED",
+                    "action_hash": withdrawal_hash,
+                    "nonce": artifact["nonce"],
+                    "final_confirmed": True,
+                    "idempotency_key": "hl-capital-wallet-submitted-gate-blocked",
+                },
+            )
+            assert gate_blocked_submission.status_code == 422, gate_blocked_submission.text
+            assert (
+                gate_blocked_submission.json()["error"]["code"]
+                == "CAPITAL_TRANSFER_GATE_DISABLED"
+            )
+            service.set_capability_gate(
+                "CAPITAL_TRANSFER",
+                CapabilityStatus.ENABLED,
+                "integration fixture reopens gate for authorized submission",
+                admin,
+                now=now,
+            )
             submitted = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/wallet-submission",
                 json={
@@ -521,6 +737,58 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 "HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED"
                 not in (submitted_operation["blockers"])
             )
+            with pytest.raises(DomainRejected) as duplicate_preview:
+                service.record_direct_capital_hyperliquid_preview(
+                    UUID(operation_id),
+                    admin,
+                    expected_version=3,
+                    final_confirmed=True,
+                    artifact=artifact,
+                    idempotency_key="hl-capital-preview-after-submission",
+                    now=now,
+                )
+            assert (
+                duplicate_preview.value.code
+                == "CAPITAL_WALLET_SUBMISSION_ALREADY_RECORDED"
+            )
+            with pytest.raises(DomainRejected) as duplicate_submission:
+                service.record_direct_capital_wallet_submission(
+                    UUID(operation_id),
+                    admin,
+                    expected_version=3,
+                    stage="HYPERLIQUID_WITHDRAWAL",
+                    outcome="SUBMITTED",
+                    transaction_hash=None,
+                    action_hash=withdrawal_hash,
+                    nonce=artifact["nonce"],
+                    final_confirmed=True,
+                    idempotency_key="hl-capital-wallet-duplicate-submission",
+                    now=now,
+                )
+            assert (
+                duplicate_submission.value.code
+                == "CAPITAL_WALLET_SUBMISSION_ALREADY_RECORDED"
+            )
+            with database.session_factory.begin() as session:
+                submitted_row = session.get(
+                    DirectCapitalOperation,
+                    UUID(operation_id),
+                    with_for_update=True,
+                )
+                assert submitted_row is not None
+                submitted_row.expires_at = now - timedelta(seconds=1)
+            rotated_safe = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            rotated_owned = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            rotated_configuration = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "safe_address": rotated_safe,
+                    "binance_withdrawal_address": rotated_safe,
+                    "owned_arbitrum_address": rotated_owned,
+                    "idempotency_key": "hl-capital-config-rotated-after-submission",
+                },
+            )
+            assert rotated_configuration.status_code == 200, rotated_configuration.text
             ledger = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/hyperliquid-receipt",
                 json={
@@ -553,7 +821,7 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
             )
             assert operation["status"] == "SETTLED"
             assert operation["receipt_status"] == "CONFIRMED"
-            assert arbitrum.json()["data"]["real_transfer_gate"] == "DISABLED"
+            assert arbitrum.json()["data"]["real_transfer_gate"] == "ENABLED"
 
     asyncio.run(scenario())
     with database.session_factory() as session:
@@ -571,6 +839,13 @@ def test_safe_to_hyperliquid_requires_source_receipt_then_settles_both_legs(
     now = datetime.now(UTC)
     admin = service.bootstrap_admin("safe-hyperliquid-deposit-admin", now=now)
     _add_live_accounts(database, admin)
+    service.set_capability_gate(
+        "CAPITAL_TRANSFER",
+        CapabilityStatus.ENABLED,
+        "integration fixture explicit capital handoff authorization",
+        admin,
+        now=now,
+    )
     safe = "0x7777777777777777777777777777777777777777"
     delegate = "0x8888888888888888888888888888888888888888"
     main = "0x2222222222222222222222222222222222222222"
