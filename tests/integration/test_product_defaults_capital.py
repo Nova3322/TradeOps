@@ -1093,6 +1093,13 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
     _add_live_accounts(database, admin)
     treasury = service.create_user("safe-provider-treasury", admin, now=now)
     service.assign_role(treasury, Role.TREASURY_ADMIN, admin, now=now)
+    service.set_capability_gate(
+        "CAPITAL_TRANSFER",
+        CapabilityStatus.ENABLED,
+        "integration fixture explicit Safe wallet submission authorization",
+        admin,
+        now=now,
+    )
     transaction_hash = "0x" + "cd" * 32
     safe = "0x7777777777777777777777777777777777777777"
     destination = "0x3333333333333333333333333333333333333333"
@@ -1299,7 +1306,7 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
             assert body["signature_request"]["calldataReady"] is True
             assert "SAFE_ALLOWANCE_PREFLIGHT_REQUIRED" not in body["blockers"]
             assert "BINANCE_DEPOSIT_PREFLIGHT_REQUIRED" not in body["blockers"]
-            assert body["data"]["real_transfer_gate"] == "DISABLED"
+            assert body["data"]["real_transfer_gate"] == "ENABLED"
             wallet_submission = await client.post(
                 f"/api/capital/direct-operations/{operation_id}/wallet-submission",
                 json={
@@ -2760,6 +2767,13 @@ def test_direct_notilt_release_wallet_flow_reaches_exact_binance_destination(
     now = datetime.now(UTC)
     admin = service.bootstrap_admin("notilt-wallet-flow-admin", now=now)
     _add_live_accounts(database, admin)
+    service.set_capability_gate(
+        "CAPITAL_TRANSFER",
+        CapabilityStatus.ENABLED,
+        "integration fixture explicit NoTilt wallet submission authorization",
+        admin,
+        now=now,
+    )
     request_hash = "0x" + "12" * 32
     execution_hash = "0x" + "34" * 32
     destination_hash = "0x" + "56" * 32
