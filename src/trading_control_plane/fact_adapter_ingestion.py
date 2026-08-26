@@ -96,9 +96,13 @@ def _status(value: object) -> str:
 def _order_type(value: Mapping[str, Any]) -> str:
     trigger_price = _decimal(value.get("trigger_price") or 0, "order.trigger_price")
     assert trigger_price is not None
-    if bool(value.get("reduce_only")) and trigger_price > 0:
+    raw_type = str(value.get("type") or "").upper()
+    triggered_reduce = bool(value.get("reduce_only") or value.get("close_position"))
+    if triggered_reduce and trigger_price > 0 and "TAKE_PROFIT" in raw_type:
+        return "TAKE_PROFIT"
+    if triggered_reduce and trigger_price > 0:
         return "STOPLOSS"
-    return str(value.get("type") or "").upper()
+    return raw_type
 
 
 def _by_symbol(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[Mapping[str, Any]]]:
@@ -216,7 +220,7 @@ def normalize_fact_adapter_snapshot(
                 filled_quantity=Decimal(str(row["filled_quantity"])),
                 stop_price=Decimal(str(row.get("trigger_price") or 0)),
                 reduce_only=bool(row.get("reduce_only")),
-                close_position=False,
+                close_position=bool(row.get("close_position")),
                 observed_at=_time(row.get("observed_at"), "order.observed_at"),
                 actual_order_id=(
                     str(row["actual_order_id"]) if row.get("actual_order_id") is not None else None
@@ -227,7 +231,10 @@ def normalize_fact_adapter_snapshot(
         protection_orders = tuple(
             row
             for row in normalized_orders
-            if row.reduce_only and row.stop_price > 0 and row.status in {"SENT", "PARTIALLY_FILLED"}
+            if row.order_type == "STOPLOSS"
+            and (row.reduce_only or row.close_position)
+            and row.stop_price > 0
+            and row.status in {"SENT", "PARTIALLY_FILLED"}
         )
         if len(protection_orders) > 1:
             raise DomainRejected(
@@ -297,7 +304,11 @@ def normalize_fact_adapter_snapshot(
                     if protection is None
                     else VenueProtection(
                         order_id=protection.order_id,
-                        quantity=protection.ordered_quantity,
+                        quantity=(
+                            abs(Decimal(str(position["quantity"])))
+                            if protection.close_position and position is not None
+                            else protection.ordered_quantity
+                        ),
                         trigger_price=protection.stop_price,
                         observed_at=protection.observed_at,
                     )
