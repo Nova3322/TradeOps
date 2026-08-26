@@ -1111,10 +1111,6 @@ class FactIngestionExecutionService(ServiceComponent):
                     and bound_order is not None
                 ):
                     return existing_exit.intent_id
-            _reject(
-                f"{venue}_PROTECTION_EXIT_INTENT_CONFLICT",
-                "filled Freqtrade protection order conflicts with an existing reduction intent",
-            )
         campaign_fills = session.scalars(
             select(models.VenueFill).where(
                 models.VenueFill.campaign_id == campaign.campaign_id,
@@ -1155,6 +1151,11 @@ class FactIngestionExecutionService(ServiceComponent):
         ).all()
         if not orders:
             return None
+        if existing_reductions:
+            _reject(
+                f"{venue}_PROTECTION_EXIT_INTENT_CONFLICT",
+                "filled Freqtrade protection order conflicts with an existing reduction intent",
+            )
         if len(orders) != 1:
             _reject(
                 f"{venue}_PROTECTION_EXIT_CONFLICT",

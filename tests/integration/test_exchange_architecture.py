@@ -400,6 +400,127 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
         assert authorization is not None and authorization.active is False
 
 
+def test_flat_snapshot_without_protection_fill_keeps_existing_reduction_intent(
+    database: Database,
+) -> None:
+    service = TradingService(database, credential_encryption_key=_credential_key())
+    fixture = WorkflowFixture.create(
+        service,
+        now=NOW,
+        admin_username="existing-reduction-admin",
+        account_id="acct-existing-reduction",
+        venue="BINANCE",
+        environment=ExecutionEnvironment.LIVE,
+        actors=(
+            ActorSpec("proposer", "existing-reduction-proposer", Role.PROPOSER),
+            ActorSpec("reviewer_one", "existing-reduction-reviewer-1", Role.REVIEWER),
+            ActorSpec("reviewer_two", "existing-reduction-reviewer-2", Role.REVIEWER),
+            ActorSpec("operator", "existing-reduction-operator", Role.OPERATOR),
+            ActorSpec(
+                "runtime",
+                "existing-reduction-runtime",
+                Role.OPERATOR,
+                service_principal=True,
+            ),
+        ),
+        symbol="BTCUSDT",
+        tick_size=Decimal("1"),
+        lot_size=Decimal("0.00001"),
+        minimum_notional=Decimal("5"),
+        quote_currency="USDT",
+        risk_version="existing-reduction-risk-v1",
+        max_fact_age=timedelta(minutes=10),
+        mark_price=Decimal("77510"),
+    )
+    service.record_runtime_source_health(
+        fixture.ids["runtime"],
+        {"BINANCE": {"status": "SUCCESS", "items_observed": 1}},
+        scopes={"BINANCE": (fixture.account_id, "BINANCE")},
+        now=NOW,
+    )
+    proposal = fixture.approved_proposal(
+        key="existing-reduction",
+        quantity=Decimal("0.00013"),
+        max_risk=Decimal("1"),
+        details={"invalidation_price": "77123", "allow_auto_add": False},
+    )
+    opening = fixture.opening_order(
+        proposal=proposal,
+        key="existing-reduction",
+        quantity=Decimal("0.00013"),
+    )
+    with database.session_factory.begin() as session:
+        intent = session.get(OrderIntent, opening.intent_id, with_for_update=True)
+        campaign = session.get(Campaign, opening.campaign_id, with_for_update=True)
+        position = session.get(Position, fixture.ids["position"], with_for_update=True)
+        assert intent is not None and campaign is not None and position is not None
+        intent.status = "FILLED"
+        campaign.status = "OPEN"
+        position.quantity = Decimal("0.00013")
+        position.average_entry_price = Decimal("77510")
+        position.mark_price = Decimal("77600")
+        position.observed_at = NOW + timedelta(seconds=1)
+        position.updated_at = NOW + timedelta(seconds=1)
+    reduction_id = service.create_reduction_intent(
+        opening.campaign_id,
+        fixture.ids["operator"],
+        "existing-reduction-intent",
+        candidates=(
+            TargetCandidate(
+                Decimal("0.00010"),
+                TargetUrgency.URGENT,
+                "existing governed reduction",
+            ),
+        ),
+        now=NOW + timedelta(seconds=2),
+    )
+    observed_at = NOW + timedelta(seconds=3)
+    snapshot = VenueReadOnlySnapshot(
+        symbol="BTCUSDT",
+        observed_at=observed_at,
+        instrument=VenueInstrument(
+            symbol="BTCUSDT",
+            tick_size=Decimal("1"),
+            lot_size=Decimal("0.00001"),
+            minimum_notional=Decimal("5"),
+            contract_multiplier=Decimal(1),
+            quote_currency="USDT",
+            collateral_currency="USDT",
+            active=True,
+        ),
+        orders=(),
+        fills=(),
+        position=VenuePosition(
+            quantity=Decimal(0),
+            average_entry_price=Decimal(0),
+            mark_price=Decimal("77600"),
+            observed_at=observed_at,
+        ),
+        equity=VenueEquity(
+            equity=Decimal("100"),
+            available_balance=Decimal("100"),
+            currency="USDT",
+            observed_at=observed_at,
+        ),
+        funding=(),
+        protection=None,
+    )
+
+    service._ingest_read_only_snapshot(
+        fixture.account_id,
+        fixture.ids["operator"],
+        snapshot,
+        venue="BINANCE",
+        environment=ExecutionEnvironment.LIVE,
+        now=observed_at,
+    )
+
+    with database.session_factory() as session:
+        reduction = session.get(OrderIntent, reduction_id)
+        assert reduction is not None
+        assert reduction.kind == IntentKind.REDUCE.value
+
+
 class _WorkerFixture:
     def __init__(
         self,
