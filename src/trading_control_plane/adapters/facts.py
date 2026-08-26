@@ -1005,19 +1005,28 @@ class CcxtProFactAdapter:
                     "FACT_ADAPTER_RESPONSE_INVALID", "CCXT open-order row is invalid"
                 )
             symbol = str(item.get("symbol") or "")
+            info = item.get("info")
+            info_mapping = info if isinstance(info, Mapping) else {}
+            close_position = bool(
+                item.get("closePosition") or info_mapping.get("closePosition")
+            )
             amount = _decimal(item.get("amount"))
             filled = _decimal(item.get("filled"))
+            if amount is None and close_position:
+                # Binance intentionally omits quantity for closePosition algo
+                # orders because the order covers the whole live position.
+                amount = Decimal(0)
             if not symbol or amount is None or filled is None:
                 raise DomainRejected(
                     "FACT_ADAPTER_RESPONSE_INCOMPLETE",
                     "CCXT open-order quantity is unknown",
                 )
-            info = item.get("info")
             actual_order_id = (
-                str(info.get("actualOrderId") or "") if isinstance(info, Mapping) else ""
+                str(info_mapping.get("actualOrderId") or "")
             )
             if not actual_order_id.strip("0"):
                 actual_order_id = ""
+            order_type = str(info_mapping.get("orderType") or item.get("type") or "")
             rows.append(
                 {
                     "order_id": str(item["id"]),
@@ -1026,11 +1035,16 @@ class CcxtProFactAdapter:
                     "native_symbol": self._market_id(markets, symbol),
                     "status": item.get("status"),
                     "side": item.get("side"),
-                    "type": item.get("type"),
+                    "type": order_type,
                     "quantity": _decimal_text(amount, default="0"),
                     "filled_quantity": _decimal_text(filled, default="0"),
                     "trigger_price": _decimal_text(item.get("triggerPrice", item.get("stopPrice"))),
-                    "reduce_only": bool(item.get("reduceOnly")),
+                    "reduce_only": bool(
+                        item.get("reduceOnly")
+                        or info_mapping.get("reduceOnly")
+                        or close_position
+                    ),
+                    "close_position": close_position,
                     "actual_order_id": actual_order_id or None,
                     "observed_at": _timestamp(
                         item.get("lastTradeTimestamp", item.get("timestamp")),

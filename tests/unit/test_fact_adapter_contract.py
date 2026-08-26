@@ -620,6 +620,107 @@ def test_binance_snapshot_includes_conditional_algo_protection_orders() -> None:
     assert normalized.protection.trigger_price == Decimal(62_000)
 
 
+def test_binance_snapshot_normalizes_close_position_bracket_orders() -> None:
+    class BinanceClosePositionExchange(FakeCcxtProExchange):
+        async def fetch_open_orders(
+            self,
+            symbol: str | None = None,
+            since: int | None = None,
+            limit: int | None = None,
+            params: Mapping[str, Any] | None = None,
+        ) -> list[Mapping[str, Any]]:
+            if params != {"trigger": True}:
+                return []
+            common = {
+                "symbol": "BTC/USDT:USDT",
+                "amount": None,
+                "filled": 0,
+                "side": "buy",
+                "type": "market",
+                "status": "open",
+                "reduceOnly": True,
+                "timestamp": int(_NOW.timestamp() * 1_000),
+            }
+            return [
+                {
+                    **common,
+                    "id": "conditional-take-profit",
+                    "triggerPrice": 62_000,
+                    "info": {
+                        "orderType": "TAKE_PROFIT_MARKET",
+                        "closePosition": True,
+                        "quantity": "0.0",
+                    },
+                },
+                {
+                    **common,
+                    "id": "conditional-stop",
+                    "triggerPrice": 58_000,
+                    "info": {
+                        "orderType": "STOP_MARKET",
+                        "closePosition": True,
+                        "quantity": "0.0",
+                    },
+                },
+            ]
+
+    adapter = CcxtProFactAdapter(
+        _scope(),
+        credentials=_credentials("BINANCE"),
+        exchange_factory=lambda *_args: BinanceClosePositionExchange(),
+        clock=lambda: _NOW,
+    )
+
+    snapshot = asyncio.run(adapter.snapshot(reason="INITIAL"))
+    normalized = normalize_fact_adapter_snapshot(snapshot)[0]
+
+    by_id = {order.order_id: order for order in normalized.orders}
+    assert by_id["conditional-take-profit"].order_type == "TAKE_PROFIT"
+    assert by_id["conditional-take-profit"].close_position is True
+    assert by_id["conditional-stop"].order_type == "STOPLOSS"
+    assert by_id["conditional-stop"].ordered_quantity == 0
+    assert by_id["conditional-stop"].close_position is True
+    assert normalized.protection is not None
+    assert normalized.protection.order_id == "conditional-stop"
+    assert normalized.protection.quantity == Decimal(2)
+    assert normalized.protection.trigger_price == Decimal(58_000)
+
+
+def test_binance_snapshot_rejects_missing_quantity_without_close_position() -> None:
+    class BinanceIncompleteOrderExchange(FakeCcxtProExchange):
+        async def fetch_open_orders(
+            self,
+            symbol: str | None = None,
+            since: int | None = None,
+            limit: int | None = None,
+            params: Mapping[str, Any] | None = None,
+        ) -> list[Mapping[str, Any]]:
+            if params == {"trigger": True}:
+                return []
+            return [
+                {
+                    "id": "incomplete-order",
+                    "symbol": "BTC/USDT:USDT",
+                    "amount": None,
+                    "filled": 0,
+                    "side": "buy",
+                    "type": "market",
+                    "status": "open",
+                    "timestamp": int(_NOW.timestamp() * 1_000),
+                }
+            ]
+
+    adapter = CcxtProFactAdapter(
+        _scope(),
+        credentials=_credentials("BINANCE"),
+        exchange_factory=lambda *_args: BinanceIncompleteOrderExchange(),
+        clock=lambda: _NOW,
+    )
+
+    with pytest.raises(DomainRejected, match="FACT_ADAPTER_RESPONSE_INCOMPLETE"):
+        asyncio.run(adapter.snapshot(reason="INITIAL"))
+
+
 def test_binance_snapshot_maps_filled_conditional_order_to_actual_order() -> None:
     class BinanceFilledConditionalOrderExchange(FakeCcxtProExchange):
         async def fetch_my_trades(
