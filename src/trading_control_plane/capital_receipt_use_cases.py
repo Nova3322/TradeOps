@@ -4,11 +4,44 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal, Protocol
+from urllib.parse import urlparse
 from uuid import UUID
 
 from trading_control_plane.adapters.capital import CapitalOperation
+from trading_control_plane.adapters.hyperliquid_capital import (
+    HYPERLIQUID_BRIDGE2_ADDRESS,
+    OFFICIAL_API_HOSTS,
+)
 from trading_control_plane.capital_application import CapitalApplicationRuntime
 from trading_control_plane.domain import DirectCapitalPath, DomainRejected
+
+
+def _frozen_hyperliquid_api_base(artifact: dict[str, object]) -> str | None:
+    """Recover an official API base frozen in a new or historical wallet artifact."""
+
+    raw_base = artifact.get("apiBaseUrl")
+    raw_endpoint = artifact.get("exchangeEndpoint")
+    candidate = str(raw_base or raw_endpoint or "")
+    if not candidate:
+        return None
+    parsed = urlparse(candidate)
+    expected_path = "" if raw_base else "/exchange"
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in OFFICIAL_API_HOSTS
+        or parsed.port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path.rstrip("/") != expected_path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise DomainRejected(
+            "HYPERLIQUID_CAPITAL_API_UNTRUSTED",
+            "stored Hyperliquid preflight does not contain an official frozen API endpoint",
+        )
+    return f"https://{parsed.hostname}"
 
 
 class DirectCapitalBinanceReceiptInput(Protocol):
@@ -359,7 +392,7 @@ class CapitalReceiptUseCases:
                 "source receipt is only valid for outbound Safe capital paths",
             )
         direct_settings, _ = self.runtime.direct_settings(actor_id)
-        safe = direct_settings.capital_direct_safe_address
+        safe = context["source_reference"]
         destination = context["destination_reference"]
         rpc_url = (
             direct_settings.capital_arbitrum_rpc_url
@@ -415,30 +448,7 @@ class CapitalReceiptUseCases:
             allow_expired=True,
         )
         direct_settings, _ = self.runtime.direct_settings(actor_id)
-        direct_settings = self.runtime.hyperliquid_settings(
-            actor_id=actor_id,
-            account_id=(None if context["account_id"] is None else str(context["account_id"])),
-            direct_settings=direct_settings,
-        )
         capital_account_id = None if context["account_id"] is None else str(context["account_id"])
-        main_account = self.runtime.execute_string(
-            actor_id=actor_id,
-            account_id=capital_account_id,
-            venue="HYPERLIQUID",
-            operation=CapitalOperation.HYPERLIQUID_RESOLVE_MAIN,
-            parameters={
-                "base_url": direct_settings.hyperliquid_base_url,
-                "account_address": direct_settings.hyperliquid_account_address,
-                "api_wallet_address": direct_settings.hyperliquid_api_wallet_address,
-            },
-        )
-        owned = direct_settings.capital_direct_owned_arbitrum_address
-        bridge = direct_settings.capital_direct_hyperliquid_bridge_address
-        if main_account is None or owned is None or bridge is None:
-            raise DomainRejected(
-                "HYPERLIQUID_CAPITAL_SCOPE_MISSING",
-                "receipt verification requires the frozen main account, owned wallet and Bridge2",
-            )
         artifact = next(
             (
                 item
@@ -453,6 +463,16 @@ class CapitalReceiptUseCases:
                 "HYPERLIQUID_CAPITAL_PREFLIGHT_REQUIRED",
                 "prepare a current unsigned Hyperliquid wallet request before verifying receipts",
             )
+        main_account = str(
+            artifact.get("account") or artifact.get("expectedCreditAccount") or ""
+        )
+        bridge = str(artifact.get("bridge") or HYPERLIQUID_BRIDGE2_ADDRESS)
+        if not main_account:
+            raise DomainRejected(
+                "HYPERLIQUID_CAPITAL_PLAN_INVALID",
+                "stored Hyperliquid preflight is missing its frozen main account",
+            )
+        frozen_api_base = _frozen_hyperliquid_api_base(artifact)
         try:
             prepared_at = datetime.fromisoformat(str(artifact["preparedAt"]))
         except (KeyError, TypeError, ValueError) as exc:
@@ -506,7 +526,7 @@ class CapitalReceiptUseCases:
                 venue="HYPERLIQUID",
                 operation=CapitalOperation.HYPERLIQUID_VERIFY_LEDGER,
                 parameters={
-                    "base_url": direct_settings.hyperliquid_base_url,
+                    "base_url": frozen_api_base or direct_settings.hyperliquid_base_url,
                     "main_account": main_account,
                     "receipt_kind": (
                         "DEPOSIT"
@@ -659,19 +679,19 @@ class CapitalReceiptUseCases:
                 "treasury receipt does not match a recorded human wallet submission",
             )
         direct_settings, _ = self.runtime.direct_settings(actor_id)
-        owned = direct_settings.capital_direct_owned_arbitrum_address
-        if owned is None:
+        owned = context["source_reference"]
+        vault = context["destination_reference"]
+        if owned is None or vault is None:
             raise DomainRejected(
-                "CAPITAL_OWNED_ARBITRUM_ADDRESS_MISSING",
-                "treasury receipt verification requires the authorized owned wallet",
+                "CAPITAL_FROZEN_SCOPE_MISSING",
+                "treasury receipt verification requires the frozen source and destination",
             )
         if context["treasury_provider"] == "NOTILT_VAULT":
             chain_id = self.runtime.notilt_chain_id_for_network(str(context["network"]))
-            _, vault = self.runtime.configured_notilt_scope(chain_id)
             receipt = self.runtime.notilt.verify_receipt(
                 chain_id=chain_id,
-                vault=vault,
-                agent=owned,
+                vault=str(vault),
+                agent=str(owned),
                 receipt_kind="DEPOSIT",
                 transaction_hash=request.transaction_hash,
                 min_confirmations=direct_settings.notilt_min_confirmations[chain_id],
@@ -688,15 +708,14 @@ class CapitalReceiptUseCases:
                 ),
             }
         else:
-            safe = direct_settings.capital_direct_safe_address
             rpc_url = (
                 direct_settings.capital_arbitrum_rpc_url
                 or direct_settings.safe_spending_arbitrum_rpc_url
             )
-            if safe is None or rpc_url is None:
+            if rpc_url is None:
                 raise DomainRejected(
                     "SAFE_SPENDING_LIMIT_NOT_CONFIGURED",
-                    "Safe address and trusted Arbitrum RPC are required for receipt verification",
+                    "a trusted Arbitrum RPC is required for Safe receipt verification",
                 )
             evidence = self.runtime.execute_mapping(
                 actor_id=actor_id,
@@ -706,8 +725,8 @@ class CapitalReceiptUseCases:
                 parameters={
                     "rpc_url": rpc_url,
                     "transaction_hash": request.transaction_hash,
-                    "sender": owned,
-                    "recipient": safe,
+                    "sender": str(owned),
+                    "recipient": str(vault),
                     "amount": str(context["min_received"]),
                     "min_confirmations": (direct_settings.notilt_arbitrum_min_confirmations),
                 },

@@ -137,6 +137,21 @@ test("latest capital operation stays visible and pending Hyperliquid receipts re
   }
 });
 
+test("Hyperliquid treasury handoff exposes the frozen Arbitrum CCTP route", () => {
+  for (const marker of [
+    "提现到 Arbitrum · Circle CCTP（0.2 USDC）",
+    "目标网络",
+    "Arbitrum（Circle CCTP）",
+    "固定协议费",
+    "预计到账",
+    "Arbitrum 收款地址",
+    "任何旧 Bridge 路由都会被拒绝",
+  ]) {
+    assert.equal(source.includes(marker), true, marker);
+  }
+  assert.equal(source.includes("Hyperliquid Bridge 提现（1 USDC）"), false);
+});
+
 test("operation receipts open by default and paginate at bounded 50 or 100 rows", () => {
   for (const marker of [
     'class="capital-activity-disclosure" open',

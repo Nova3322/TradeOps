@@ -1629,18 +1629,24 @@ async function renderCapitalCenter() {
     const walletBoundary = hyperliquidPreview ? renderCapitalHandoffCard({
       eyebrow:'钱包确认',
       title:hyperliquidPreview.artifact.kind === 'HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST'
-        ? 'Hyperliquid CCTP 提现（0.2 USDC）'
-        : hyperliquidPreview.artifact.kind === 'HYPERLIQUID_WITHDRAW3_TYPED_REQUEST'
-          ? 'Hyperliquid Bridge 提现（1 USDC）'
-          : hyperliquidPreview.artifact.kind === 'HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST'
+        ? '提现到 Arbitrum · Circle CCTP（0.2 USDC）'
+        : hyperliquidPreview.artifact.kind === 'HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST'
             ? 'Hyperliquid 主账户资金归集'
             : 'Hyperliquid Arbitrum 入金',
       facts:[
         {label:'金额', value:`${hyperliquidPreview.artifact.amount} USDC`},
+        ...(hyperliquidPreview.artifact.kind === 'HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST' ? [
+          {label:'目标网络', value:'Arbitrum（Circle CCTP）'},
+          {label:'固定协议费', value:`${hyperliquidPreview.artifact.expectedFee} USDC`},
+          {label:'预计到账', value:`${hyperliquidPreview.artifact.minReceived} USDC`},
+          {label:'Arbitrum 收款地址', value:hyperliquidPreview.artifact.destination, mono:true},
+        ] : []),
         {label:'账户', value:hyperliquidPreview.artifact.account || hyperliquidPreview.artifact.from || '', mono:true},
         ...(hyperliquidPreview.artifact.action?.token ? [{label:'协议资产', value:hyperliquidPreview.artifact.action.token, mono:true}] : []),
       ],
-      note:'主钱包或有效多签只需在钱包中核对 EIP-712 或链上交易。',
+      note:hyperliquidPreview.artifact.kind === 'HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST'
+        ? '钱包可能显示协议动作 sendToEvmWithData；服务端已冻结 Arbitrum CCTP 域、0.2 USDC 费用和上方收款地址，任何旧 Bridge 路由都会被拒绝。'
+        : '主钱包或有效多签只需在钱包中核对 EIP-712 或链上交易。',
     }) : '';
     const treasuryWallet = operation.path === 'HYPERLIQUID_TO_VAULT' && providerPreviewReady ? renderCapitalHandoffCard({
       eyebrow:'最终入账',

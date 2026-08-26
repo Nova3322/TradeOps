@@ -637,6 +637,11 @@ class CapitalDirectUseCases:
                 "HYPERLIQUID_CAPITAL_PATH_INVALID",
                 "this capital operation does not contain a Hyperliquid leg",
             )
+        if self.runtime.direct_action_snapshot(actor_id)["real_transfer_gate"] != "ENABLED":
+            raise DomainRejected(
+                "CAPITAL_TRANSFER_GATE_DISABLED",
+                "durable CAPITAL_TRANSFER gate is disabled",
+            )
         direct_settings, _ = self.runtime.direct_settings(actor_id)
         direct_settings = self.runtime.hyperliquid_settings(
             actor_id=actor_id,
@@ -672,6 +677,19 @@ class CapitalDirectUseCases:
                 "HYPERLIQUID_MAIN_ACCOUNT_MISSING",
                 "a Hyperliquid main account or resolvable authorized API wallet is required",
             )
+        frozen_main_account = str(
+            context[
+                "destination_reference"
+                if path is DirectCapitalPath.VAULT_TO_HYPERLIQUID
+                else "source_reference"
+            ]
+            or ""
+        )
+        if not frozen_main_account or frozen_main_account.lower() != main_account.lower():
+            raise DomainRejected(
+                "HYPERLIQUID_MAIN_ACCOUNT_CHANGED",
+                "the selected Hyperliquid main account no longer matches the frozen operation",
+            )
         if path is DirectCapitalPath.VAULT_TO_HYPERLIQUID:
             if not any(
                 isinstance(stage, dict)
@@ -682,12 +700,7 @@ class CapitalDirectUseCases:
                     "TREASURY_SOURCE_RECEIPT_REQUIRED",
                     "confirm the exact Safe source transfer before preparing the bridge deposit",
                 )
-            frozen_wallet = str(context["destination_reference"] or "")
-            if frozen_wallet.lower() != main_account.lower():
-                raise DomainRejected(
-                    "HYPERLIQUID_DEPOSIT_ACCOUNT_MISMATCH",
-                    "the frozen Safe destination is not the selected Hyperliquid main account",
-                )
+            frozen_wallet = frozen_main_account
             rpc_url = (
                 direct_settings.capital_arbitrum_rpc_url
                 or direct_settings.safe_spending_arbitrum_rpc_url
@@ -739,7 +752,7 @@ class CapitalDirectUseCases:
                     "destination": (
                         str(context["destination_reference"])
                         if context["treasury_provider"] == "SAFE_SPENDING_LIMIT"
-                        else owned
+                        else str(context["source_reference"])
                     ),
                     "amount": str(context["amount"]),
                     "max_fee": context["max_fee"],
@@ -761,7 +774,7 @@ class CapitalDirectUseCases:
             "preview_kind": artifact["kind"],
             "transport": "HYPERLIQUID_OFFICIAL_PROTOCOL_HUMAN_WALLET_HANDOFF",
             "agent_wallet": artifact["agentWallet"],
-            "automatic_fallback": True,
+            "automatic_fallback": False,
             "fallback_reason": artifact["fallbackReason"],
             "signing": False,
             "broadcast": False,

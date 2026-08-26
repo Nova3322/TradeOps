@@ -250,9 +250,12 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
                 side="SELL",
                 order_type="STOPLOSS",
                 reduce_only=True,
-                status="FILLED",
+                # Freqtrade may report a completed exchange-side stop as cancelled
+                # after the trade closes. The exact authoritative fill must heal
+                # this persisted observation before campaign recovery.
+                status="CANCELLED",
                 ordered_quantity=Decimal("0.00013"),
-                filled_quantity=Decimal("0.00013"),
+                filled_quantity=Decimal(0),
                 observed_at=closed_at,
                 updated_at=closed_at,
             )

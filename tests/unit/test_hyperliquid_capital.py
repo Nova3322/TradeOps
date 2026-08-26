@@ -95,7 +95,7 @@ def test_cctp_withdrawal_uses_current_route_and_unsigned_human_wallet() -> None:
     assert artifact["broadcast"] is False
 
 
-def test_legacy_withdrawal_is_used_only_when_official_route_falls_back() -> None:
+def test_legacy_withdrawal_route_is_rejected_for_new_treasury_operations() -> None:
     def fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
         if payload["type"] == "usdcRouting":
             return {"depositRoute": "bridge", "withdrawalRoute": "bridge"}
@@ -106,20 +106,18 @@ def test_legacy_withdrawal_is_used_only_when_official_route_falls_back() -> None
         assert payload["type"] == "userRole"
         return {"role": "agent", "data": {"user": MAIN}}
 
-    artifact = HyperliquidCapitalGateway(info_fetcher=fetcher).prepare_withdrawal(
-        base_url="https://api.hyperliquid.xyz",
-        main_account=MAIN,
-        api_wallet_address=AGENT,
-        destination=MAIN,
-        amount="10",
-        max_fee="1",
-        now=NOW,
-    )
+    with pytest.raises(DomainRejected) as blocked:
+        HyperliquidCapitalGateway(info_fetcher=fetcher).prepare_withdrawal(
+            base_url="https://api.hyperliquid.xyz",
+            main_account=MAIN,
+            api_wallet_address=AGENT,
+            destination=MAIN,
+            amount="10",
+            max_fee="1",
+            now=NOW,
+        )
 
-    assert artifact["kind"] == "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST"
-    assert artifact["withdrawalRoute"] == "BRIDGE"
-    assert artifact["expectedFee"] == "1"
-    assert artifact["minReceived"] == "9"
+    assert blocked.value.code == "HYPERLIQUID_CCTP_WITHDRAWAL_REQUIRED"
 
 
 def test_bridge_deposit_is_fixed_to_native_usdc_and_official_bridge() -> None:

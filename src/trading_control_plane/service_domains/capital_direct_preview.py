@@ -8,6 +8,81 @@ from uuid import UUID
 from trading_control_plane import domain, models, notilt, rejections
 from trading_control_plane.service_component import ServiceComponent
 
+CCTP_TREASURY_FEE = Decimal("0.2")
+CCTP_ARBITRUM_SIGNATURE_CHAIN_ID = "0xa4b1"
+CCTP_ARBITRUM_DOMAIN = 3
+CCTP_OFFICIAL_API_BASES = frozenset(
+    {"https://api.hyperliquid.xyz", "https://api.hyperliquid-testnet.xyz"}
+)
+
+
+def _require_cctp_treasury_withdrawal(
+    item: models.DirectCapitalOperation,
+    artifact: dict[str, Any],
+) -> None:
+    """Reject any new treasury withdrawal plan outside the frozen Arbitrum CCTP scope."""
+
+    action = artifact.get("action")
+    typed_data = artifact.get("typedData")
+    request_template = artifact.get("exchangeRequestTemplate")
+    destination = str(artifact.get("destination", ""))
+    expected_destination = str(
+        (
+            item.destination_reference
+            if item.treasury_provider == "SAFE_SPENDING_LIMIT"
+            else item.source_reference
+        )
+        or ""
+    )
+    expected_source = str(item.source_reference or "")
+    api_base = str(artifact.get("apiBaseUrl", "")).rstrip("/")
+    try:
+        amount = Decimal(str(artifact["amount"]))
+        expected_fee = Decimal(str(artifact["expectedFee"]))
+        min_received = Decimal(str(artifact["minReceived"]))
+    except (InvalidOperation, KeyError, TypeError, ValueError):
+        rejections.reject(
+            "HYPERLIQUID_CCTP_PLAN_REQUIRED",
+            "Hyperliquid treasury withdrawal must contain exact Arbitrum CCTP amounts",
+        )
+    valid = (
+        item.asset == "USDC"
+        and item.network == "ARBITRUM"
+        and artifact.get("kind") == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
+        and artifact.get("withdrawalRoute") == "CCTP"
+        and api_base in CCTP_OFFICIAL_API_BASES
+        and artifact.get("exchangeEndpoint") == f"{api_base}/exchange"
+        and str(artifact.get("account", "")).lower() == expected_source.lower()
+        and amount == item.amount
+        and expected_fee == CCTP_TREASURY_FEE
+        and min_received == item.amount - CCTP_TREASURY_FEE
+        and isinstance(action, dict)
+        and action.get("type") == "sendToEvmWithData"
+        and str(action.get("signatureChainId", "")).lower()
+        == CCTP_ARBITRUM_SIGNATURE_CHAIN_ID
+        and action.get("destinationChainId") == CCTP_ARBITRUM_DOMAIN
+        and action.get("destinationRecipient") == artifact.get("destination")
+        and action.get("amount") == artifact.get("amount")
+        and str(action.get("token", "")).startswith("USDC:0x")
+        and action.get("addressEncoding") == "hex"
+        and action.get("data") == "0x"
+        and action.get("nonce") == artifact.get("nonce")
+        and isinstance(typed_data, dict)
+        and typed_data.get("primaryType") == "HyperliquidTransaction:SendToEvmWithData"
+        and typed_data.get("message") == action
+        and isinstance(request_template, dict)
+        and request_template.get("action") == action
+        and request_template.get("nonce") == artifact.get("nonce")
+        and request_template.get("signature") is None
+    )
+    valid = valid and bool(expected_source) and bool(expected_destination)
+    valid = valid and destination.lower() == expected_destination.lower()
+    if not valid:
+        rejections.reject(
+            "HYPERLIQUID_CCTP_PLAN_REQUIRED",
+            "Hyperliquid treasury withdrawal must remain exact Arbitrum CCTP to the frozen target",
+        )
+
 
 class DirectCapitalPreviewService(ServiceComponent):
     def record_direct_capital_unsigned_preview(
@@ -458,12 +533,31 @@ class DirectCapitalPreviewService(ServiceComponent):
                 item.venue,
                 team_id=item.team_id,
             )
+            irreversible_submission_codes = {
+                "HYPERLIQUID_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET",
+                "HYPERLIQUID_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET",
+                "HYPERLIQUID_CLASS_TRANSFER_SUBMITTED_BY_HUMAN_WALLET",
+            }
+            if any(
+                existing.get("code") in irreversible_submission_codes
+                for existing in item.stages
+                if isinstance(existing, dict)
+            ):
+                rejections.reject(
+                    "CAPITAL_WALLET_SUBMISSION_ALREADY_RECORDED",
+                    "an irreversible wallet submission is already recorded for this operation",
+                )
+            gate = session.get(models.CapabilityGate, "CAPITAL_TRANSFER")
+            if gate is None or gate.status != domain.CapabilityStatus.ENABLED.value:
+                rejections.reject(
+                    "CAPITAL_TRANSFER_GATE_DISABLED",
+                    "CAPITAL_TRANSFER must remain enabled before wallet handoff",
+                )
             expected_kinds = {
                 domain.DirectCapitalPath.VAULT_TO_HYPERLIQUID.value: (
                     {"HYPERLIQUID_ARBITRUM_DEPOSIT_UNSIGNED_TRANSACTION"}
                 ),
                 domain.DirectCapitalPath.HYPERLIQUID_TO_VAULT.value: {
-                    "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST",
                     "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST",
                     "HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST",
                 },
@@ -473,6 +567,11 @@ class DirectCapitalPreviewService(ServiceComponent):
                     "HYPERLIQUID_CAPITAL_DIRECTION_INVALID",
                     "Hyperliquid wallet request does not match the frozen capital path",
                 )
+            if (
+                item.path == domain.DirectCapitalPath.HYPERLIQUID_TO_VAULT.value
+                and kind == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
+            ):
+                _require_cctp_treasury_withdrawal(item, artifact)
             payload = {
                 "operation_id": str(operation_id),
                 "expected_version": expected_version,
@@ -497,7 +596,6 @@ class DirectCapitalPreviewService(ServiceComponent):
                     "CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired"
                 )
             if kind in {
-                "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST",
                 "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST",
             }:
                 try:
@@ -557,10 +655,7 @@ class DirectCapitalPreviewService(ServiceComponent):
                     *(
                         {"HYPERLIQUID_WITHDRAWAL_REVALIDATION_REQUIRED"}
                         if kind
-                        in {
-                            "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST",
-                            "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST",
-                        }
+                        == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
                         else set()
                     ),
                 }
