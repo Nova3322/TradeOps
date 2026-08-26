@@ -701,6 +701,7 @@ class CcxtProFactAdapter:
             "fetchBalance": "fetch_balance",
             "fetchPositions": "fetch_positions",
             "fetchOpenOrders": "fetch_open_orders",
+            "fetchOrders": "fetch_orders",
             "fetchMyTrades": "fetch_my_trades",
             "fetchFundingHistory": "fetch_funding_history",
             "fetchFundingRates": "fetch_funding_rates",
@@ -724,6 +725,7 @@ class CcxtProFactAdapter:
             "fetchBalance",
             "fetchPositions",
             "fetchOpenOrders",
+            "fetchOrders",
             "fetchMyTrades",
             "fetchFundingHistory",
         }:
@@ -1010,6 +1012,12 @@ class CcxtProFactAdapter:
                     "FACT_ADAPTER_RESPONSE_INCOMPLETE",
                     "CCXT open-order quantity is unknown",
                 )
+            info = item.get("info")
+            actual_order_id = (
+                str(info.get("actualOrderId") or "") if isinstance(info, Mapping) else ""
+            )
+            if not actual_order_id.strip("0"):
+                actual_order_id = ""
             rows.append(
                 {
                     "order_id": str(item["id"]),
@@ -1023,6 +1031,7 @@ class CcxtProFactAdapter:
                     "filled_quantity": _decimal_text(filled, default="0"),
                     "trigger_price": _decimal_text(item.get("triggerPrice", item.get("stopPrice"))),
                     "reduce_only": bool(item.get("reduceOnly")),
+                    "actual_order_id": actual_order_id or None,
                     "observed_at": _timestamp(
                         item.get("lastTradeTimestamp", item.get("timestamp")),
                         fallback=observed_at,
@@ -1361,22 +1370,77 @@ class CcxtProFactAdapter:
                 )
             )
             failed_trades = any(failed is not None for _rows, failed in trade_results)
+            fill_rows = [
+                row
+                for rows, _failed in trade_results
+                if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes))
+                for row in rows
+            ]
             optional["fills"] = (
                 (
                     None,
                     "fetchMyTrades",
                 )
                 if failed_trades
-                else (
-                    [
-                        row
-                        for rows, _failed in trade_results
-                        if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes))
-                        for row in rows
-                    ],
-                    None,
+                else (fill_rows, None)
+            )
+            observed_order_ids = {str(row["order_id"]) for row in order_rows}
+            unmatched_fill_ids = {
+                str(row.get("order") or "")
+                for row in fill_rows
+                if row.get("order") is not None and str(row.get("order")) not in observed_order_ids
+            }
+            unmatched_symbols = tuple(
+                sorted(
+                    {
+                        str(row.get("symbol"))
+                        for row in fill_rows
+                        if str(row.get("order") or "") in unmatched_fill_ids
+                        and str(row.get("symbol") or "") in tracked_symbols
+                    }
                 )
             )
+            if unmatched_symbols:
+                conditional_results = await asyncio.gather(
+                    *(
+                        self._optional_rest(
+                            "fetchOrders",
+                            symbol,
+                            since,
+                            1_000,
+                            {"trigger": True},
+                        )
+                        for symbol in unmatched_symbols
+                    )
+                )
+                failed_conditional = any(
+                    failed is not None for _rows, failed in conditional_results
+                )
+                if failed_conditional:
+                    optional["conditional_orders"] = (None, "fetchOrders")
+                else:
+                    conditional_rows = [
+                        row
+                        for rows, _failed in conditional_results
+                        if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes))
+                        for row in rows
+                    ]
+                    normalized_conditional = tuple(
+                        row
+                        for row in self._orders(conditional_rows, markets, now)
+                        if row.get("actual_order_id") in unmatched_fill_ids
+                    )
+                    merged_orders = {str(row["order_id"]): row for row in order_rows}
+                    merged_orders.update(
+                        {str(row["order_id"]): row for row in normalized_conditional}
+                    )
+                    order_rows = tuple(
+                        sorted(
+                            merged_orders.values(),
+                            key=lambda row: str(row["order_id"]),
+                        )
+                    )
+                    optional["conditional_orders"] = (conditional_rows, None)
         funding_rates, funding_rates_error = await self._optional_rest(
             "fetchFundingRates", list(tracked_symbols)
         )
@@ -2518,6 +2582,9 @@ class FactStreamSupervisor:
                         "account_id": self.adapter.scope.account_id,
                         "attempt": self._reconnect_attempts,
                         "error_type": type(exc).__name__,
+                        "error_code": (
+                            exc.code if isinstance(exc, DomainRejected) else None
+                        ),
                     },
                 )
                 if self._reconnect_attempts > self.max_reconnect_attempts:

@@ -38,6 +38,7 @@ from trading_control_plane.models import (
     Campaign,
     ExchangeAccount,
     OrderIntent,
+    Proposal,
     RiskReservation,
     SenderLease,
     TradingAuthorization,
@@ -222,6 +223,35 @@ def _execution_contract(database: Database, *, enable_live_gate: bool = True) ->
         fencing_token=fencing_token,
         now=now,
     )
+
+
+def test_runtime_fact_scope_keeps_open_campaign_after_proposal_expires(
+    database: Database,
+) -> None:
+    contract = _execution_contract(database)
+    binding = contract.service.runtime_account_bindings()[0]
+
+    with database.session_factory.begin() as session:
+        intent = session.get(OrderIntent, contract.intent_id)
+        assert intent is not None
+        campaign = session.get(Campaign, intent.campaign_id, with_for_update=True)
+        assert campaign is not None
+        proposal = session.get(Proposal, campaign.proposal_id, with_for_update=True)
+        assert proposal is not None
+        proposal.status = "EXPIRED"
+        proposal.expires_at = contract.now - timedelta(seconds=1)
+        campaign.status = "OPEN"
+
+    assert contract.service.runtime_required_fact_symbols(binding) == ("XRPUSDT",)
+
+    with database.session_factory.begin() as session:
+        intent = session.get(OrderIntent, contract.intent_id)
+        assert intent is not None
+        campaign = session.get(Campaign, intent.campaign_id, with_for_update=True)
+        assert campaign is not None
+        campaign.status = "CLOSED"
+
+    assert contract.service.runtime_required_fact_symbols(binding) == ()
 
 
 class _OutcomeUnknownWorker:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -111,10 +112,10 @@ class FactIngestionExecutionService(ServiceComponent):
         self,
         binding: PreparedRuntimeAccountBinding,
     ) -> tuple[str, ...]:
-        """Return only active proposal symbols that need exact flat-position proof."""
+        """Return active proposal and open-campaign symbols requiring exact facts."""
 
         with self.database.session_factory() as session:
-            return tuple(
+            proposal_symbols = set(
                 session.scalars(
                     select(models.Instrument.symbol)
                     .join(
@@ -136,10 +137,27 @@ class FactIngestionExecutionService(ServiceComponent):
                         models.Instrument.venue == binding.venue,
                         models.Instrument.active,
                     )
-                    .distinct()
-                    .order_by(models.Instrument.symbol)
                 ).all()
             )
+            campaign_symbols = set(
+                session.scalars(
+                    select(models.Instrument.symbol)
+                    .join(
+                        models.Campaign,
+                        models.Campaign.instrument_id == models.Instrument.instrument_id,
+                    )
+                    .where(
+                        models.Campaign.team_id == binding.team_id,
+                        models.Campaign.environment == binding.environment,
+                        models.Campaign.account_id == binding.account_id,
+                        models.Campaign.venue == binding.venue,
+                        models.Campaign.status != domain.CampaignStatus.CLOSED.value,
+                        models.Instrument.venue == binding.venue,
+                        models.Instrument.active,
+                    )
+                ).all()
+            )
+            return tuple(sorted(proposal_symbols | campaign_symbols))
 
     @staticmethod
     def _record_fact_adapter_health(
@@ -1080,8 +1098,7 @@ class FactIngestionExecutionService(ServiceComponent):
                 bound_order = session.scalar(
                     select(models.VenueOrder).where(
                         models.VenueOrder.order_intent_id == existing_exit.intent_id,
-                        models.VenueOrder.client_order_id
-                        == f"ftp-{position.position_id.hex[:28]}",
+                        models.VenueOrder.client_order_id == f"ftp-{position.position_id.hex[:28]}",
                         models.VenueOrder.venue_order_id.in_(
                             {fill.order_id for fill in external_fills if fill.order_id}
                         ),
@@ -1112,9 +1129,7 @@ class FactIngestionExecutionService(ServiceComponent):
         expected_side = "SELL" if signed_campaign_quantity > 0 else "BUY"
         expected_quantity = abs(signed_campaign_quantity)
         external_order_ids = {
-            fill.order_id
-            for fill in external_fills
-            if fill.order_id and fill.side == expected_side
+            fill.order_id for fill in external_fills if fill.order_id and fill.side == expected_side
         }
         if not external_order_ids:
             return None
@@ -1227,9 +1242,7 @@ class FactIngestionExecutionService(ServiceComponent):
             cleanup_fill.order_intent_id = exit_intent.intent_id
             cleanup_fill.campaign_id = campaign.campaign_id
         leverage_audit = (
-            "LEGACY_UNAVAILABLE"
-            if authorization.leverage is None
-            else str(authorization.leverage)
+            "LEGACY_UNAVAILABLE" if authorization.leverage is None else str(authorization.leverage)
         )
         self.transactions.audit(
             session,
@@ -1238,8 +1251,7 @@ class FactIngestionExecutionService(ServiceComponent):
             object_type="OrderIntent",
             object_id=exit_intent.intent_id,
             reason=(
-                f"order={order.venue_order_id};fills={len(cleanup_fills)};"
-                f"leverage={leverage_audit}"
+                f"order={order.venue_order_id};fills={len(cleanup_fills)};leverage={leverage_audit}"
             ),
             correlation_id=exit_intent.correlation_id,
             object_version=1,
@@ -1406,6 +1418,7 @@ class FactIngestionExecutionService(ServiceComponent):
             record_account_equity_observation(session, equity, recorded_at=now)
 
             order_count = 0
+            actual_order_bindings: dict[str, models.VenueOrder] = {}
             for external_order in snapshot.orders:
                 intent: models.OrderIntent | None = None
                 current_order = session.scalar(
@@ -1470,10 +1483,23 @@ class FactIngestionExecutionService(ServiceComponent):
                     )
                     session.add(current_order)
                 else:
+                    exact_binance_protection = bool(
+                        venue == "BINANCE"
+                        and external_order.actual_order_id
+                        and current_order.venue_order_id == external_order.order_id
+                        and current_order.client_order_id.startswith("ftp-")
+                        and current_order.order_type == "STOPLOSS"
+                        and current_order.reduce_only
+                        and external_order.order_type == "STOPLOSS"
+                        and (external_order.reduce_only or external_order.close_position)
+                    )
                     if (
                         current_order.account_id != account_id
                         or current_order.instrument_id != instrument.instrument_id
-                        or current_order.client_order_id != external_order.client_order_id
+                        or (
+                            current_order.client_order_id != external_order.client_order_id
+                            and not exact_binance_protection
+                        )
                         or current_order.side != external_order.side
                         or current_order.order_type != external_order.order_type
                         or current_order.reduce_only
@@ -1493,6 +1519,14 @@ class FactIngestionExecutionService(ServiceComponent):
                     current_order.filled_quantity = external_order.filled_quantity
                     current_order.observed_at = external_order.observed_at
                     current_order.updated_at = now
+                if external_order.actual_order_id:
+                    existing_binding = actual_order_bindings.get(external_order.actual_order_id)
+                    if existing_binding is not None and existing_binding is not current_order:
+                        _reject(
+                            f"{venue}_FACT_CONFLICT",
+                            "multiple orders claim the same actual execution order",
+                        )
+                    actual_order_bindings[external_order.actual_order_id] = current_order
                 order_count += 1
             session.flush()
 
@@ -1504,7 +1538,9 @@ class FactIngestionExecutionService(ServiceComponent):
                         confirmed_fill_quantity_by_order.get(external_fill.order_id, Decimal(0))
                         + external_fill.quantity
                     )
+            recovery_fills: list[venue_read_only.VenueFill] = []
             for external_fill in snapshot.fills:
+                recovery_fill = external_fill
                 current_fill = session.scalar(
                     select(models.VenueFill).where(
                         models.VenueFill.team_id == team.team_id,
@@ -1523,6 +1559,13 @@ class FactIngestionExecutionService(ServiceComponent):
                         models.VenueOrder.venue_order_id == external_fill.order_id,
                     )
                 )
+                if venue_order is None and external_fill.order_id:
+                    venue_order = actual_order_bindings.get(external_fill.order_id)
+                    if venue_order is not None:
+                        recovery_fill = replace(
+                            external_fill,
+                            order_id=venue_order.venue_order_id,
+                        )
                 if venue_order is None:
                     # Older Freqtrade observations used a synthetic trade identity instead of
                     # the exchange order id. Bind only an exact, unique, recent fully-filled
@@ -1653,6 +1696,7 @@ class FactIngestionExecutionService(ServiceComponent):
                     and current_fill.order_intent_id != intent.intent_id
                 ):
                     _reject(f"{venue}_FACT_CONFLICT", "venue fill identity changed binding")
+                recovery_fills.append(recovery_fill)
                 fill_count += 1
 
             session.flush()
@@ -1665,7 +1709,7 @@ class FactIngestionExecutionService(ServiceComponent):
                 environment=environment,
                 instrument_id=instrument.instrument_id,
                 position=position,
-                external_fills=snapshot.fills,
+                external_fills=tuple(recovery_fills),
                 now=now,
             )
             bound_orders = session.scalars(

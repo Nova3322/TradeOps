@@ -271,6 +271,11 @@ def _runtime_config(
         )
     exchange["pair_whitelist"] = [definition.pair_pattern]
     exchange["pair_blacklist"] = []
+    # The complete executable catalog is retained for governed Force Entry,
+    # but ControlPlaneOnlyStrategy never consumes exchange candle signals.
+    # Subscribing every catalog pair through CCXT Pro needlessly saturates a
+    # production worker; Freqtrade's RPC WebSocket remains enabled separately.
+    exchange["enable_ws"] = False
     if definition.venue == "HYPERLIQUID":
         if not hip3_dexes:
             rejections.reject(

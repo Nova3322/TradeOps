@@ -129,7 +129,9 @@ def normalize_fact_adapter_snapshot(
     positions = _by_symbol(snapshot.positions)
     orders = _by_symbol(snapshot.orders)
     history_incomplete = bool(
-        {"fetchMyTrades", "fetchFundingHistory"}.intersection(snapshot.unknown_fields)
+        {"fetchMyTrades", "fetchFundingHistory", "fetchOrders"}.intersection(
+            snapshot.unknown_fields
+        )
     )
     fills = {} if history_incomplete else _by_symbol(snapshot.fills)
     marks = _by_symbol(snapshot.marks)
@@ -216,6 +218,9 @@ def normalize_fact_adapter_snapshot(
                 reduce_only=bool(row.get("reduce_only")),
                 close_position=False,
                 observed_at=_time(row.get("observed_at"), "order.observed_at"),
+                actual_order_id=(
+                    str(row["actual_order_id"]) if row.get("actual_order_id") is not None else None
+                ),
             )
             for row in orders.get(native, [])
         )

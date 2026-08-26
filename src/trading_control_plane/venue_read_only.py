@@ -30,6 +30,9 @@ class VenueOrder:
     reduce_only: bool
     close_position: bool
     observed_at: datetime
+    # Binance Portfolio Margin reports an algorithm order id separately from
+    # the actual exchange order id attached to the resulting fill.
+    actual_order_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
