@@ -64,6 +64,9 @@ from trading_control_plane.venue_read_only import (
 from trading_control_plane.venue_read_only import (
     VenueFill as ReadOnlyVenueFill,
 )
+from trading_control_plane.venue_read_only import (
+    VenueOrder as ReadOnlyVenueOrder,
+)
 
 NOW = datetime.now(UTC).replace(microsecond=0)
 
@@ -117,17 +120,29 @@ def test_openapi_contains_only_account_facts_and_backend_neutral_execution(
 
 
 @pytest.mark.parametrize("legacy_missing_leverage", [False, True])
+@pytest.mark.parametrize("binance_actual_order_id", [False, True])
 def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
     database: Database,
     legacy_missing_leverage: bool,
+    binance_actual_order_id: bool,
 ) -> None:
+    venue = "BINANCE" if binance_actual_order_id else "HYPERLIQUID"
+    symbol = "BTCUSDT" if binance_actual_order_id else "BTC"
+    currency = "USDT" if binance_actual_order_id else "USDC"
+    protection_order_id = (
+        "bn-protection-algo-order" if binance_actual_order_id else "hl-protection-order"
+    )
+    actual_order_id = (
+        "bn-protection-actual-order" if binance_actual_order_id else protection_order_id
+    )
+    protection_fill_id = "bn-protection-fill" if binance_actual_order_id else "hl-protection-fill"
     service = TradingService(database, credential_encryption_key=_credential_key())
     fixture = WorkflowFixture.create(
         service,
         now=NOW,
         admin_username="protection-fill-admin",
         account_id="acct-protection-fill",
-        venue="HYPERLIQUID",
+        venue=venue,
         environment=ExecutionEnvironment.LIVE,
         actors=(
             ActorSpec("proposer", "protection-fill-proposer", Role.PROPOSER),
@@ -141,19 +156,19 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
                 service_principal=True,
             ),
         ),
-        symbol="BTC",
+        symbol=symbol,
         tick_size=Decimal("1"),
         lot_size=Decimal("0.00001"),
         minimum_notional=Decimal("5"),
-        quote_currency="USDC",
+        quote_currency=currency,
         risk_version="protection-fill-risk-v1",
         max_fact_age=timedelta(minutes=10),
         mark_price=Decimal("77510"),
     )
     service.record_runtime_source_health(
         fixture.ids["runtime"],
-        {"HYPERLIQUID": {"status": "SUCCESS", "items_observed": 1}},
-        scopes={"HYPERLIQUID": (fixture.account_id, "HYPERLIQUID")},
+        {venue: {"status": "SUCCESS", "items_observed": 1}},
+        scopes={venue: (fixture.account_id, venue)},
         now=NOW,
     )
     proposal = fixture.approved_proposal(
@@ -221,7 +236,7 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
         session.add(
             VenueFillFact(
                 team_id=campaign.team_id,
-                venue="HYPERLIQUID",
+                venue=venue,
                 venue_fill_id="hl-entry-fill",
                 order_intent_id=intent.intent_id,
                 campaign_id=campaign.campaign_id,
@@ -232,7 +247,7 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
                 quantity=Decimal("0.00013"),
                 price=Decimal("77510"),
                 fee=Decimal("0.004352"),
-                fee_currency="USDC",
+                fee_currency=currency,
                 slippage_cost=Decimal(0),
                 executed_at=entry_at,
             )
@@ -245,7 +260,7 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
                 venue=campaign.venue,
                 environment=campaign.environment,
                 instrument_id=campaign.instrument_id,
-                venue_order_id="hl-protection-order",
+                venue_order_id=protection_order_id,
                 client_order_id=f"ftp-{position.position_id.hex[:28]}",
                 side="SELL",
                 order_type="STOPLOSS",
@@ -262,28 +277,47 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
         )
 
     snapshot = VenueReadOnlySnapshot(
-        symbol="BTC",
+        symbol=symbol,
         observed_at=closed_at,
         instrument=VenueInstrument(
-            symbol="BTC",
+            symbol=symbol,
             tick_size=Decimal("1"),
             lot_size=Decimal("0.00001"),
             minimum_notional=Decimal("5"),
             contract_multiplier=Decimal(1),
-            quote_currency="USDC",
-            collateral_currency="USDC",
+            quote_currency=currency,
+            collateral_currency=currency,
             active=True,
         ),
-        orders=(),
+        orders=(
+            (
+                ReadOnlyVenueOrder(
+                    order_id=protection_order_id,
+                    client_order_id="exchange-generated-client-id",
+                    status="FILLED",
+                    side="SELL",
+                    order_type="STOPLOSS",
+                    ordered_quantity=Decimal("0.00013"),
+                    filled_quantity=Decimal(0),
+                    stop_price=Decimal("77123"),
+                    reduce_only=True,
+                    close_position=False,
+                    observed_at=closed_at,
+                    actual_order_id=actual_order_id,
+                ),
+            )
+            if binance_actual_order_id
+            else ()
+        ),
         fills=(
             ReadOnlyVenueFill(
-                fill_id="hl-protection-fill",
-                order_id="hl-protection-order",
+                fill_id=protection_fill_id,
+                order_id=actual_order_id,
                 side="SELL",
                 quantity=Decimal("0.00013"),
                 price=Decimal("77066"),
                 fee=Decimal("0.004328"),
-                fee_currency="USDC",
+                fee_currency=currency,
                 executed_at=closed_at,
             ),
         ),
@@ -296,7 +330,7 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
         equity=VenueEquity(
             equity=Decimal("100"),
             available_balance=Decimal("100"),
-            currency="USDC",
+            currency=currency,
             observed_at=closed_at,
         ),
         funding=(),
@@ -306,7 +340,7 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
         fixture.account_id,
         fixture.ids["runtime"],
         snapshot,
-        venue="HYPERLIQUID",
+        venue=venue,
         environment=ExecutionEnvironment.LIVE,
         now=closed_at,
     )
@@ -314,7 +348,7 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
         fixture.account_id,
         fixture.ids["runtime"],
         snapshot,
-        venue="HYPERLIQUID",
+        venue=venue,
         environment=ExecutionEnvironment.LIVE,
         now=closed_at + timedelta(seconds=1),
     )
@@ -333,10 +367,10 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
         assert exit_intent.trigger_source == "FREQTRADE_PROTECTION_FILLED"
         assert exit_intent.leverage == expected_recovery_leverage
         protection_order = session.scalar(
-            select(VenueOrder).where(VenueOrder.venue_order_id == "hl-protection-order")
+            select(VenueOrder).where(VenueOrder.venue_order_id == protection_order_id)
         )
         cleanup_fill = session.scalar(
-            select(VenueFillFact).where(VenueFillFact.venue_fill_id == "hl-protection-fill")
+            select(VenueFillFact).where(VenueFillFact.venue_fill_id == protection_fill_id)
         )
         assert protection_order is not None and cleanup_fill is not None
         assert protection_order.order_intent_id == exit_intent.intent_id
@@ -345,7 +379,7 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
 
     reconciled_at = closed_at + timedelta(seconds=2)
     reconciliation_id = service.reconcile_scope(
-        f"LIVE:{fixture.account_id}:HYPERLIQUID",
+        f"LIVE:{fixture.account_id}:{venue}",
         fixture.ids["operator"],
         now=reconciled_at,
     )
@@ -364,6 +398,7 @@ def test_authoritative_freqtrade_protection_fill_closes_campaign_without_resend(
         assert campaign.status == "CLOSED"
         assert reservation is not None and reservation.status == "RELEASED"
         assert authorization is not None and authorization.active is False
+
 
 class _WorkerFixture:
     def __init__(
@@ -474,9 +509,7 @@ class _WorkerFixture:
             assert method == "POST" and payload is not None
             assert payload["pair"] == self.pair
             requested_quantity = (
-                Decimal(str(payload["stakeamount"]))
-                * Decimal(str(payload["leverage"]))
-                / self.mark
+                Decimal(str(payload["stakeamount"])) * Decimal(str(payload["leverage"])) / self.mark
             )
             self.leverage = Decimal(str(payload["leverage"]))
             quantity = self.entry_order_quantity or requested_quantity

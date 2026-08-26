@@ -47,6 +47,7 @@ class FakeCcxtProExchange:
             "fetchBalance": True,
             "fetchPositions": True,
             "fetchOpenOrders": True,
+            "fetchOrders": True,
             "fetchMyTrades": True,
             "fetchFundingHistory": True,
             "fetchFundingRates": True,
@@ -124,6 +125,17 @@ class FakeCcxtProExchange:
                 "timestamp": int(_NOW.timestamp() * 1_000),
             }
         ]
+
+    async def fetch_orders(
+        self,
+        symbol: str,
+        since: int,
+        limit: int,
+        params: Mapping[str, Any] | None = None,
+    ) -> list[Mapping[str, Any]]:
+        assert symbol == "BTC/USDT:USDT" and since > 0 and limit == 1_000
+        assert params == {"trigger": True}
+        return []
 
     async def fetch_my_trades(
         self,
@@ -606,6 +618,70 @@ def test_binance_snapshot_includes_conditional_algo_protection_orders() -> None:
     assert normalized.protection.order_id == "conditional-stop"
     assert normalized.protection.quantity == Decimal(2)
     assert normalized.protection.trigger_price == Decimal(62_000)
+
+
+def test_binance_snapshot_maps_filled_conditional_order_to_actual_order() -> None:
+    class BinanceFilledConditionalOrderExchange(FakeCcxtProExchange):
+        async def fetch_my_trades(
+            self,
+            symbol: str | None,
+            since: int,
+            limit: int,
+        ) -> list[Mapping[str, Any]]:
+            assert symbol == "BTC/USDT:USDT" and since > 0 and limit == 1_000
+            return [
+                {
+                    "id": "stop-fill",
+                    "order": "actual-stop-order",
+                    "symbol": "BTC/USDT:USDT",
+                    "amount": 2,
+                    "price": 59_000,
+                    "side": "buy",
+                    "fee": {"cost": 0.1, "currency": "USDT"},
+                    "timestamp": int(_NOW.timestamp() * 1_000),
+                }
+            ]
+
+        async def fetch_orders(
+            self,
+            symbol: str,
+            since: int,
+            limit: int,
+            params: Mapping[str, Any] | None = None,
+        ) -> list[Mapping[str, Any]]:
+            assert symbol == "BTC/USDT:USDT" and since > 0 and limit == 1_000
+            assert params == {"trigger": True}
+            return [
+                {
+                    "id": "conditional-stop",
+                    "clientOrderId": "exchange-generated-client-id",
+                    "symbol": "BTC/USDT:USDT",
+                    "amount": 2,
+                    "filled": 0,
+                    "side": "buy",
+                    "type": "stop_market",
+                    "status": "closed",
+                    "triggerPrice": 62_000,
+                    "reduceOnly": True,
+                    "timestamp": int(_NOW.timestamp() * 1_000),
+                    "info": {"actualOrderId": "actual-stop-order"},
+                }
+            ]
+
+    adapter = CcxtProFactAdapter(
+        _scope(),
+        credentials=_credentials("BINANCE"),
+        exchange_factory=lambda *_args: BinanceFilledConditionalOrderExchange(),
+        clock=lambda: _NOW,
+    )
+
+    snapshot = asyncio.run(adapter.snapshot(reason="INITIAL"))
+    normalized = normalize_fact_adapter_snapshot(snapshot)[0]
+
+    conditional = next(order for order in normalized.orders if order.order_id == "conditional-stop")
+    assert conditional.status == "FILLED"
+    assert conditional.actual_order_id == "actual-stop-order"
+    assert normalized.fills[0].order_id == "actual-stop-order"
 
 
 def test_binance_conditional_order_failure_blocks_complete_snapshot() -> None:
