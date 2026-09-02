@@ -17,6 +17,6 @@
   "dependencies": {
     "@notilt/sdk": "0.2.0",
     "@safe-global/safe-modules-deployments": "^3.0.9",
-    "viem": "2.55.19"
+    "viem": "2.56.0"
   }
 }
